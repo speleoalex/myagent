@@ -5,6 +5,11 @@ system prompt + tools). Stack: FastAPI backend (`server/`), vanilla
 JS/Bootstrap 5 frontend (`ui/`), plain-JSON storage. A separate, optional
 messaging-bridge server lives in `connectors/`.
 
+It is designed to run **without internet**: a local model serves the
+inference, the `local_search` tool answers from the offline library
+(`~/myagent/library`), and `http_request` reaches IoT devices on the LAN.
+The web tools are an optional online extra.
+
 ## Repository layout
 
 ```text

@@ -1,13 +1,28 @@
 # MyAgent
 
-**Self-hosted AI agent platform.** Define atomic agents — a model, a system
-prompt and a set of tools — and run them against any OpenAI-compatible LLM
-backend: [llama.cpp](https://github.com/ggml-org/llama.cpp),
-[Ollama](https://ollama.com), or a remote API (OpenAI, OpenRouter, Groq, …).
-Plain-JSON storage, a vanilla-JS web UI, no database, no framework.
+**An AI assistant that keeps working when the internet doesn't.**
+
+MyAgent is a self-hosted agent platform designed to be useful **offline**: it
+runs local models (via [llama.cpp](https://github.com/ggml-org/llama.cpp) or
+[Ollama](https://ollama.com)), answers from a **local knowledge library** — a
+full offline Wikipedia plus your own notes and documents — and talks to the
+**IoT and home-automation devices on your LAN**. No cloud account, no
+outbound traffic required. Point it at a remote API instead if you want to;
+that's a choice, not a dependency.
+
+Think: a boat, a mountain hut, a lab with no uplink, a blackout, or simply a
+home where you'd rather not send everything to someone else's server.
 
 ## Features
 
+- **Works offline** — local model + local knowledge + local devices. Nothing
+  in the core path needs an internet connection
+- **Offline knowledge library** — drop Wikipedia ZIM archives and your own
+  Markdown/text documents into `~/myagent/library/`; the `local_search` tool
+  searches them full-text (see [Offline knowledge](#offline-knowledge-the-library))
+- **IoT & home automation** — agents call your devices' local HTTP APIs
+  (Home Assistant, Shelly, Tasmota, ESPHome, Hue …) over the LAN
+  (see [Local devices](#local-devices--home-automation))
 - **Atomic agents** — each agent is just `model + system prompt + tools`,
   editable from the UI and stored as a JSON file
 - **Agent delegation** — agents can call other agents (`call_agent`), with
@@ -21,19 +36,19 @@ Plain-JSON storage, a vanilla-JS web UI, no database, no framework.
   re-attach to, stop button, session history
 - **Telegram connector** — bridge any agent to a Telegram bot
   (see [connectors/](connectors/README.md))
-- **Offline knowledge** — search local Markdown notes and Wikipedia ZIM
-  archives with the `local_search` tool
+- **Optional online tools** — web search and page reading are there when you
+  *do* have connectivity, in a separate agent
 - **i18n UI** — English and Italian out of the box
 
 ## Requirements
 
 - **Python 3.10+** (3.12 recommended)
-- At least one LLM backend:
+- At least one LLM backend — for a fully offline setup, a local one:
   - llama.cpp server (`http://localhost:8080`), or
   - Ollama (`http://localhost:11434`), or
-  - any remote OpenAI-compatible API with an API key
-- **Node.js** *(optional)* — only for the web tools (`browse_web`,
-  `web_search`, `web_research`)
+  - any remote OpenAI-compatible API with an API key *(needs internet)*
+- **`libzim`** *(optional)* — to search offline Wikipedia archives
+- **Node.js + Chrome/Chromium** *(optional)* — only for the online web tools
 
 ## Quickstart
 
@@ -48,6 +63,71 @@ Open **<http://127.0.0.1:8888>**, pick an agent and chat. On first run MyAgent
 seeds `~/myagent/` with the bundled agents, models and tools; point the
 default model at your backend under **Models** if it isn't llama.cpp on
 `localhost:8080`.
+
+## Offline knowledge (the library)
+
+Everything in `~/myagent/library/` becomes searchable knowledge for your
+agents. Two kinds of files live side by side in that folder:
+
+| Put in `~/myagent/library/` | Searched how |
+|---|---|
+| **Wikipedia / ZIM archives** (`*.zim`) | full-text index built into the archive |
+| **Your notes and documents** (`.md`, `.txt`, `.rst`) | keyword scorer, results returned per section with `file › heading` |
+
+The **Librarian** agent is wired to it out of the box: ask it a question and
+it searches the library and answers from what it finds — citing the article
+or file — or tells you the library doesn't cover it. The **Master** agent
+delegates general-knowledge questions to it before touching the web.
+
+### Getting an offline Wikipedia
+
+Download a `.zim` from [Kiwix](https://download.kiwix.org/zim/wikipedia/) and
+drop it in the folder — no import step, no restart:
+
+```bash
+mkdir -p ~/myagent/library
+cd ~/myagent/library
+# ~12 GB for the full English "mini" edition; smaller editions exist
+wget https://download.kiwix.org/zim/wikipedia/wikipedia_en_all_mini.zim
+server/.venv/bin/pip install libzim      # required for .zim files only
+```
+
+Several archives can coexist (e.g. English + Italian); an agent can restrict
+a search to one edition with the tool's `lang` parameter.
+
+### Your own documents
+
+Copy Markdown or plain-text files (manuals, procedures, notes, wiki exports)
+straight into `~/myagent/library/` — subfolders are scanned recursively.
+PDFs, images and audio are **not** searched directly: convert them first with
+the `document_extract` tool (ask an agent to extract the file and write the
+Markdown into the library), then they become searchable like any other note.
+
+Each agent can also have its **own** knowledge folder instead of the shared
+one — the `local_search` tool takes an optional `path`.
+
+## Local devices & home automation
+
+Agents reach the devices on your LAN through the `http_request` tool, which
+speaks the local HTTP APIs that home-automation gear already exposes — Home
+Assistant, Shelly, Tasmota, ESPHome, Philips Hue, ESP32 sketches, a Raspberry
+Pi you wrote yourself. This all happens inside your network: no vendor cloud,
+no internet.
+
+The bundled **Home Automation** agent is a template: open it in
+**Agents → Home Automation** and list your devices in the *My devices*
+section of its system prompt, one line each with the exact URL to call —
+
+```text
+- Living room light (Shelly): ON -> GET http://192.168.1.50/relay/0?turn=on
+- Home Assistant: POST http://192.168.1.10:8123/api/services/light/turn_on
+  header {"Authorization": "Bearer TOKEN"}  body {"entity_id": "light.kitchen"}
+```
+
+— then just say *"turn on the living room light"*. For protocols beyond HTTP
+(MQTT, Zigbee, serial, GPIO) write a tool: a folder with a `tool.json` and a
+`run` script that shells out to `mosquitto_pub`, a Python library, or
+whatever your hardware speaks — see [docs/TOOLS.md](docs/TOOLS.md).
 
 ## Security
 
@@ -70,7 +150,7 @@ MyAgent keeps all runtime state under `~/myagent/`, decoupled from the code:
 ├── config/      # agents, models (API keys, 0600), settings — small & precious: back this up
 ├── connectors/  # Telegram bindings (bot tokens, 0600) and grants
 ├── tools/       # tool folders (hot-reloaded; user/AI-created tools live here)
-├── library/     # optional offline knowledge (ZIM archives, notes) for local_search
+├── library/     # your offline knowledge: Wikipedia ZIM archives + notes/documents
 ├── workspace/   # working directory for agents' file operations
 ├── sessions/    # chat state: current, history, connector channels
 └── logs/        # debug.log (only with MYAGENT_DEBUG=1)
@@ -102,14 +182,23 @@ The Telegram connector server has its own variables — see
 
 ## Bundled agents and models
 
-First run seeds four agents — **Master** (orchestrator that delegates via
-`call_agent`), **System Administrator** (shell + file tools), **Web
-Researcher** (search + browse) and **Conversation** — and three local model
-configs: `llama-cpp` (whatever your llama.cpp server is serving on `:8080`),
-`gemma4` and `qwen3` (Ollama). The Ollama entries are models with native
-tool-calling support, which is what makes agents usable with small local
-models. All of them are editable and individually re-importable from the UI
-(**Agents → Native agents**, **Tools → Native tools**).
+First run seeds six agents:
+
+| Agent | Does | Needs internet? |
+|---|---|---|
+| **Master** | orchestrator: routes your question to the right agent via `call_agent` | no |
+| **Librarian** | answers from the offline library (Wikipedia ZIM + your documents) | no |
+| **Home Automation** | drives IoT devices over their local HTTP APIs — customize with your devices | no |
+| **System Administrator** | shell and file operations on the machine | no |
+| **Conversation** | plain chat | no |
+| **Web Researcher** | searches and reads web pages | yes |
+
+…plus three model configs: `llama-cpp` (whatever your llama.cpp server is
+serving on `:8080`), `gemma4` and `qwen3` (Ollama). The Ollama entries are
+models with native tool-calling support, which is what makes agents usable
+with small local models. Everything is editable and individually
+re-importable from the UI (**Agents → Native agents**, **Tools → Native
+tools**).
 
 ## Optional features
 
@@ -120,7 +209,7 @@ dependencies are present (`./setup.sh` reports what it finds):
 |----------------------------------|--------------------------------------|---------------------------------------------------|
 | Web search & browsing            | `web_search`, `browse_web`, `web_research` | Node.js + Chrome/Chromium (`PUPPETEER_EXECUTABLE_PATH` honored) |
 | Document extraction (PDF, images, audio) | `document_extract`           | `poppler-utils`, `tesseract`, `pandoc`, `ffmpeg` (each optional) |
-| Offline Wikipedia / notes search | `local_search`                       | `pip install libzim` (ZIM archives only; plain notes work without) |
+| Offline Wikipedia archives       | `local_search`                       | `pip install libzim` (`.zim` files only — Markdown/text notes need nothing) |
 | Voice notes on Telegram          | connectors server                    | `ffmpeg` (uses faster-whisper)                    |
 
 ## Run as a service
