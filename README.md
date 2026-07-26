@@ -51,11 +51,15 @@ default model at your backend under **Models** if it isn't llama.cpp on
 
 ## Security
 
-> **The API has no authentication and includes tools that execute shell
-> commands as the server user.** By default it binds to `127.0.0.1` — keep it
-> that way unless the network is trusted. To expose it, put an authenticating
-> reverse proxy in front, or at minimum understand that anyone who can reach
-> the port can run commands on the machine.
+> **MyAgent includes tools that execute shell commands as the server user.**
+> By default the API has no authentication and binds to `127.0.0.1` — keep it
+> that way unless the network is trusted. Before exposing it, set
+> `MYAGENT_API_KEY`: every `/api` request then requires the key, either as an
+> `Authorization: Bearer <key>` header or as an `?api_key=<key>` query
+> parameter. The web UI asks for the key on first use (or open it once as
+> `http://host:8888/?api_key=<key>` — the key is stored in the browser and
+> stripped from the URL). For anything internet-facing, still prefer an
+> authenticating reverse proxy on top.
 
 ## Runtime layout
 
@@ -83,6 +87,7 @@ Everything is configured via environment variables (none are required):
 |----------------------|------------------------|--------------------------------------------|
 | `MYAGENT_HOST`       | `127.0.0.1`            | bind address (see [Security](#security))   |
 | `MYAGENT_PORT`       | `8888`                 | bind port                                  |
+| `MYAGENT_API_KEY`    | *(unset = no auth)*    | require this key on every `/api` request (Bearer header or `?api_key=`) |
 | `MYAGENT_CONFIG`     | `~/myagent/config`     | agents, models, settings                   |
 | `MYAGENT_TOOLS`      | `~/myagent/tools`      | tool folders                               |
 | `MYAGENT_WORKSPACE`  | `~/myagent/workspace`  | agents' file-operation root                |

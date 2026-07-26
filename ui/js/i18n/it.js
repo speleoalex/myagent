@@ -9,6 +9,10 @@ I18n.translations.it = {
     'nav.chat': 'Chat',
     'nav.settings': 'Impostazioni',
 
+    // Auth (solo quando il server imposta MYAGENT_API_KEY)
+    'auth.promptKey': 'Questo server richiede una API key.\nInseriscila per continuare (puoi anche aprire la UI con ?api_key=... nell\'URL):',
+    'auth.required': 'API key richiesta',
+
     // Common
     'common.id': 'ID',
     'common.name': 'Nome',

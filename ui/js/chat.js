@@ -452,7 +452,7 @@ const ChatPage = {
             this.abortController = new AbortController();
             const resp = await fetch('/api/chat/stream', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: { 'Content-Type': 'application/json', ...App.authHeaders() },
                 body: JSON.stringify({ agent_id: this.currentAgentId, message, attachments }),
                 signal: this.abortController.signal,
             });
@@ -483,7 +483,10 @@ const ChatPage = {
         const ui = this._newAssistantBubble();
         try {
             this.abortController = new AbortController();
-            const resp = await fetch('/api/chat/stream/attach', { signal: this.abortController.signal });
+            const resp = await fetch('/api/chat/stream/attach', {
+                signal: this.abortController.signal,
+                headers: App.authHeaders(),
+            });
             if (!resp.ok) throw new Error('attach failed');
             await this._consumeStream(resp, ui);
         } catch (e) {

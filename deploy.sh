@@ -78,6 +78,9 @@ Environment=PYTHONUNBUFFERED=1
 # authenticating reverse proxy).
 Environment=MYAGENT_HOST=127.0.0.1
 Environment=MYAGENT_PORT=8888
+# Require an API key on every /api request (Bearer header or ?api_key=).
+# Recommended if you expose the port beyond localhost:
+#Environment=MYAGENT_API_KEY=change-me
 
 [Install]
 WantedBy=multi-user.target

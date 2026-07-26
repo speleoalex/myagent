@@ -60,7 +60,7 @@ MYAGENT_API_URL=http://192.168.1.10:8888 python server/main.py
 | Variable                        | Default                 | Meaning                               |
 |---------------------------------|-------------------------|---------------------------------------|
 | `MYAGENT_API_URL`               | `http://localhost:8888` | myagent base URL                      |
-| `MYAGENT_API_TOKEN`             | *(empty)*               | Bearer token, if myagent requires one |
+| `MYAGENT_API_TOKEN`             | *(empty)*               | Bearer token — set it to the myagent server's `MYAGENT_API_KEY` if that is configured |
 | `MYAGENT_CONNECTORS_HOST`       | `127.0.0.1`             | bind host                             |
 | `MYAGENT_CONNECTORS_PORT`       | `8899`                  | bind port                             |
 | `MYAGENT_CONNECTORS_DIR`        | `~/myagent/connectors`  | bindings + grants storage             |

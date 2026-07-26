@@ -1,8 +1,10 @@
+import hmac
 import logging
 import os
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app import config
@@ -36,6 +38,22 @@ logging.basicConfig(
 log = logging.getLogger("myagent")
 
 app = FastAPI(title="MyAgent", version="0.1.0")
+
+# Optional API-key gate (MYAGENT_API_KEY). When set, it protects the API and
+# the OpenAPI docs; the static UI stays public (it holds no data — it prompts
+# for the key on the first 401). The key is accepted as a Bearer header or as
+# an ?api_key= query parameter (for plain GET links and header-less clients).
+if config.API_KEY:
+    @app.middleware("http")
+    async def require_api_key(request: Request, call_next):
+        path = request.url.path
+        if path.startswith("/api/") or path in ("/docs", "/redoc", "/openapi.json"):
+            auth = request.headers.get("authorization", "")
+            candidate = auth[7:] if auth.lower().startswith("bearer ") else \
+                request.query_params.get("api_key", "")
+            if not hmac.compare_digest(candidate.encode(), config.API_KEY.encode()):
+                return JSONResponse({"detail": "Invalid or missing API key"}, status_code=401)
+        return await call_next(request)
 
 # Initialize stores (config lives under the user's home, see config.CONFIG_DIR)
 if CONFIG_SEEDED:

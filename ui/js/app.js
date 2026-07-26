@@ -1,8 +1,11 @@
 const App = {
     container: null,
+    apiKey: null,
+    _authPrompting: false,
 
     init() {
         this.container = document.getElementById('app');
+        this.apiKey = this._initApiKey();
         I18n.init();
         this.applyStaticI18n();
         window.addEventListener('hashchange', () => this.route());
@@ -64,13 +67,48 @@ const App = {
         });
     },
 
+    // API key handling (only enforced when the server sets MYAGENT_API_KEY):
+    // accept ?api_key=... in the page URL once — stored locally, then stripped
+    // from the address bar so it doesn't linger in bookmarks/history.
+    _initApiKey() {
+        const url = new URL(location.href);
+        const fromUrl = url.searchParams.get('api_key');
+        if (fromUrl) {
+            localStorage.setItem('myagent_api_key', fromUrl.trim());
+            url.searchParams.delete('api_key');
+            history.replaceState(null, '', url);
+        }
+        return localStorage.getItem('myagent_api_key') || null;
+    },
+
+    authHeaders() {
+        return this.apiKey ? { 'Authorization': `Bearer ${this.apiKey}` } : {};
+    },
+
+    // The server requires a key and ours is missing/wrong: ask for it once
+    // (concurrent 401s share the prompt) and reload with the new key.
+    _handleUnauthorized() {
+        if (!this._authPrompting) {
+            this._authPrompting = true;
+            const key = window.prompt(i18n('auth.promptKey'));
+            if (key && key.trim()) {
+                localStorage.setItem('myagent_api_key', key.trim());
+                location.reload();
+            } else {
+                this._authPrompting = false;
+            }
+        }
+        throw new Error(i18n('auth.required'));
+    },
+
     async api(method, path, body = null) {
         const opts = {
             method,
-            headers: { 'Content-Type': 'application/json' },
+            headers: { 'Content-Type': 'application/json', ...this.authHeaders() },
         };
         if (body) opts.body = JSON.stringify(body);
         const res = await fetch(`/api${path}`, opts);
+        if (res.status === 401) this._handleUnauthorized();
         if (!res.ok) {
             const text = await res.text();
             throw new Error(text || `HTTP ${res.status}`);

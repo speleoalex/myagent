@@ -113,6 +113,14 @@ def ensure_sessions() -> Path:
     return SESSIONS_DIR
 
 
+# Optional API key protecting the whole /api surface. Empty (default) = no
+# authentication — fine for a private localhost install. When set, every /api
+# request must present it, either as "Authorization: Bearer <key>" or as an
+# "api_key" query parameter (usable in plain GET links and by clients that
+# cannot set headers). The web UI accepts ?api_key=... in the page URL once
+# and stores it locally.
+API_KEY = os.environ.get("MYAGENT_API_KEY", "")
+
 # Verbose per-iteration executor tracing (messages sent to the LLM, tool
 # results, dedup decisions). Off by default: it logs full chat content, so it
 # is opt-in via MYAGENT_DEBUG=1 and written under the user's home (not /tmp,
