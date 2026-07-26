@@ -1,0 +1,70 @@
+#!/usr/bin/env python3
+"""Web research recipe.
+
+Encapsulates web_search + browse_web into a single deterministic step so the
+calling agent stays atomic: it makes ONE tool call and gets back real page
+content, instead of having to chain tools itself (which small local models do
+unreliably).
+"""
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+TOOLS_DIR = Path(__file__).resolve().parent.parent
+MAX_PAGES = 2          # how many top results to actually read
+PER_PAGE_CHARS = 2500  # keep the returned context bounded/atomic
+SUBTOOL_TIMEOUT = 45
+
+
+def run_tool(name: str, payload: dict, timeout: int) -> str:
+    """Invoke a sibling tool's run script (JSON on stdin, text on stdout)."""
+    try:
+        p = subprocess.run(
+            [str(TOOLS_DIR / name / "run")],
+            input=json.dumps(payload).encode(),
+            capture_output=True,
+            timeout=timeout,
+        )
+        return p.stdout.decode(errors="replace").strip()
+    except Exception:
+        return ""
+
+
+def main() -> None:
+    args = json.loads(sys.stdin.read())
+    query = (args.get("query") or "").strip()
+    if not query:
+        print("ERROR: query is required", file=sys.stderr)
+        sys.exit(1)
+
+    search_out = run_tool("web_search", {"query": query}, SUBTOOL_TIMEOUT)
+
+    # Collect candidate result URLs from the search output
+    urls, seen = [], set()
+    for u in re.findall(r'https?://[^\s\]]+', search_out):
+        u = u.rstrip('.,)')
+        if u in seen or "duckduckgo.com" in u:
+            continue
+        seen.add(u)
+        urls.append(u)
+
+    pages = []
+    for url in urls:
+        if len(pages) >= MAX_PAGES:
+            break
+        text = run_tool("browse_web", {"url": url}, SUBTOOL_TIMEOUT)
+        if text and not text.startswith("ERROR"):
+            pages.append(f"--- Content from {url} ---\n{text[:PER_PAGE_CHARS]}")
+
+    out = "SEARCH RESULTS:\n" + (search_out or "(no results)")
+    if pages:
+        out += "\n\nPAGE CONTENT (read from the top results):\n\n" + "\n\n".join(pages)
+    else:
+        out += "\n\n(Could not read page content; answer from the snippets above.)"
+    print(out)
+
+
+if __name__ == "__main__":
+    main()

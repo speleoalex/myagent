@@ -1,0 +1,10 @@
+{
+  "id": "llama-cpp",
+  "name": "llama.cpp (local server)",
+  "provider": "llamacpp",
+  "model": "default",
+  "base_url": "http://localhost:8080",
+  "api_format": "openai",
+  "context_window": null,
+  "options": {"repeat_penalty": 1.15, "repeat_last_n": 320}
+}

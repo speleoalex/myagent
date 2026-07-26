@@ -1,0 +1,5 @@
+{
+  "default_model_id": "llama-cpp",
+  "ollama_base_url": "http://localhost:11434",
+  "llamacpp_base_url": "http://localhost:8080"
+}

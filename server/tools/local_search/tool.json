@@ -1,0 +1,29 @@
+{
+  "name": "Local Search",
+  "description": "Search a LOCAL folder of knowledge files and return the most relevant text as plain text. Handles two kinds of files in the same folder: offline Wikipedia/ZIM archives (*.zim) via their full-text index, and plain-text or Markdown notes (.md, .txt, .rst ...). Use this to look things up offline — encyclopedic facts from Wikipedia, or an agent's own notes/documentation. The folder defaults to the shared library but can point at an agent's personal knowledge directory.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "query": {
+        "type": "string",
+        "description": "Search terms, a phrase, or an article title, e.g. 'photosynthesis' or 'deployment procedure'"
+      },
+      "path": {
+        "type": "string",
+        "description": "Folder to search (scanned recursively) or a single file. Defaults to the shared library ~/myagent/library/. Set this to an agent's personal knowledge folder to search that instead. Relative paths resolve against the agent workspace."
+      },
+      "lang": {
+        "type": "string",
+        "description": "For Wikipedia/ZIM files only: restrict to a language edition, e.g. 'en' or 'it' (matched against the ZIM filename). Ignored for text files. If omitted, all ZIM files in the folder are searched."
+      },
+      "limit": {
+        "type": "integer",
+        "description": "How many results to return (1-8).",
+        "default": 3
+      }
+    },
+    "required": ["query"]
+  },
+  "timeout": 30,
+  "max_output": 14000
+}

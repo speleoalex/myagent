@@ -1,0 +1,39 @@
+#!/bin/bash
+# shell_exec: run a shell command and ALWAYS return its output plus the exit code.
+# A non-zero exit (e.g. `grep` with no match, a probe that fails) is NOT treated
+# as a fatal error: the model still receives stdout/stderr and the exit code, so
+# it can read partial output or adapt its next command instead of getting a bare
+# "ERROR: exited with code N". The script itself always exits 0 so the registry
+# returns this text verbatim.
+# Reads JSON from stdin: {"command": "...", "timeout": 30}
+
+set -o pipefail
+
+INPUT=$(cat)
+COMMAND=$(echo "$INPUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('command',''))" 2>/dev/null)
+TIMEOUT=$(echo "$INPUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('timeout',30))" 2>/dev/null || echo 30)
+
+if [ -z "$COMMAND" ]; then
+    echo "ERROR: No command provided"
+    exit 0
+fi
+
+OUTPUT=$(timeout "$TIMEOUT" bash -c "$COMMAND" 2>&1)
+EXIT_CODE=$?
+
+if [ "$EXIT_CODE" -eq 124 ]; then
+    echo "ERROR: Command timed out after ${TIMEOUT}s"
+    exit 0
+fi
+
+if [ -n "$OUTPUT" ]; then
+    printf '%s\n' "$OUTPUT"
+else
+    echo "(no output)"
+fi
+
+if [ "$EXIT_CODE" -ne 0 ]; then
+    echo "[exit code $EXIT_CODE]"
+fi
+
+exit 0

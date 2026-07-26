@@ -1,0 +1,933 @@
+const ChatPage = {
+    conversation: [],
+    currentAgentId: null,
+    sending: false,
+    abortController: null,
+    attachments: [],
+    agents: [],
+    viewingArchived: false,
+    _archivedId: null,
+    _history: [],
+    _historyModal: null,
+    _pasteSeq: 0,
+
+    async render(params) {
+        // Leaving a previous chat view: stop consuming its stream client-side
+        // (the server keeps generating and we re-attach below via loadCurrent).
+        this._abortClient();
+        this.sending = false;
+        this.currentAgentId = params[0] || null;
+        this.viewingArchived = false;
+
+        let agents = [];
+        try { agents = await App.api('GET', '/agents?selectable=true'); } catch (e) { /* empty */ }
+        this.agents = agents;
+
+        if (agents.length === 0) {
+            App.container.innerHTML = `
+                <div class="text-center mt-5">
+                    <h4>${i18n('chat.noAgents')}</h4>
+                    <p class="text-secondary">${i18n('chat.createFirst')}</p>
+                    <a href="#/agents/new" class="btn btn-primary">${i18n('chat.createAgent')}</a>
+                </div>`;
+            return;
+        }
+
+        if (!this.currentAgentId) this.currentAgentId = agents[0].id;
+
+        App.container.innerHTML = `
+            <div class="d-flex flex-column mx-auto w-100 chat-wrap">
+                <div class="d-flex gap-2 mb-2 flex-wrap align-items-center">
+                    <select id="agent-select" class="form-select" style="max-width:200px">
+                        ${agents.map(a => `
+                            <option value="${a.id}" ${a.id === this.currentAgentId ? 'selected' : ''}>${App.esc(a.name)}</option>
+                        `).join('')}
+                    </select>
+                    <button class="btn btn-outline-primary" id="btn-new" title="${i18n('chat.newChatTitle')}">
+                        <i class="bi bi-plus-lg"></i> ${i18n('chat.newChat')}
+                    </button>
+                    <button class="btn btn-outline-secondary" id="btn-history" title="${i18n('chat.history')}">
+                        <i class="bi bi-clock-history"></i> ${i18n('chat.history')}
+                    </button>
+                    <button class="btn btn-outline-danger" id="btn-del" title="${i18n('chat.deleteArchivedTitle')}" style="display:none">
+                        <i class="bi bi-trash"></i>
+                    </button>
+                </div>
+                <div id="archived-banner" class="alert alert-warning py-1 px-2 mb-2" style="display:none">
+                    <i class="bi bi-archive"></i> ${i18n('chat.archivedBanner')}
+                    <a href="#" id="resume-current">${i18n('chat.resume')}</a> ·
+                    <a href="#" id="back-current">${i18n('chat.backToCurrent')}</a>
+                </div>
+                <div id="chat-messages" class="flex-grow-1 overflow-auto border rounded p-3 mb-2"></div>
+                <div id="attach-chips" class="d-flex flex-wrap gap-2 mb-2"></div>
+                <div class="input-group">
+                    <button class="btn btn-outline-secondary" id="btn-attach" type="button" title="${i18n('chat.attachTitle')}">
+                        <i class="bi bi-paperclip"></i>
+                    </button>
+                    <textarea id="chat-input" class="form-control" rows="2" placeholder="${i18n('chat.inputPlaceholder')}"
+                              style="resize:none"></textarea>
+                    <button id="chat-send" class="btn btn-primary">
+                        <i class="bi bi-send"></i>
+                        <span class="spinner-border spinner-border-sm spinner-chat" role="status"></span>
+                    </button>
+                </div>
+                <input type="file" id="attach-input" multiple hidden
+                       accept="image/*,text/*,.txt,.md,.csv,.json,.log,.py,.js,.html,.css,.xml,.yaml,.yml">
+            </div>
+
+            <div class="modal fade" id="history-modal" tabindex="-1" aria-hidden="true">
+                <div class="modal-dialog modal-dialog-scrollable modal-lg">
+                    <div class="modal-content">
+                        <div class="modal-header">
+                            <h5 class="modal-title"><i class="bi bi-clock-history"></i> ${i18n('chat.historyTitle')}</h5>
+                            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                        </div>
+                        <div class="modal-body">
+                            <div class="input-group mb-3">
+                                <span class="input-group-text"><i class="bi bi-search"></i></span>
+                                <input type="text" id="history-filter" class="form-control"
+                                       placeholder="${i18n('chat.searchPlaceholder')}" autocomplete="off">
+                            </div>
+                            <div id="history-list" class="history-list"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>`;
+
+        this.bindEvents();
+        await this.refreshHistory();
+        await this.loadCurrent();
+    },
+
+    // ---- Server-backed sessions (one file per chat on disk) ---------------
+    // Fetch the archived-chat list (newest first) and keep it in memory. If the
+    // history window is open, re-render it in place so it stays in sync.
+    async refreshHistory() {
+        try { this._history = await App.api('GET', '/sessions'); } catch (e) { this._history = []; }
+        const modal = document.getElementById('history-modal');
+        if (modal && modal.classList.contains('show')) {
+            const f = document.getElementById('history-filter');
+            this.renderHistoryList(f ? f.value : '');
+        }
+    },
+
+    // Open the filterable history window (chats grouped by date, newest first).
+    openHistory() {
+        const el = document.getElementById('history-modal');
+        if (!el) return;
+        this._historyModal = bootstrap.Modal.getOrCreateInstance(el);
+        const filter = document.getElementById('history-filter');
+        if (filter) filter.value = '';
+        this.renderHistoryList('');
+        el.addEventListener('shown.bs.modal', () => { if (filter) filter.focus(); }, { once: true });
+        this._historyModal.show();
+    },
+
+    agentName(id) {
+        return (this.agents.find(a => a.id === id) || {}).name || id || '';
+    },
+
+    // A human day bucket for grouping ("Oggi", "Ieri", or a full date).
+    dayLabel(iso) {
+        const d = iso ? new Date(iso) : null;
+        if (!d || isNaN(d.getTime())) return i18n('chat.unknownDate');
+        const startOfDay = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate());
+        const days = Math.round((startOfDay(new Date()) - startOfDay(d)) / 86400000);
+        if (days <= 0) return i18n('chat.today');
+        if (days === 1) return i18n('chat.yesterday');
+        return d.toLocaleDateString(I18n.getDateLocale(), { day: '2-digit', month: 'long', year: 'numeric' });
+    },
+
+    // Render the (filtered) session list into the modal, with date-group headers.
+    renderHistoryList(query) {
+        const box = document.getElementById('history-list');
+        if (!box) return;
+        const q = (query || '').trim().toLowerCase();
+        const items = (this._history || []).filter(s =>
+            !q || `${s.title || ''} ${this.agentName(s.agent_id)}`.toLowerCase().includes(q));
+
+        if (!items.length) {
+            box.innerHTML = `<div class="text-secondary text-center py-4">${
+                (this._history || []).length ? i18n('chat.noMatch') : i18n('chat.noSessions')}</div>`;
+            return;
+        }
+
+        let html = '', lastGroup = null;
+        for (const s of items) {
+            const group = this.dayLabel(s.updated_at);
+            if (group !== lastGroup) {
+                html += `<div class="history-group">${App.esc(group)}</div>`;
+                lastGroup = group;
+            }
+            const active = s.id === this._archivedId ? ' active' : '';
+            html += `
+                <div class="history-item${active}" data-id="${App.esc(s.id)}" role="button" tabindex="0">
+                    <div class="hi-main">
+                        <div class="hi-title">${App.esc(s.title || i18n('chat.untitled'))}</div>
+                        <div class="hi-meta">
+                            <i class="bi bi-cpu"></i> ${App.esc(this.agentName(s.agent_id))}
+                            · ${i18n('chat.messagesCount', { n: s.message_count || 0 })}
+                        </div>
+                    </div>
+                    <div class="hi-when">${App.esc(this.fmtTime(s.updated_at))}</div>
+                    <button class="btn btn-sm btn-link text-danger hi-del" data-id="${App.esc(s.id)}"
+                            title="${i18n('chat.deleteArchivedTitle')}"><i class="bi bi-trash"></i></button>
+                </div>`;
+        }
+        box.innerHTML = html;
+
+        box.querySelectorAll('.history-item').forEach(row => {
+            const open = () => { if (this._historyModal) this._historyModal.hide(); this.viewArchived(row.dataset.id); };
+            row.onclick = (e) => { if (!e.target.closest('.hi-del')) open(); };
+            row.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } };
+        });
+        box.querySelectorAll('.hi-del').forEach(btn => {
+            btn.onclick = async (e) => {
+                e.stopPropagation();
+                if (!confirm(i18n('chat.deleteConfirm'))) return;
+                const id = btn.dataset.id;
+                try { await App.api('DELETE', '/sessions/' + id); } catch (err) { /* ignore */ }
+                if (this._archivedId === id) await this.loadCurrent();
+                await this.refreshHistory();  // re-renders the list in place
+            };
+        });
+    },
+
+    async loadCurrent() {
+        this.viewingArchived = false;
+        this._archivedId = null;
+        document.getElementById('archived-banner').style.display = 'none';
+        document.getElementById('btn-del').style.display = 'none';
+        this.setInputEnabled(true);
+        let session = null;
+        try { session = await App.api('GET', '/sessions/current'); } catch (e) { /* ignore */ }
+        if (session && session.agent_id && this.agents.some(a => a.id === session.agent_id)) {
+            this.currentAgentId = session.agent_id;
+            const as = document.getElementById('agent-select'); if (as) as.value = session.agent_id;
+        }
+        this.renderSessionMessages(session || { messages: [] });
+        // If a response is still being generated for this chat, reconnect to
+        // its live stream (replay so far + follow the tail).
+        try {
+            const live = await App.api('GET', '/chat/live');
+            if (live && live.active) this._attachToLive();
+        } catch (e) { /* ignore */ }
+    },
+
+    async viewArchived(id) {
+        let session = null;
+        try { session = await App.api('GET', '/sessions/' + id); } catch (e) { /* ignore */ }
+        if (!session) return;
+        this.viewingArchived = true;
+        this._archivedId = id;
+        document.getElementById('archived-banner').style.display = '';
+        document.getElementById('btn-del').style.display = '';
+        this.setInputEnabled(false);
+        this.renderSessionMessages(session);
+    },
+
+    async newChat() {
+        try { await App.api('POST', '/sessions/new', { agent_id: this.currentAgentId }); } catch (e) { /* ignore */ }
+        this.attachments = [];
+        this.renderAttachChips();
+        await this.refreshHistory();
+        await this.loadCurrent();
+    },
+
+    async resumeArchived() {
+        if (!this._archivedId) return;
+        // Makes the archived chat the current one (archiving whatever is active).
+        try { await App.api('POST', '/sessions/' + this._archivedId + '/resume'); } catch (e) { /* ignore */ }
+        this.attachments = [];
+        this.renderAttachChips();
+        await this.refreshHistory();
+        await this.loadCurrent();  // restores the session's original agent_id
+    },
+
+    setInputEnabled(on) {
+        ['chat-input', 'chat-send', 'btn-attach'].forEach(id => {
+            const el = document.getElementById(id);
+            if (el) el.disabled = !on;
+        });
+        const inp = document.getElementById('chat-input');
+        if (inp) inp.placeholder = on ? i18n('chat.inputPlaceholder') : i18n('chat.archivedPlaceholder');
+    },
+
+    renderSessionMessages(session) {
+        const box = document.getElementById('chat-messages');
+        if (box) box.innerHTML = '';
+        let pendingTools = [];
+        const flushAssistant = (text, ts) => {
+            const msgDiv = this.createMessageDiv('assistant');
+            if (pendingTools.length) {
+                const tc = document.createElement('div');
+                tc.className = 'tool-calls';
+                // Expandable tool calls, with nested sub-agent flows (recursive).
+                for (const t of pendingTools) this.renderToolCall(tc, t);
+                msgDiv.appendChild(tc);
+            }
+            const c = document.createElement('div');
+            c.className = 'msg-content';
+            c.innerHTML = this.renderMarkdown(text || '');
+            msgDiv.appendChild(c);
+            msgDiv.appendChild(this._timeEl(ts));
+            pendingTools = [];
+        };
+        for (const m of (session.messages || [])) {
+            if (m.role === 'user') {
+                pendingTools = [];
+                this.appendUserMessage(m.text || '', m.attachments || [], m.ts);
+            } else if (m.role === 'tool') {
+                pendingTools.push(m);
+            } else if (m.role === 'assistant') {
+                flushAssistant(m.text || '', m.ts);
+            } else if (m.role === 'error') {
+                this.appendMessage('error', m.text || '', m.ts);
+            }
+        }
+        if (box) box.scrollTop = box.scrollHeight;
+    },
+
+    bindEvents() {
+        document.getElementById('chat-send').onclick = () =>
+            this.sending ? this.stopGeneration() : this.sendMessage();
+        document.getElementById('chat-input').onkeydown = (e) => {
+            // On touch keyboards there is no Shift+Enter: let Enter insert a
+            // newline and keep the send button as the only submit path.
+            const isTouch = window.matchMedia('(pointer: coarse)').matches;
+            if (e.key === 'Enter' && !e.shiftKey && !isTouch) {
+                e.preventDefault();
+                this.sendMessage();
+            }
+        };
+        // Paste an image straight from the clipboard (screenshots, copied images)
+        // — routed through the same pipeline as attached files.
+        document.getElementById('chat-input').addEventListener('paste', (e) => this.handlePaste(e));
+        document.getElementById('btn-attach').onclick = () =>
+            document.getElementById('attach-input').click();
+        document.getElementById('attach-input').onchange = (e) => {
+            this.handleFiles(e.target.files);
+            e.target.value = '';  // allow re-selecting the same file
+        };
+        document.getElementById('btn-new').onclick = () => this.newChat();
+        document.getElementById('btn-history').onclick = () => this.openHistory();
+        const hf = document.getElementById('history-filter');
+        if (hf) hf.oninput = () => this.renderHistoryList(hf.value);
+        document.getElementById('btn-del').onclick = async () => {
+            if (!this._archivedId) return;
+            try { await App.api('DELETE', '/sessions/' + this._archivedId); } catch (e) { /* ignore */ }
+            await this.refreshHistory();
+            await this.loadCurrent();
+        };
+        document.getElementById('resume-current').onclick = (e) => { e.preventDefault(); this.resumeArchived(); };
+        document.getElementById('back-current').onclick = (e) => { e.preventDefault(); this.loadCurrent(); };
+        document.getElementById('agent-select').onchange = (e) => {
+            this.currentAgentId = e.target.value;
+            this.attachments = [];
+            this.renderAttachChips();
+            if (this.viewingArchived) this.loadCurrent();
+        };
+    },
+
+    readFile(file, as) {
+        return new Promise((resolve, reject) => {
+            const r = new FileReader();
+            r.onload = () => resolve(r.result);
+            r.onerror = () => reject(r.error || new Error('read error'));
+            if (as === 'dataURL') r.readAsDataURL(file);
+            else r.readAsText(file);
+        });
+    },
+
+    // Pull image files out of a paste event and feed them to handleFiles. Text
+    // paste is left untouched (we only preventDefault when we grab an image, so
+    // pasting words into the textarea still works normally).
+    handlePaste(e) {
+        if (this.viewingArchived) return;
+        const cd = e.clipboardData || window.clipboardData;
+        if (!cd || !cd.items) return;
+        const files = [];
+        for (const item of cd.items) {
+            if (item.kind !== 'file' || !item.type.startsWith('image/')) continue;
+            const blob = item.getAsFile();
+            if (!blob) continue;
+            // Clipboard images often have no filename (or a generic one): give
+            // them a stable, unique name so the chip label isn't blank.
+            if (blob.name) {
+                files.push(blob);
+            } else {
+                const ext = (item.type.split('/')[1] || 'png').split(';')[0];
+                const name = `${i18n('chat.pastedImage')}-${++this._pasteSeq}.${ext}`;
+                files.push(new File([blob], name, { type: item.type }));
+            }
+        }
+        if (files.length) {
+            e.preventDefault();  // keep the raw image/path out of the textarea
+            this.handleFiles(files);
+        }
+    },
+
+    async handleFiles(fileList) {
+        const MAX = 20 * 1024 * 1024;  // 20 MB per file (images are downscaled)
+        for (const file of fileList) {
+            if (file.size > MAX) {
+                this.appendMessage('error', i18n('chat.fileTooLarge', { name: file.name }));
+                continue;
+            }
+            try {
+                if (file.type.startsWith('image/')) {
+                    // Downscale before sending: local vision models are slow on
+                    // large images and big payloads risk request timeouts.
+                    const dataUrl = await this.downscaleImage(file, 1280);
+                    this.attachments.push({ name: file.name, kind: 'image', data: dataUrl, mime: 'image/jpeg' });
+                } else {
+                    const text = await this.readFile(file, 'text');
+                    this.attachments.push({ name: file.name, kind: 'text', data: text, mime: file.type || 'text/plain' });
+                }
+            } catch (err) {
+                this.appendMessage('error', i18n('chat.readError', { name: file.name, error: err.message }));
+            }
+        }
+        this.renderAttachChips();
+    },
+
+    downscaleImage(file, maxDim) {
+        return new Promise((resolve, reject) => {
+            const url = URL.createObjectURL(file);
+            const img = new Image();
+            img.onload = () => {
+                URL.revokeObjectURL(url);
+                let { width, height } = img;
+                if (Math.max(width, height) > maxDim) {
+                    const scale = maxDim / Math.max(width, height);
+                    width = Math.round(width * scale);
+                    height = Math.round(height * scale);
+                }
+                const canvas = document.createElement('canvas');
+                canvas.width = width;
+                canvas.height = height;
+                canvas.getContext('2d').drawImage(img, 0, 0, width, height);
+                resolve(canvas.toDataURL('image/jpeg', 0.85));
+            };
+            img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('image decode failed')); };
+            img.src = url;
+        });
+    },
+
+    renderAttachChips() {
+        const el = document.getElementById('attach-chips');
+        if (!el) return;
+        el.innerHTML = this.attachments.map((a, i) => {
+            const inner = a.kind === 'image'
+                ? `<img src="${a.data}" style="height:32px;width:32px;object-fit:cover;border-radius:4px" class="me-1">`
+                : `<i class="bi bi-file-earmark-text me-1"></i>`;
+            return `<span class="badge text-bg-light border d-inline-flex align-items-center p-1">
+                ${inner}<span class="small">${App.esc(a.name)}</span>
+                <button type="button" class="btn-close ms-1 attach-remove" style="font-size:.6rem" data-idx="${i}"></button>
+            </span>`;
+        }).join('');
+        el.querySelectorAll('.btn-close').forEach(b => {
+            b.onclick = () => {
+                this.attachments.splice(parseInt(b.dataset.idx, 10), 1);
+                this.renderAttachChips();
+            };
+        });
+    },
+
+    async sendMessage() {
+        if (this.sending || this.viewingArchived) return;
+        const input = document.getElementById('chat-input');
+        const message = input.value.trim();
+        const attachments = this.attachments.slice();
+        if (!message && attachments.length === 0) return;
+        input.value = '';
+        this.attachments = [];
+        this.renderAttachChips();
+
+        this.appendUserMessage(message, attachments);
+        this.setSending(true);
+        const ui = this._newAssistantBubble();
+
+        try {
+            this.abortController = new AbortController();
+            const resp = await fetch('/api/chat/stream', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ agent_id: this.currentAgentId, message, attachments }),
+                signal: this.abortController.signal,
+            });
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`);
+            await this._consumeStream(resp, ui);
+        } catch (err) {
+            if (ui.thinking && ui.thinking.parentNode) ui.thinking.remove();
+            if (err.name !== 'AbortError') {
+                this.appendMessage('error', i18n('chat.errorPrefix', { msg: err.message }));
+            }
+        } finally {
+            this._finalizeStream();
+        }
+    },
+
+    // Stop the server-side generation for the current chat. The active stream
+    // receives a 'stopped' event and finalizes itself.
+    async stopGeneration() {
+        try { await App.api('POST', '/chat/stop'); } catch (e) { /* ignore */ }
+    },
+
+    // If a generation is still running for the current chat (e.g. we just came
+    // back to it), re-attach to its live stream: replay what happened so far,
+    // then follow the tail. Fire-and-forget.
+    async _attachToLive() {
+        if (this.viewingArchived) return;
+        this.setSending(true);
+        const ui = this._newAssistantBubble();
+        try {
+            this.abortController = new AbortController();
+            const resp = await fetch('/api/chat/stream/attach', { signal: this.abortController.signal });
+            if (!resp.ok) throw new Error('attach failed');
+            await this._consumeStream(resp, ui);
+        } catch (e) {
+            if (ui.thinking && ui.thinking.parentNode) ui.thinking.remove();
+        } finally {
+            this._finalizeStream();
+        }
+    },
+
+    // Build the streaming assistant bubble (tool area + content + thinking dots).
+    _newAssistantBubble() {
+        const msgDiv = this.createMessageDiv('assistant');
+        const toolsInline = document.createElement('div');
+        toolsInline.className = 'tool-calls';
+        msgDiv.appendChild(toolsInline);
+        const contentDiv = document.createElement('div');
+        contentDiv.className = 'msg-content';
+        msgDiv.appendChild(contentDiv);
+        const thinking = document.createElement('div');
+        thinking.className = 'typing-indicator';
+        thinking.innerHTML = '<span></span><span></span><span></span>';
+        contentDiv.appendChild(thinking);
+        const c = document.getElementById('chat-messages');
+        if (c) c.scrollTop = c.scrollHeight;
+        return { msgDiv, contentDiv, toolsInline, thinking };
+    },
+
+    // Read an SSE stream into the given bubble. Shared by send and re-attach.
+    // If the bubble leaves the DOM (user navigated away) it stops consuming but
+    // the server keeps generating, so we can re-attach later.
+    async _consumeStream(resp, ui) {
+        const { msgDiv, contentDiv, toolsInline, thinking } = ui;
+        const clearThinking = () => { if (thinking && thinking.parentNode) thinking.remove(); };
+        const mc = document.getElementById('chat-messages');
+        const scroll = () => { if (mc) mc.scrollTop = mc.scrollHeight; };
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '', streamedText = '', errored = false, stopped = false, idle = false;
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (!document.body.contains(contentDiv)) { this._abortClient(); return; }  // navigated away
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop() || '';
+            for (const line of lines) {
+                if (!line.startsWith('data: ')) continue;
+                let event;
+                try { event = JSON.parse(line.slice(6)); } catch (e) { continue; }
+                switch (event.type) {
+                    case 'token':
+                        clearThinking();
+                        streamedText += event.data;
+                        contentDiv.innerHTML = this.renderMarkdown(streamedText);
+                        scroll();
+                        break;
+                    case 'clear_tokens':
+                        streamedText = '';
+                        contentDiv.innerHTML = '';
+                        break;
+                    case 'tool_start':
+                        clearThinking();
+                        this.addLiveTool(toolsInline, event.data);
+                        scroll();
+                        break;
+                    case 'tool_result':
+                        this.completeLiveTool(toolsInline, event.data);
+                        break;
+                    case 'done': {
+                        clearThinking();
+                        if (errored) break;
+                        if (!streamedText && event.data && event.data.reply) {
+                            contentDiv.innerHTML = this.renderMarkdown(event.data.reply);
+                        }
+                        const trace = event.data && event.data.trace;
+                        if (trace && trace.steps && trace.steps.length) {
+                            toolsInline.innerHTML = '';
+                            this.renderTraceSteps(toolsInline, trace);
+                        }
+                        if (!toolsInline.children.length) toolsInline.remove();
+                        msgDiv.appendChild(this._timeEl());
+                        break;
+                    }
+                    case 'stopped':
+                        clearThinking();
+                        stopped = true;
+                        contentDiv.insertAdjacentHTML('beforeend',
+                            `<div class="text-secondary small fst-italic mt-1">${i18n('chat.stopped')}</div>`);
+                        if (!toolsInline.children.length) toolsInline.remove();
+                        msgDiv.appendChild(this._timeEl());
+                        break;
+                    case 'error':
+                        errored = true;
+                        clearThinking();
+                        if (!streamedText && !toolsInline.children.length) msgDiv.remove();
+                        this.appendMessage('error', i18n('chat.errorPrefix', { msg: event.data }));
+                        break;
+                    case 'idle':
+                        idle = true;  // nothing was actually running
+                        break;
+                }
+            }
+        }
+
+        clearThinking();
+        if (idle) {
+            msgDiv.remove();  // attach found no live run
+        } else if (!errored && !stopped && !streamedText && !contentDiv.innerHTML) {
+            contentDiv.innerHTML = `<em class="text-secondary">${i18n('chat.noResponse')}</em>`;
+        }
+    },
+
+    _finalizeStream() {
+        // Only reset UI if we're still on the chat page (not navigated away —
+        // in which case the server keeps running and we re-attach on return).
+        if (!document.getElementById('chat-send')) return;
+        this.setSending(false);
+        this.abortController = null;
+    },
+
+    // Abort only the CLIENT-side consumption of the stream; the server-side
+    // generation keeps running (decoupled), so it can be re-attached later.
+    _abortClient() {
+        if (this.abortController) {
+            try { this.abortController.abort(); } catch (e) { /* ignore */ }
+            this.abortController = null;
+        }
+    },
+
+    setSending(on) {
+        this.sending = on;
+        const btn = document.getElementById('chat-send');
+        if (!btn) return;
+        const spinner = btn.querySelector('.spinner-chat');
+        const icon = btn.querySelector('.bi');
+        if (spinner) spinner.classList.remove('active');  // stop icon conveys activity now
+        if (on) {
+            btn.classList.remove('btn-primary');
+            btn.classList.add('btn-danger');
+            if (icon) icon.className = 'bi bi-stop-fill';
+            btn.title = i18n('chat.stop');
+        } else {
+            btn.classList.remove('btn-danger');
+            btn.classList.add('btn-primary');
+            if (icon) icon.className = 'bi bi-send';
+            btn.removeAttribute('title');
+        }
+        btn.disabled = false;  // stays clickable to act as the Stop button
+    },
+
+    createMessageDiv(role) {
+        const container = document.getElementById('chat-messages');
+        const div = document.createElement('div');
+        div.className = `msg msg-${role}`;
+        container.appendChild(div);
+        container.scrollTop = container.scrollHeight;
+        return div;
+    },
+
+    // Format an ISO timestamp (server local time) for display. Omitted ts = now.
+    fmtTime(ts) {
+        let d = ts ? new Date(ts) : new Date();
+        if (isNaN(d.getTime())) d = new Date();
+        const pad = (n) => String(n).padStart(2, '0');
+        const hhmm = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+        const sameDay = d.toDateString() === new Date().toDateString();
+        return sameDay ? hhmm : `${pad(d.getDate())}/${pad(d.getMonth() + 1)} ${hhmm}`;
+    },
+
+    _timeEl(ts) {
+        const el = document.createElement('div');
+        el.className = 'msg-time';
+        el.textContent = this.fmtTime(ts);
+        if (ts) el.title = String(ts).replace('T', ' ');
+        return el;
+    },
+
+    appendMessage(role, content, ts) {
+        const div = this.createMessageDiv(role);
+        if (role === 'assistant') {
+            div.innerHTML = this.renderMarkdown(content || '');
+        } else {
+            div.textContent = content;
+        }
+        div.appendChild(this._timeEl(ts));
+        document.getElementById('chat-messages').scrollTop =
+            document.getElementById('chat-messages').scrollHeight;
+    },
+
+    appendUserMessage(text, attachments, ts) {
+        const div = this.createMessageDiv('user');
+        if (attachments && attachments.length) {
+            const wrap = document.createElement('div');
+            wrap.className = 'd-flex flex-wrap gap-2 mb-1';
+            attachments.forEach(a => {
+                if (a.kind === 'image') {
+                    const img = document.createElement('img');
+                    img.src = a.data;
+                    img.style.cssText = 'max-height:120px;max-width:160px;border-radius:6px;object-fit:cover';
+                    wrap.appendChild(img);
+                } else {
+                    const chip = document.createElement('span');
+                    chip.className = 'badge text-bg-secondary';
+                    chip.innerHTML = `<i class="bi bi-file-earmark-text"></i> ${App.esc(a.name)}`;
+                    wrap.appendChild(chip);
+                }
+            });
+            div.appendChild(wrap);
+        }
+        if (text) {
+            const t = document.createElement('div');
+            t.textContent = text;
+            div.appendChild(t);
+        }
+        div.appendChild(this._timeEl(ts));
+        const c = document.getElementById('chat-messages');
+        c.scrollTop = c.scrollHeight;
+    },
+
+    // --- Inline expandable tool calls (rendered directly in the chat) --------
+
+    // Add a live "running" tool-call entry during streaming (spinner in the
+    // summary). Completed/filled in by completeLiveTool on tool_result. The
+    // whole area is replaced by the authoritative recursive trace on 'done'.
+    addLiveTool(container, data) {
+        const det = document.createElement('details');
+        det.className = 'tool-call running';
+        det.innerHTML =
+            `<summary><span class="tc-name"><i class="bi bi-gear-wide-connected"></i> ${App.esc(data.tool || 'tool')}</span>` +
+            ` <span class="spinner-border spinner-border-sm ms-1"></span></summary>`;
+        container.appendChild(det);
+    },
+
+    completeLiveTool(container, data) {
+        const running = container.querySelectorAll('details.tool-call.running');
+        const det = running[running.length - 1];
+        if (!det) {
+            this.renderToolCall(container, {
+                tool: data.tool, arguments: data.arguments, result: data.result_preview,
+            });
+            return;
+        }
+        det.classList.remove('running');
+        const sp = det.querySelector('.spinner-border');
+        if (sp) sp.remove();
+        const icon = det.querySelector('.tc-name i');
+        if (icon) icon.className = 'bi bi-check-circle text-success';
+        const body = document.createElement('div');
+        body.className = 'tool-call-body';
+        const args = document.createElement('div');
+        args.className = 'tc-args';
+        args.textContent = JSON.stringify(data.arguments || {});
+        body.appendChild(args);
+        const pre = document.createElement('pre');
+        pre.className = 'tc-result';
+        pre.textContent = data.result_preview || '';
+        body.appendChild(pre);
+        det.appendChild(body);
+    },
+
+    // Render the top-level steps of a trace (the connected agent — no header).
+    renderTraceSteps(container, trace) {
+        for (const step of ((trace && trace.steps) || [])) this.renderToolCall(container, step);
+    },
+
+    // Render one tool call as an expandable <details>. For call_agent, recurses
+    // into the called agent's own trace, so arbitrarily nested agents/calls are
+    // all shown (each collapsible on its own).
+    renderToolCall(container, step) {
+        if (!container) return;
+        const args = step.arguments || {};
+        const isAgent = step.tool === 'call_agent';
+        const det = document.createElement('details');
+        det.className = 'tool-call';
+
+        const summary = document.createElement('summary');
+        const label = (isAgent && args.agent_id)
+            ? `<i class="bi bi-diagram-3"></i> ${App.esc(step.tool)} <span class="tc-arrow">→</span> ${App.esc(args.agent_id)}`
+            : `<i class="bi bi-gear-wide-connected"></i> ${App.esc(step.tool || 'tool')}`;
+        summary.innerHTML = `<span class="tc-name">${label}</span>`;
+        det.appendChild(summary);
+
+        const body = document.createElement('div');
+        body.className = 'tool-call-body';
+
+        const argsEl = document.createElement('div');
+        argsEl.className = 'tc-args';
+        argsEl.textContent = JSON.stringify(args);
+        body.appendChild(argsEl);
+
+        // For call_agent the result duplicates the sub-agent's final reply,
+        // which the nested trace already shows — so render the sub-agent flow
+        // instead of a redundant result block.
+        if (step.sub_trace) {
+            body.appendChild(this.renderAgentTrace(step.sub_trace));
+        } else {
+            const pre = document.createElement('pre');
+            pre.className = 'tc-result';
+            pre.textContent = (step.result != null ? step.result : (step.result_preview || ''));
+            body.appendChild(pre);
+        }
+
+        det.appendChild(body);
+        container.appendChild(det);
+        return det;
+    },
+
+    // Render a sub-agent's trace: header + its tool calls (recursive) + reply.
+    renderAgentTrace(trace) {
+        const wrap = document.createElement('div');
+        wrap.className = 'sub-agent';
+        const head = document.createElement('div');
+        head.className = 'sub-agent-head';
+        head.innerHTML = `<i class="bi bi-robot"></i> ${App.esc(i18n('chat.subAgent', { id: trace.agent_id || '?' }))}`;
+        wrap.appendChild(head);
+        for (const step of (trace.steps || [])) this.renderToolCall(wrap, step);
+        if (trace.reply) {
+            const rep = document.createElement('div');
+            rep.className = 'sub-agent-reply';
+            rep.textContent = '↳ ' + trace.reply;
+            wrap.appendChild(rep);
+        }
+        return wrap;
+    },
+
+    // Inline markdown: bold, italic, strikethrough, inline code, links.
+    // Operates on already HTML-escaped text.
+    renderInline(s) {
+        if (!s) return '';
+        // Protect inline code spans so emphasis markers inside them are literal
+        const codes = [];
+        s = s.replace(/`([^`]+)`/g, (m, c) => {
+            codes.push(c);
+            return `${codes.length - 1}`;
+        });
+        s = s
+            .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+            .replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>')
+            .replace(/~~([^~]+)~~/g, '<del>$1</del>')
+            // Links: the URL is untrusted (model/tool output). App.esc only
+            // escapes <>&, NOT quotes, so a " in the URL could break out of the
+            // href attribute and inject event handlers — neutralize quotes.
+            .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, (m, text, url) =>
+                `<a href="${url.replace(/"/g, '%22')}" target="_blank" rel="noopener">${text}</a>`);
+        s = s.replace(/(\d+)/g, (m, n) => `<code>${codes[parseInt(n, 10)]}</code>`);
+        return s;
+    },
+
+    // Block-level markdown with GitHub-style pipe tables. Renders incrementally
+    // so partial markdown during token streaming still displays sensibly.
+    renderMarkdown(text) {
+        if (!text) return '';
+        let src = App.esc(text);
+
+        // Protect fenced code blocks
+        const blocks = [];
+        src = src.replace(/```(\w*)\n?([\s\S]*?)```/g, (m, lang, code) => {
+            blocks.push(`<pre><code>${code.replace(/\n$/, '')}</code></pre>`);
+            return ` ${blocks.length - 1} `;
+        });
+
+        const lines = src.split('\n');
+        const out = [];
+        const inline = (s) => this.renderInline(s);
+        const isTableSep = (l) => l && l.includes('-') && /^\s*\|?[\s:|-]+\|?\s*$/.test(l);
+        const parseRow = (r) => r.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => c.trim());
+        let i = 0;
+
+        while (i < lines.length) {
+            const line = lines[i];
+            const trimmed = line.trim();
+
+            // Protected code block
+            if (/^ \d+ $/.test(trimmed)) { out.push(trimmed); i++; continue; }
+
+            // Table: a row with pipes followed by a separator row
+            if (line.includes('|') && isTableSep(lines[i + 1])) {
+                const header = parseRow(line);
+                i += 2;
+                const rows = [];
+                while (i < lines.length && lines[i].includes('|') && lines[i].trim() !== '') {
+                    rows.push(parseRow(lines[i]));
+                    i++;
+                }
+                let t = '<table class="md-table"><thead><tr>' +
+                    header.map(h => `<th>${inline(h)}</th>`).join('') + '</tr></thead><tbody>';
+                for (const row of rows) {
+                    t += '<tr>' + header.map((_, c) => `<td>${inline(row[c] || '')}</td>`).join('') + '</tr>';
+                }
+                out.push(t + '</tbody></table>');
+                continue;
+            }
+
+            // Heading
+            const hm = trimmed.match(/^(#{1,6})\s+(.*)$/);
+            if (hm) { out.push(`<h${hm[1].length}>${inline(hm[2])}</h${hm[1].length}>`); i++; continue; }
+
+            // Horizontal rule
+            if (/^([-*_])\1{2,}$/.test(trimmed)) { out.push('<hr>'); i++; continue; }
+
+            // Blockquote
+            if (/^\s*&gt;\s?/.test(line)) {
+                const q = [];
+                while (i < lines.length && /^\s*&gt;\s?/.test(lines[i])) { q.push(lines[i].replace(/^\s*&gt;\s?/, '')); i++; }
+                out.push(`<blockquote>${inline(q.join(' '))}</blockquote>`);
+                continue;
+            }
+
+            // Unordered list
+            if (/^\s*[-*+]\s+/.test(line)) {
+                const items = [];
+                while (i < lines.length && /^\s*[-*+]\s+/.test(lines[i])) { items.push(lines[i].replace(/^\s*[-*+]\s+/, '')); i++; }
+                out.push('<ul>' + items.map(it => `<li>${inline(it)}</li>`).join('') + '</ul>');
+                continue;
+            }
+
+            // Ordered list
+            if (/^\s*\d+[.)]\s+/.test(line)) {
+                const items = [];
+                while (i < lines.length && /^\s*\d+[.)]\s+/.test(lines[i])) { items.push(lines[i].replace(/^\s*\d+[.)]\s+/, '')); i++; }
+                out.push('<ol>' + items.map(it => `<li>${inline(it)}</li>`).join('') + '</ol>');
+                continue;
+            }
+
+            // Blank line
+            if (trimmed === '') { i++; continue; }
+
+            // Paragraph: gather consecutive plain lines
+            const para = [];
+            while (i < lines.length) {
+                const l = lines[i];
+                if (l.trim() === '' || /^ \d+ $/.test(l.trim()) ||
+                    /^(#{1,6})\s+/.test(l.trim()) || /^\s*[-*+]\s+/.test(l) ||
+                    /^\s*\d+[.)]\s+/.test(l) || /^\s*&gt;\s?/.test(l) ||
+                    (l.includes('|') && isTableSep(lines[i + 1]))) break;
+                para.push(l);
+                i++;
+            }
+            out.push(`<p>${inline(para.join('<br>'))}</p>`);
+        }
+
+        let html = out.join('\n');
+        html = html.replace(/ (\d+) /g, (m, n) => blocks[parseInt(n, 10)]);
+        return html;
+    },
+};

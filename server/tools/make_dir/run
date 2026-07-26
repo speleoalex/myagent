@@ -1,0 +1,15 @@
+#!/usr/bin/env python3
+"""Create a directory (and any missing parents)."""
+import json
+import sys
+from pathlib import Path
+
+args = json.loads(sys.stdin.read())
+path = Path(args["path"])
+
+try:
+    path.mkdir(parents=True, exist_ok=True)
+    print(f"OK: Directory ready: {path}")
+except OSError as e:
+    print(f"ERROR: {e}", file=sys.stderr)
+    sys.exit(1)

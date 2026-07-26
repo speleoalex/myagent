@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+.playwright-mcp/
+# runtime data lives under ~/myagent-connectors by default, but ignore any
+# local copy just in case
+data/

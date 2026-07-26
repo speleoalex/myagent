@@ -1,0 +1,21 @@
+{
+  "name": "Execute Shell Command",
+  "description": "Execute a shell command on the local system and return stdout/stderr.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "command": {
+        "type": "string",
+        "description": "The shell command to execute"
+      },
+      "timeout": {
+        "type": "integer",
+        "description": "Timeout in seconds",
+        "default": 30
+      }
+    },
+    "required": ["command"]
+  },
+  "timeout": 60,
+  "max_output": 10000
+}

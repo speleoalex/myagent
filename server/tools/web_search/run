@@ -1,0 +1,171 @@
+#!/usr/bin/env node
+/**
+ * web_search tool - Search the web via DuckDuckGo using headless Chrome
+ * Input (JSON on stdin): { "query": "search terms" }
+ * Output: structured search results on stdout
+ */
+
+const puppeteer = require('puppeteer-core');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+
+function findChromePath() {
+    // 1. Prefer a system-installed browser binary if present
+    const systemBinaries = [
+        process.env.PUPPETEER_EXECUTABLE_PATH,
+        '/usr/bin/chromium',
+        '/usr/bin/chromium-browser',
+        '/usr/bin/google-chrome-stable',
+        '/usr/bin/google-chrome',
+    ];
+    for (const bin of systemBinaries) {
+        if (bin && fs.existsSync(bin)) return bin;
+    }
+
+    // 2. Fall back to a puppeteer-managed Chrome download
+    const possiblePaths = [
+        path.join(os.homedir(), '.cache/puppeteer/chrome'),
+        path.join(__dirname, '.cache/puppeteer/chrome'),
+        '/root/.cache/puppeteer/chrome',
+        '/var/www/.cache/puppeteer/chrome',
+    ];
+    for (const basePath of possiblePaths) {
+        if (fs.existsSync(basePath)) {
+            const versions = fs.readdirSync(basePath).filter(f => f.startsWith('linux-'));
+            if (versions.length > 0) {
+                const chromePath = path.join(basePath, versions[0], 'chrome-linux64/chrome');
+                if (fs.existsSync(chromePath)) return chromePath;
+            }
+        }
+    }
+    return null;
+}
+
+async function webSearch(query) {
+    let browser = null;
+    try {
+        const url = 'https://duckduckgo.com/?q=' + encodeURIComponent(query);
+
+        const launchOptions = {
+            headless: 'new',
+            args: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-gpu',
+                '--window-size=1920,1080',
+                '--disable-blink-features=AutomationControlled',
+                '--incognito',
+                '--disk-cache-size=0',
+                '--disable-application-cache',
+            ]
+        };
+
+        const chromePath = findChromePath();
+        if (chromePath) launchOptions.executablePath = chromePath;
+
+        browser = await puppeteer.launch(launchOptions);
+        const page = await browser.newPage();
+
+        // Disable cache to avoid stale results
+        await page.setCacheEnabled(false);
+
+        await page.setViewport({ width: 1920, height: 1080 });
+        await page.setUserAgent(
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        );
+        await page.setExtraHTTPHeaders({
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Cache-Control': 'no-cache',
+            'Pragma': 'no-cache',
+        });
+
+        await page.evaluateOnNewDocument(() => {
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+        });
+
+        await page.goto(url, {
+            waitUntil: ['networkidle2', 'domcontentloaded'],
+            timeout: 30000
+        });
+
+        await new Promise(resolve => setTimeout(resolve, 2000));
+
+        const results = await page.evaluate(() => {
+            const items = [];
+
+            // DuckDuckGo result selectors
+            const resultEls = document.querySelectorAll('[data-testid="result"], article[data-testid]');
+
+            resultEls.forEach((el) => {
+                const titleEl = el.querySelector('h2, h3, [data-testid="result-title-a"]');
+                const linkEl = el.querySelector('a[href^="http"]') || el.querySelector('a');
+                const snippetEl = el.querySelector('[data-result="snippet"], .OgdwYG6KE2c-');
+
+                const title = titleEl ? titleEl.textContent.trim() : '';
+                const link = linkEl ? linkEl.href : '';
+                const snippet = snippetEl ? snippetEl.textContent.trim() : '';
+
+                if (title && link && !link.includes('duckduckgo.com')) {
+                    items.push({ title, link, snippet });
+                }
+            });
+
+            // Fallback: generic extraction
+            if (items.length === 0) {
+                const allLinks = document.querySelectorAll('a[href^="http"]');
+                const seen = new Set();
+                allLinks.forEach(a => {
+                    const href = a.href;
+                    if (href.includes('duckduckgo.com') || seen.has(href)) return;
+                    const text = a.textContent.trim();
+                    if (text.length > 5 && text.length < 200) {
+                        seen.add(href);
+                        items.push({ title: text, link: href, snippet: '' });
+                    }
+                });
+            }
+
+            return items.slice(0, 10);
+        });
+
+        await browser.close();
+        return results;
+
+    } catch (error) {
+        if (browser) await browser.close();
+        throw error;
+    }
+}
+
+// Read JSON from stdin
+let input = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', chunk => { input += chunk; });
+process.stdin.on('end', async () => {
+    try {
+        const args = JSON.parse(input);
+        const query = args.query;
+
+        if (!query) {
+            console.error('ERROR: query is required');
+            process.exit(1);
+        }
+
+        const results = await webSearch(query);
+
+        if (results.length === 0) {
+            console.log('No results found for: ' + query);
+        } else {
+            const output = results.map((r, i) =>
+                `[${i + 1}] ${r.title}\n    ${r.link}\n    ${r.snippet}`
+            ).join('\n\n');
+            console.log(output);
+        }
+    } catch (err) {
+        console.error('ERROR: ' + err.message);
+        process.exit(1);
+    }
+});

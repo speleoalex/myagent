@@ -1,0 +1,20 @@
+{
+  "name": "Append to File",
+  "description": "Append content to the end of a file. Creates the file and parent directories if they don't exist. Use this to add to a file without overwriting it (e.g. logs).",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "path": {
+        "type": "string",
+        "description": "Absolute or relative file path to append to"
+      },
+      "content": {
+        "type": "string",
+        "description": "Content to append at the end of the file"
+      }
+    },
+    "required": ["path", "content"]
+  },
+  "timeout": 10,
+  "max_output": 1000
+}

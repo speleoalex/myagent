@@ -1,0 +1,24 @@
+{
+  "name": "Call Agent",
+  "description": "Send a message to another agent and get its response. Useful for delegating specialized tasks.",
+  "internal": true,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "agent_id": {
+        "type": "string",
+        "description": "The ID of the agent to call (see Available Agents in your instructions)"
+      },
+      "message": {
+        "type": "string",
+        "description": "The message to send to the agent"
+      },
+      "attachment_indices": {
+        "type": "array",
+        "items": { "type": "integer" },
+        "description": "Optional 0-based indices of the current user's attachments to forward to the agent, e.g. [0]. See the 'Attachments (this turn)' list in your instructions. Omit when no attachment is relevant."
+      }
+    },
+    "required": ["agent_id", "message"]
+  }
+}

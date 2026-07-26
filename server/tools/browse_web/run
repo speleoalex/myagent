@@ -1,0 +1,229 @@
+#!/usr/bin/env node
+/**
+ * browse_web tool - Fetch webpage using Puppeteer (headless Chrome)
+ * Input (JSON on stdin): { "url": "...", "extract": "text"|"html" }
+ * Output: extracted text or HTML on stdout
+ */
+
+const puppeteer = require('puppeteer-core');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+
+// System browser locations per OS. Linux, macOS and Windows so the tool works
+// on all three; PUPPETEER_EXECUTABLE_PATH always wins if set.
+function systemBrowserCandidates() {
+    if (process.platform === 'darwin') {
+        return [
+            '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+            '/Applications/Chromium.app/Contents/MacOS/Chromium',
+            '/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary',
+            '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+        ];
+    }
+    if (process.platform === 'win32') {
+        const pf = process.env['PROGRAMFILES'] || 'C:\\Program Files';
+        const pf86 = process.env['PROGRAMFILES(X86)'] || 'C:\\Program Files (x86)';
+        const local = process.env['LOCALAPPDATA'] || '';
+        return [
+            path.join(pf, 'Google/Chrome/Application/chrome.exe'),
+            path.join(pf86, 'Google/Chrome/Application/chrome.exe'),
+            local && path.join(local, 'Google/Chrome/Application/chrome.exe'),
+            path.join(pf, 'Microsoft/Edge/Application/msedge.exe'),
+        ].filter(Boolean);
+    }
+    // linux
+    return [
+        '/usr/bin/chromium',
+        '/usr/bin/chromium-browser',
+        '/usr/bin/google-chrome-stable',
+        '/usr/bin/google-chrome',
+    ];
+}
+
+// The per-platform layout of a puppeteer-managed Chrome-for-Testing download:
+// version folders are prefixed by platform, and the binary sits at a
+// platform-specific inner path.
+function puppeteerChromeInBase(basePath) {
+    const specs = process.platform === 'darwin'
+        ? [
+            { prefix: 'mac_arm-', inner: 'chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing' },
+            { prefix: 'mac-',     inner: 'chrome-mac-x64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing' },
+          ]
+        : process.platform === 'win32'
+        ? [{ prefix: 'win64-', inner: 'chrome-win64/chrome.exe' }]
+        : [{ prefix: 'linux-', inner: 'chrome-linux64/chrome' }];
+    let entries;
+    try { entries = fs.readdirSync(basePath); } catch (e) { return null; }
+    for (const { prefix, inner } of specs) {
+        const versions = entries.filter(f => f.startsWith(prefix));
+        if (versions.length > 0) {
+            const chromePath = path.join(basePath, versions[0], inner);
+            if (fs.existsSync(chromePath)) return chromePath;
+        }
+    }
+    return null;
+}
+
+function findChromePath() {
+    // 1. Prefer an explicit override, then a system-installed browser binary.
+    const systemBinaries = [
+        process.env.PUPPETEER_EXECUTABLE_PATH,
+        ...systemBrowserCandidates(),
+    ];
+    for (const bin of systemBinaries) {
+        if (bin && fs.existsSync(bin)) return bin;
+    }
+
+    // 2. Fall back to a puppeteer-managed Chrome download (for the running OS).
+    const possiblePaths = [
+        path.join(os.homedir(), '.cache/puppeteer/chrome'),
+        path.join(__dirname, '.cache/puppeteer/chrome'),
+        '/root/.cache/puppeteer/chrome',
+        '/var/www/.cache/puppeteer/chrome',
+    ];
+    for (const basePath of possiblePaths) {
+        if (fs.existsSync(basePath)) {
+            const found = puppeteerChromeInBase(basePath);
+            if (found) return found;
+        }
+    }
+    return null;
+}
+
+async function browseWeb(url, extract) {
+    let browser = null;
+    try {
+        new URL(url);
+
+        const launchOptions = {
+            headless: 'new',
+            args: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-gpu',
+                '--window-size=1920,1080',
+                '--disable-blink-features=AutomationControlled',
+                '--incognito',
+                '--disk-cache-size=0',
+                '--disable-application-cache',
+            ]
+        };
+
+        const chromePath = findChromePath();
+        if (chromePath) launchOptions.executablePath = chromePath;
+
+        browser = await puppeteer.launch(launchOptions);
+        const page = await browser.newPage();
+
+        // Disable cache to avoid stale results
+        await page.setCacheEnabled(false);
+
+        await page.setViewport({ width: 1920, height: 1080 });
+        await page.setUserAgent(
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        );
+        await page.setExtraHTTPHeaders({
+            'Accept-Language': 'it-IT,it;q=0.9,en-US;q=0.8,en;q=0.7',
+            'Cache-Control': 'no-cache',
+            'Pragma': 'no-cache',
+        });
+
+        // Anti-detection
+        await page.evaluateOnNewDocument(() => {
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+            Object.defineProperty(navigator, 'languages', { get: () => ['it-IT', 'it', 'en-US', 'en'] });
+        });
+
+        await page.goto(url, {
+            waitUntil: ['networkidle2', 'domcontentloaded'],
+            timeout: 30000
+        });
+
+        // Extra wait for dynamic content
+        await new Promise(resolve => setTimeout(resolve, 2000));
+
+        let result;
+        if (extract === 'html') {
+            result = await page.content();
+        } else {
+            // Extract visible text, clean and compact
+            result = await page.evaluate(() => {
+                // Remove noise elements
+                const removeSelectors = [
+                    'script', 'style', 'noscript', 'svg', 'iframe',
+                    'nav', 'header', 'footer',
+                    '[role="navigation"]', '[role="banner"]',
+                    '[aria-label="Languages"]', '[id="SIvCob"]',
+                    '.gb_', // Google bar elements
+                ];
+                removeSelectors.forEach(sel => {
+                    try { document.querySelectorAll(sel).forEach(el => el.remove()); } catch(e) {}
+                });
+
+                // For search engines: extract results specifically
+                // Google
+                let searchResults = document.querySelectorAll('#search .g, #rso .g, .tF2Cxc');
+                // DuckDuckGo
+                if (searchResults.length === 0) {
+                    searchResults = document.querySelectorAll('[data-testid="result"], .result, .nrn-react-div article');
+                }
+                if (searchResults.length > 0) {
+                    const results = [];
+                    searchResults.forEach((el, i) => {
+                        const title = (el.querySelector('h2, h3, [data-testid="result-title-a"]') || {}).textContent || '';
+                        const linkEl = el.querySelector('a[href^="http"]') || el.querySelector('a');
+                        const link = linkEl ? linkEl.href : '';
+                        const snippet = (el.querySelector('[data-result="snippet"], .VwiC3b, .IsZvec, .s3v9rd, .result__snippet') || {}).textContent || '';
+                        if (title && link) {
+                            results.push(`[${i+1}] ${title}\n    ${link}\n    ${snippet}`);
+                        }
+                    });
+                    if (results.length > 0) {
+                        return 'Search results:\n\n' + results.join('\n\n');
+                    }
+                }
+
+                // Generic: get body text
+                const text = document.body.innerText || document.body.textContent || '';
+                return text
+                    .split('\n')
+                    .map(line => line.trim())
+                    .filter(line => line.length > 0)
+                    .join('\n');
+            });
+        }
+
+        await browser.close();
+        return result;
+
+    } catch (error) {
+        if (browser) await browser.close();
+        throw error;
+    }
+}
+
+// Read JSON from stdin
+let input = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', chunk => { input += chunk; });
+process.stdin.on('end', async () => {
+    try {
+        const args = JSON.parse(input);
+        const url = args.url;
+        const extract = args.extract || 'text';
+
+        if (!url) {
+            console.error('ERROR: url is required');
+            process.exit(1);
+        }
+
+        const result = await browseWeb(url, extract);
+        console.log(result);
+    } catch (err) {
+        console.error('ERROR: ' + err.message);
+        process.exit(1);
+    }
+});

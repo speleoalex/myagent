@@ -1,0 +1,9 @@
+{
+  "id": "gemma4",
+  "name": "Gemma 4 (Ollama)",
+  "provider": "ollama",
+  "model": "gemma4:latest",
+  "base_url": "http://localhost:11434",
+  "api_format": "openai",
+  "options": {"repeat_penalty": 1.15}
+}

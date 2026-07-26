@@ -1,0 +1,204 @@
+#!/usr/bin/env python3
+"""Manage MyAgent agents: list them, or add/update one.
+
+Operates directly on the JSON agent files under the config dir (one file per
+agent, ``<config>/agents/<id>.json``) so it does not depend on the HTTP API
+being reachable. Paths follow the same env overrides as the server (config.py):
+  MYAGENT_CONFIG -> config dir (default ~/myagent/config)
+  MYAGENT_TOOLS  -> tools dir  (default ~/myagent/tools)
+The agent store reads files fresh on every request, so writes here take effect
+immediately (no restart needed).
+"""
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+# Mirrors app.storage.store._VALID_ID: ids become filenames, so keep them safe.
+_VALID_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+# The full Agent schema with defaults (mirrors app.models.Agent) so a written
+# file looks exactly like one produced by the API's agent.model_dump().
+_AGENT_DEFAULTS = {
+    "id": "",
+    "name": "",
+    "description": "",
+    "model_id": "default",
+    "system_prompt": "",
+    "tools": [],
+    "max_iterations": 10,
+    "max_tool_calls": 5,
+    "temperature": None,
+    "response_temperature": None,
+    "enabled": True,
+}
+
+
+def config_dir() -> Path:
+    return Path(os.environ.get("MYAGENT_CONFIG") or (Path.home() / "myagent" / "config")).expanduser()
+
+
+def tools_dir() -> Path:
+    return Path(os.environ.get("MYAGENT_TOOLS") or (Path.home() / "myagent" / "tools")).expanduser()
+
+
+def agents_dir() -> Path:
+    return config_dir() / "agents"
+
+
+def slugify(text: str) -> str:
+    """Same rule as the web UI (app.js): lowercase, non-alnum runs -> '-'."""
+    return re.sub(r"^-|-$", "", re.sub(r"[^a-z0-9]+", "-", (text or "").lower()))
+
+
+def available_tools() -> list[str]:
+    d = tools_dir()
+    if not d.is_dir():
+        return []
+    return sorted(e.name for e in d.iterdir() if e.is_dir() and (e / "tool.json").exists())
+
+
+def available_models() -> list[str]:
+    d = config_dir() / "models"
+    if not d.is_dir():
+        return []
+    return sorted(f.stem for f in d.glob("*.json"))
+
+
+def fail(msg: str) -> None:
+    print(f"ERROR: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def do_list() -> None:
+    d = agents_dir()
+    agents = []
+    if d.is_dir():
+        for f in sorted(d.glob("*.json")):
+            try:
+                a = json.loads(f.read_text())
+            except (json.JSONDecodeError, OSError):
+                continue
+            agents.append({
+                "id": a.get("id", f.stem),
+                "name": a.get("name", ""),
+                "description": a.get("description", ""),
+                "model_id": a.get("model_id", ""),
+                "tools": a.get("tools", []),
+                "enabled": a.get("enabled", True),
+            })
+    print(json.dumps({"count": len(agents), "agents": agents}, ensure_ascii=False, indent=2))
+
+
+def read_agent(path: Path) -> dict | None:
+    try:
+        return json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def do_save(args: dict) -> None:
+    name = (args.get("name") or "").strip()
+    agent_id = (args.get("id") or "").strip() or slugify(name)
+    if not agent_id:
+        fail("Provide a 'name' (or an explicit 'id') to save an agent.")
+    if not _VALID_ID.match(agent_id) or ".." in agent_id:
+        fail(f"Invalid agent id derived: {agent_id!r}. Use letters, digits, '.', '_' or '-'.")
+
+    # Validate requested tools against the ones actually installed.
+    if "tools" in args and args["tools"] is not None:
+        requested = args["tools"]
+        if not isinstance(requested, list):
+            fail("'tools' must be a list of tool folder names.")
+        avail = available_tools()
+        unknown = [t for t in requested if t not in avail]
+        if unknown:
+            fail(f"Unknown tool(s): {', '.join(unknown)}. Available tools: {', '.join(avail) or '(none)'}")
+
+    # Validate model_id when explicitly given (skip the 'default' sentinel).
+    model_id = args.get("model_id")
+    if model_id and model_id != "default":
+        models = available_models()
+        if models and model_id not in models:
+            fail(f"Unknown model_id: {model_id!r}. Available models: {', '.join(models)}")
+
+    dst = agents_dir()
+    dst.mkdir(parents=True, exist_ok=True)
+    path = dst / f"{agent_id}.json"
+    existed = path.exists()
+
+    copy_from = (args.get("copy_from") or "").strip()
+    if existed:
+        # Updating an existing agent: start from its current config.
+        agent = read_agent(path) or dict(_AGENT_DEFAULTS)
+    elif copy_from:
+        # Cloning: start from the source agent's config, then apply overrides.
+        base = read_agent(dst / f"{copy_from}.json")
+        if base is None:
+            ids = sorted(f.stem for f in dst.glob("*.json"))
+            fail(f"copy_from agent not found: {copy_from!r}. Available agents: {', '.join(ids) or '(none)'}")
+        agent = base
+    else:
+        agent = dict(_AGENT_DEFAULTS)
+
+    # Backfill any missing schema fields (older files may lack newer keys).
+    for k, v in _AGENT_DEFAULTS.items():
+        agent.setdefault(k, v)
+
+    agent["id"] = agent_id
+    # Only overwrite fields the caller actually provided (so updates are partial).
+    if name:
+        agent["name"] = name
+    elif not agent.get("name"):
+        agent["name"] = agent_id
+    for key in ("system_prompt", "description", "model_id", "enabled"):
+        if key in args and args[key] is not None:
+            agent[key] = args[key]
+    if "tools" in args and args["tools"] is not None:
+        agent["tools"] = list(args["tools"])
+    # Tuning fields. temperature/response_temperature accept a number or null
+    # (null = use the provider default). max_* must be positive integers.
+    for key in ("temperature", "response_temperature"):
+        if key in args:
+            v = args[key]
+            if v is not None and (isinstance(v, bool) or not isinstance(v, (int, float))):
+                fail(f"'{key}' must be a number or null.")
+            agent[key] = v
+    for key in ("max_iterations", "max_tool_calls"):
+        if key in args and args[key] is not None:
+            v = args[key]
+            if isinstance(v, bool) or not isinstance(v, int) or v < 1:
+                fail(f"'{key}' must be a positive integer.")
+            agent[key] = v
+
+    # Atomic write with restrictive perms (matches JsonStore.save).
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(agent, ensure_ascii=False, indent=2))
+    os.chmod(tmp, 0o600)
+    tmp.replace(path)
+
+    verb = "Updated" if existed else "Created"
+    print(f"OK: {verb} agent '{agent['name']}' (id: {agent_id})")
+    print(json.dumps(agent, ensure_ascii=False, indent=2))
+
+
+def main() -> None:
+    try:
+        args = json.loads(sys.stdin.read() or "{}")
+    except json.JSONDecodeError as e:
+        fail(f"Invalid JSON input: {e}")
+    if not isinstance(args, dict):
+        fail("Input must be a JSON object.")
+
+    action = (args.get("action") or "").strip().lower()
+    if action == "list":
+        do_list()
+    elif action in ("save", "add", "update", "upsert"):
+        do_save(args)
+    else:
+        fail("Unknown action. Use 'list' or 'save'.")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,29 @@
+{
+  "name": "HTTP Request",
+  "description": "Make an HTTP request to a URL and return the response.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "method": {
+        "type": "string",
+        "description": "HTTP method",
+        "enum": ["GET", "POST", "PUT", "DELETE"]
+      },
+      "url": {
+        "type": "string",
+        "description": "The URL to request"
+      },
+      "body": {
+        "type": "string",
+        "description": "Request body (for POST/PUT)"
+      },
+      "headers": {
+        "type": "string",
+        "description": "JSON string of headers"
+      }
+    },
+    "required": ["method", "url"]
+  },
+  "timeout": 30,
+  "max_output": 10000
+}

@@ -1,0 +1,431 @@
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    /* Notched phones: keep the chat input above the home-indicator area */
+    padding-bottom: env(safe-area-inset-bottom);
+}
+
+#app {
+    min-height: calc(100vh - 70px);
+}
+
+/* Chat page wrapper. 100dvh (dynamic viewport) tracks the mobile URL bar and
+   virtual keyboard so the input bar stays visible; 100vh is the fallback. The
+   safe-area inset is already added to the body as padding-bottom, so subtract
+   it here too — otherwise the two stack and the page overflows by that inset
+   on notched phones. */
+.chat-wrap {
+    height: calc(100vh - 80px);
+    height: calc(100dvh - 80px - env(safe-area-inset-bottom));
+    max-width: 900px;
+}
+
+#chat-messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 1rem;
+}
+
+.msg {
+    margin-bottom: 0.75rem;
+    padding: 0.5rem 0.75rem;
+    border-radius: 0.5rem;
+    max-width: 85%;
+    /* Long unbroken tokens (URLs, paths, base64) must wrap, not force the
+       whole chat to scroll horizontally on narrow screens. */
+    overflow-wrap: anywhere;
+    word-break: break-word;
+    min-width: 0;
+}
+
+.msg-user {
+    background: var(--bs-primary);
+    color: white;
+    margin-left: auto;
+}
+
+.msg-assistant {
+    /* Theme-adaptive: secondary-bg is a light grey in light mode and a dark
+       grey in dark mode, so the bubble stays readable in both themes. */
+    background: var(--bs-secondary-bg);
+    color: var(--bs-body-color);
+    border: 1px solid var(--bs-border-color);
+}
+
+.msg-error {
+    background: var(--bs-danger-bg-subtle);
+    color: var(--bs-danger-text-emphasis);
+}
+
+/* Inline expandable tool calls (rendered in the chat, nesting recursively) */
+.tool-calls {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    margin-bottom: 0.4rem;
+}
+.tool-calls:empty {
+    display: none;
+}
+
+.tool-call {
+    border: 1px solid var(--bs-border-color);
+    border-radius: 6px;
+    background: var(--bs-tertiary-bg);
+    font-size: 0.82rem;
+}
+
+.tool-call > summary {
+    cursor: pointer;
+    padding: 0.3rem 0.5rem;
+    list-style: none;
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    user-select: none;
+}
+.tool-call > summary::-webkit-details-marker {
+    display: none;
+}
+.tool-call > summary::before {
+    content: "\25B8";  /* ▸ */
+    font-size: 0.7rem;
+    opacity: 0.6;
+}
+.tool-call[open] > summary::before {
+    content: "\25BE";  /* ▾ */
+}
+.tool-call .tc-name {
+    font-weight: 600;
+}
+.tool-call .tc-arrow {
+    opacity: 0.6;
+}
+
+.tool-call-body {
+    padding: 0.35rem 0.6rem 0.5rem;
+    border-top: 1px solid var(--bs-border-color);
+}
+.tc-args {
+    font-family: monospace;
+    font-size: 0.75rem;
+    opacity: 0.75;
+    white-space: pre-wrap;
+    word-break: break-word;
+    margin-bottom: 0.3rem;
+    max-height: 160px;
+    overflow: auto;
+}
+/* Scoped higher than `.msg-assistant pre` so the result box doesn't inherit
+   the message code-block border/background/padding (avoids a nested box). */
+.tool-call .tc-result {
+    white-space: pre-wrap;
+    max-height: 260px;
+    overflow: auto;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    font-size: 0.78rem;
+}
+
+/* Nested sub-agent trace inside a call_agent step */
+.sub-agent {
+    border-left: 2px solid var(--bs-info-border-subtle, var(--bs-info));
+    padding-left: 0.5rem;
+    margin-top: 0.35rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+}
+.sub-agent-head {
+    font-size: 0.75rem;
+    font-weight: 700;
+    color: var(--bs-info-text-emphasis, var(--bs-info));
+}
+.sub-agent-reply {
+    font-style: italic;
+    opacity: 0.8;
+    white-space: pre-wrap;
+    font-size: 0.78rem;
+}
+
+.system-prompt-textarea {
+    font-family: monospace;
+    font-size: 0.9rem;
+    min-height: 200px;
+}
+
+.card-agent {
+    transition: transform 0.1s;
+    cursor: pointer;
+}
+
+.card-agent:hover {
+    transform: translateY(-2px);
+}
+
+.spinner-chat {
+    display: none;
+}
+
+.spinner-chat.active {
+    display: inline-block;
+}
+
+/* Per-message timestamp */
+.msg-time {
+    font-size: 0.68rem;
+    opacity: 0.55;
+    margin-top: 3px;
+    text-align: right;
+}
+.msg-assistant .msg-time {
+    text-align: left;
+}
+
+/* "Thinking" indicator (animated dots) shown while awaiting the first token */
+.typing-indicator {
+    display: inline-flex;
+    gap: 5px;
+    align-items: center;
+    padding: 4px 2px;
+}
+
+.typing-indicator span {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--bs-secondary-color, #888);
+    opacity: 0.4;
+    animation: typing-bounce 1.2s infinite ease-in-out;
+}
+
+.typing-indicator span:nth-child(2) { animation-delay: 0.2s; }
+.typing-indicator span:nth-child(3) { animation-delay: 0.4s; }
+
+@keyframes typing-bounce {
+    0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
+    30% { transform: translateY(-5px); opacity: 1; }
+}
+
+/* Markdown rendering inside assistant messages */
+.msg-assistant .md-table {
+    border-collapse: collapse;
+    margin: 0.5rem 0;
+    width: auto;
+    max-width: 100%;
+    font-size: 0.9rem;
+}
+
+.msg-assistant .md-table th,
+.msg-assistant .md-table td {
+    border: 1px solid var(--bs-border-color);
+    padding: 0.3rem 0.6rem;
+    text-align: left;
+    vertical-align: top;
+}
+
+.msg-assistant .md-table thead th {
+    background: var(--bs-tertiary-bg);
+    font-weight: 600;
+}
+
+.msg-assistant .md-table tbody tr:nth-child(even) {
+    background: var(--bs-tertiary-bg);
+}
+
+.msg-assistant table {
+    display: block;
+    overflow-x: auto;
+}
+
+.msg-assistant p:last-child {
+    margin-bottom: 0;
+}
+
+.msg-assistant h1, .msg-assistant h2, .msg-assistant h3,
+.msg-assistant h4, .msg-assistant h5, .msg-assistant h6 {
+    margin: 0.6rem 0 0.3rem;
+    font-weight: 600;
+}
+
+.msg-assistant h1 { font-size: 1.4rem; }
+.msg-assistant h2 { font-size: 1.25rem; }
+.msg-assistant h3 { font-size: 1.1rem; }
+.msg-assistant h4, .msg-assistant h5, .msg-assistant h6 { font-size: 1rem; }
+
+.msg-assistant ul, .msg-assistant ol {
+    margin: 0.3rem 0;
+    padding-left: 1.5rem;
+}
+
+.msg-assistant pre {
+    background: var(--bs-tertiary-bg);
+    border: 1px solid var(--bs-border-color);
+    border-radius: 0.4rem;
+    padding: 0.6rem 0.8rem;
+    overflow-x: auto;
+    margin: 0.5rem 0;
+}
+
+.msg-assistant pre code {
+    background: none;
+    padding: 0;
+}
+
+.msg-assistant code {
+    background: var(--bs-tertiary-bg);
+    padding: 0.1rem 0.35rem;
+    border-radius: 0.25rem;
+    font-size: 0.88em;
+}
+
+.msg-assistant blockquote {
+    border-left: 3px solid var(--bs-border-color);
+    margin: 0.5rem 0;
+    padding: 0.1rem 0.8rem;
+    color: var(--bs-secondary-color);
+}
+
+.msg-assistant a {
+    color: var(--bs-info);
+}
+
+.msg-assistant hr {
+    border: none;
+    border-top: 1px solid var(--bs-border-color);
+    margin: 0.6rem 0;
+}
+
+/* Toasts must never exceed a phone viewport */
+.toast {
+    max-width: calc(100vw - 2rem);
+}
+
+/* ---- Mobile / touch adjustments ---------------------------------------- */
+
+@media (pointer: coarse) {
+    /* Expanding tool traces is a primary chat interaction: give the summary
+       rows and small table buttons a real touch target. */
+    .tool-call > summary {
+        padding: 0.55rem 0.6rem;
+    }
+    .table .btn-sm {
+        padding: 0.375rem 0.75rem;
+    }
+    /* Attachment chip remove button: enlarge the hit box, not the icon */
+    .attach-remove {
+        padding: 0.55rem;
+    }
+}
+
+@media (max-width: 576px) {
+    /* iOS Safari auto-zooms inputs below 16px — keep textareas at 1rem */
+    .system-prompt-textarea {
+        font-size: 1rem;
+    }
+    .msg {
+        max-width: 92%;
+    }
+    #chat-messages {
+        padding: 0.6rem;
+    }
+    /* Chat toolbar: let the agent select take the remaining row width */
+    #agent-select {
+        max-width: 100% !important;
+        flex: 1 1 40%;
+        min-width: 0;
+    }
+}
+
+/* ---- History window (filterable, date-grouped chat list) --------------- */
+.history-list {
+    display: flex;
+    flex-direction: column;
+}
+
+.history-group {
+    font-size: 0.72rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    color: var(--bs-secondary-color);
+    padding: 0.5rem 0.25rem 0.25rem;
+    position: sticky;
+    top: 0;
+    background: var(--bs-body-bg);
+    z-index: 1;
+}
+
+.history-item {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0.55rem 0.5rem;
+    border-radius: 6px;
+    cursor: pointer;
+    border: 1px solid transparent;
+}
+.history-item:hover {
+    background: var(--bs-tertiary-bg);
+}
+.history-item.active {
+    border-color: var(--bs-primary);
+    background: var(--bs-primary-bg-subtle);
+}
+
+.history-item .hi-main {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+.history-item .hi-title {
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.history-item .hi-meta {
+    font-size: 0.76rem;
+    color: var(--bs-secondary-color);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.history-item .hi-when {
+    font-size: 0.72rem;
+    color: var(--bs-secondary-color);
+    white-space: nowrap;
+    flex: 0 0 auto;
+}
+.history-item .hi-del {
+    flex: 0 0 auto;
+    padding: 0.15rem 0.35rem;
+    opacity: 0.55;
+    line-height: 1;
+}
+.history-item .hi-del:hover {
+    opacity: 1;
+}
+
+/* Agent preview tree (delegation + tools) */
+.agent-tree ul {
+    list-style: none;
+    padding-left: 1.1rem;
+    margin: 0.2rem 0;
+    border-left: 1px solid var(--bs-border-color);
+}
+.agent-tree li {
+    margin: 0.15rem 0;
+}
+.agent-tree .agent-node-head {
+    padding: 0.2rem 0;
+    font-size: 1rem;
+}
+.agent-tree details > summary {
+    cursor: pointer;
+    user-select: none;
+}
+.agent-tree details > summary:hover {
+    color: var(--bs-primary);
+}

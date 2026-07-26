@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[co]
+*.egg-info/
+.venv/
+venv/
+env/
+dist/
+build/
+
+# Node (web tools: deps installed by setup.sh)
+node_modules/
+
+# Environment / local
+.env
+
+# Test / editor artifacts
+.playwright-mcp/
+
+# Local-only files (never shipped)
+.claude/
+CLAUDE.md
+TODO-internal.md

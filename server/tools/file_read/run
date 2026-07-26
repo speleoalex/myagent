@@ -1,0 +1,29 @@
+#!/usr/bin/env python3
+"""Read a file and output its contents to stdout."""
+import json
+import sys
+from pathlib import Path
+
+args = json.loads(sys.stdin.read())
+path = Path(args["path"])
+max_lines = args.get("max_lines") or 200
+
+if not path.exists():
+    print(f"ERROR: File not found: {path}", file=sys.stderr)
+    sys.exit(1)
+if not path.is_file():
+    print(f"ERROR: Not a file: {path}", file=sys.stderr)
+    sys.exit(1)
+
+try:
+    text = path.read_text(errors="replace")
+except OSError as e:
+    print(f"ERROR: {e}", file=sys.stderr)
+    sys.exit(1)
+
+lines = text.splitlines()
+if len(lines) > max_lines:
+    print("\n".join(lines[:max_lines]))
+    print(f"\n... [{len(lines)} total lines, showing first {max_lines}]")
+else:
+    print(text, end="")

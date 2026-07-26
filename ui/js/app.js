@@ -1,0 +1,162 @@
+const App = {
+    container: null,
+
+    init() {
+        this.container = document.getElementById('app');
+        I18n.init();
+        this.applyStaticI18n();
+        window.addEventListener('hashchange', () => this.route());
+        this.route();
+        this.updateActiveNav();
+    },
+
+    // Translate the static chrome (navbar labels) that lives outside the SPA
+    // container. Page content is translated on (re-)render via i18n() calls.
+    // Language and theme controls live in the Settings screen.
+    applyStaticI18n() {
+        document.querySelectorAll('[data-i18n]').forEach(el => {
+            el.textContent = i18n(el.dataset.i18n);
+        });
+        document.querySelectorAll('[data-i18n-title]').forEach(el => {
+            el.title = i18n(el.dataset.i18nTitle);
+        });
+    },
+
+    route() {
+        // A Bootstrap modal (e.g. the chat history window) may still be open.
+        // SPA re-renders replace #app without Bootstrap's own cleanup, which
+        // would leave a stuck backdrop and a scroll-locked body — clear those.
+        document.querySelectorAll('.modal-backdrop').forEach(el => el.remove());
+        document.body.classList.remove('modal-open');
+        document.body.style.removeProperty('overflow');
+        document.body.style.removeProperty('padding-right');
+
+        // Mobile: close the collapsed navbar menu after navigating (hash links
+        // don't reload the page, so Bootstrap would leave it open over the content).
+        const navMenu = document.getElementById('navMenu');
+        if (navMenu && navMenu.classList.contains('show')) {
+            bootstrap.Collapse.getOrCreateInstance(navMenu).hide();
+        }
+
+        const hash = location.hash || '#/';
+        const parts = hash.slice(2).split('/');
+        const page = parts[0] || '';
+        const params = parts.slice(1);
+
+        switch (page) {
+            case 'agents':  AgentsPage.render(params); break;
+            case 'tools':   ToolsPage.render(params); break;
+            case 'models':  ModelsPage.render(params); break;
+            case 'chat':    ChatPage.render(params); break;
+            case 'settings': SettingsPage.render(params); break;
+            default:        this.renderHome(); break;
+        }
+        this.updateActiveNav();
+    },
+
+    updateActiveNav() {
+        const hash = location.hash || '#/';
+        document.querySelectorAll('.nav-link').forEach(link => {
+            const href = link.getAttribute('href');
+            // Only route links (#/...) participate; skip the language/theme chrome.
+            if (!href || !href.startsWith('#/')) return;
+            link.classList.toggle('active', hash.startsWith(href));
+        });
+    },
+
+    async api(method, path, body = null) {
+        const opts = {
+            method,
+            headers: { 'Content-Type': 'application/json' },
+        };
+        if (body) opts.body = JSON.stringify(body);
+        const res = await fetch(`/api${path}`, opts);
+        if (!res.ok) {
+            const text = await res.text();
+            throw new Error(text || `HTTP ${res.status}`);
+        }
+        return res.json();
+    },
+
+    toast(message, type = 'success') {
+        const id = 'toast-' + Date.now();
+        const html = `
+            <div id="${id}" class="toast align-items-center text-bg-${type} border-0 show position-fixed bottom-0 end-0 m-3" style="z-index:9999">
+                <div class="d-flex">
+                    <div class="toast-body">${this.esc(message)}</div>
+                    <button type="button" class="btn-close btn-close-white me-2 m-auto" onclick="document.getElementById('${id}').remove()"></button>
+                </div>
+            </div>`;
+        document.body.insertAdjacentHTML('beforeend', html);
+        setTimeout(() => document.getElementById(id)?.remove(), 3000);
+    },
+
+    esc(str) {
+        const div = document.createElement('div');
+        div.textContent = str;
+        return div.innerHTML;
+    },
+
+    slugify(text) {
+        return text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+    },
+
+    autoId(nameInputId, idInputId) {
+        const nameEl = document.getElementById(nameInputId);
+        const idEl = document.getElementById(idInputId);
+        if (!nameEl || !idEl || idEl.readOnly) return;
+        nameEl.addEventListener('input', () => {
+            idEl.value = this.slugify(nameEl.value);
+        });
+    },
+
+    async renderHome() {
+        let agentCount = 0, modelCount = 0, toolCount = 0;
+        try {
+            const [agents, models, tools] = await Promise.all([
+                this.api('GET', '/agents'),
+                this.api('GET', '/models'),
+                this.api('GET', '/tools'),
+            ]);
+            agentCount = agents.length;
+            modelCount = models.length;
+            toolCount = tools.length;
+        } catch (e) { /* ignore */ }
+
+        this.container.innerHTML = `
+            <div class="row mt-4">
+                <div class="col-md-8 mx-auto text-center">
+                    <h1><i class="bi bi-robot"></i> MyAgent</h1>
+                    <p class="lead text-secondary">${i18n('home.subtitle')}</p>
+                    <div class="row mt-4 g-3">
+                        <div class="col-md-4">
+                            <a href="#/agents" class="text-decoration-none">
+                                <div class="card text-center p-3">
+                                    <h2>${agentCount}</h2>
+                                    <div class="text-secondary">${i18n('home.agents')}</div>
+                                </div>
+                            </a>
+                        </div>
+                        <div class="col-md-4">
+                            <a href="#/models" class="text-decoration-none">
+                                <div class="card text-center p-3">
+                                    <h2>${modelCount}</h2>
+                                    <div class="text-secondary">${i18n('home.models')}</div>
+                                </div>
+                            </a>
+                        </div>
+                        <div class="col-md-4">
+                            <a href="#/tools" class="text-decoration-none">
+                                <div class="card text-center p-3">
+                                    <h2>${toolCount}</h2>
+                                    <div class="text-secondary">${i18n('home.tools')}</div>
+                                </div>
+                            </a>
+                        </div>
+                    </div>
+                </div>
+            </div>`;
+    },
+};
+
+document.addEventListener('DOMContentLoaded', () => App.init());
