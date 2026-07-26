@@ -13,6 +13,11 @@ that's a choice, not a dependency.
 Think: a boat, a mountain hut, a lab with no uplink, a blackout, or simply a
 home where you'd rather not send everything to someone else's server.
 
+![The Librarian agent answering from an offline Wikipedia archive](docs/images/chat-librarian.png)
+
+*A local model answering from an offline Wikipedia archive — this machine
+had no internet access.*
+
 ## Features
 
 - **Works offline** — local model + local knowledge + local devices. Nothing
@@ -181,6 +186,8 @@ The Telegram connector server has its own variables — see
 [connectors/README.md](connectors/README.md).
 
 ## Bundled agents and models
+
+![The bundled agents in the web UI](docs/images/agents.png)
 
 First run seeds six agents:
 
