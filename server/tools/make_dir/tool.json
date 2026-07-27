@@ -1,6 +1,6 @@
 {
   "name": "Make Directory",
-  "description": "Create a directory, including any missing parent directories. Succeeds even if the directory already exists.",
+  "description": "Create a directory and any missing parents. Succeeds if it already exists.",
   "parameters": {
     "type": "object",
     "properties": {
@@ -9,7 +9,9 @@
         "description": "Directory path to create"
       }
     },
-    "required": ["path"]
+    "required": [
+      "path"
+    ]
   },
   "timeout": 10,
   "max_output": 500

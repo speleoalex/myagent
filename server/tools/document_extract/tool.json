@@ -1,33 +1,35 @@
 {
   "name": "Extract Document to Markdown",
-  "description": "Extract the TEXT and IMAGES from a document and return them as Markdown. Supports PDF, HTML, image and AUDIO files. For audio (voice notes, opus/oga/mp3/m4a/wav/...) it returns the speech transcription. Embedded/extracted images are saved as files under /tmp and linked inline in the Markdown (never inlined as base64). Use this to actually READ the content of a PDF, an HTML page, an image (with OCR) or to TRANSCRIBE an audio file — unlike file_read, which only works for plain-text files and returns garbage on binary formats.",
+  "description": "Read a document as Markdown: PDF, HTML, image (OCR) or audio (returns the speech transcription). Use this instead of file_read for anything that is not plain text — file_read returns garbage on binary files. Extracted images are saved as files and linked inline.",
   "parameters": {
     "type": "object",
     "properties": {
       "path": {
         "type": "string",
-        "description": "Absolute or relative path to the document (.pdf, .html/.htm, an image like .png/.jpg, or an audio file like .oga/.mp3/.m4a/.wav)"
+        "description": "Path to the document (.pdf, .html, an image, or an audio file)"
       },
       "language": {
         "type": "string",
-        "description": "Audio only: ISO language code (e.g. 'it', 'en') to skip auto-detection and improve transcription accuracy."
+        "description": "Audio only: ISO code (e.g. 'it') to skip auto-detection."
       },
       "image_dir": {
         "type": "string",
-        "description": "Directory where extracted images are written. Defaults to a per-file folder under /tmp/myagent_extract."
+        "description": "Where to write extracted images. Default: a per-file folder under /tmp."
       },
       "max_pages": {
         "type": "integer",
-        "description": "For PDFs: maximum number of pages to process.",
+        "description": "PDF only: maximum pages to process.",
         "default": 50
       },
       "ocr": {
         "type": "boolean",
-        "description": "Run OCR (tesseract, eng+ita) to extract text from image files. Ignored for PDF/HTML.",
+        "description": "Run OCR on image files. Ignored for PDF/HTML.",
         "default": true
       }
     },
-    "required": ["path"]
+    "required": [
+      "path"
+    ]
   },
   "timeout": 300,
   "max_output": 20000

@@ -1,15 +1,17 @@
 {
   "name": "Web Research",
-  "description": "Research the web in ONE step: searches the web AND reads the top result pages, returning their actual content (numbers, facts, weather, prices, news) — not just links. Use this to answer any question needing current or external information.",
+  "description": "Search the web AND read the top result pages in one step, returning their actual content (facts, numbers, prices, news) — not just links. Use for anything current or external.",
   "parameters": {
     "type": "object",
     "properties": {
       "query": {
         "type": "string",
-        "description": "What to research, e.g. 'weather in Genova today' or 'population of Italy 2024'"
+        "description": "What to research, e.g. 'weather in Genova today'"
       }
     },
-    "required": ["query"]
+    "required": [
+      "query"
+    ]
   },
   "timeout": 150,
   "max_output": 8000

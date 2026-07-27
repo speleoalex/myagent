@@ -1,65 +1,72 @@
 {
   "name": "Manage Agents",
-  "description": "List MyAgent agents, or add/update an agent. Use action='list' to get every agent (id, name, tools). Use action='save' to create a new agent or update an existing one from its name, system prompt and the tools it may use.",
+  "description": "List MyAgent agents, or create/update one. action='list' returns every agent (id, name, tools); action='save' creates a new agent or updates an existing one — only the fields you pass are changed, the others keep their value.",
   "parameters": {
     "type": "object",
     "properties": {
       "action": {
         "type": "string",
-        "enum": ["list", "save"],
-        "description": "'list' returns all agents; 'save' creates a new agent or updates an existing one."
+        "enum": [
+          "list",
+          "save"
+        ],
+        "description": "'list' returns all agents; 'save' creates or updates one."
       },
       "name": {
         "type": "string",
-        "description": "Agent display name. Required for 'save'. The agent id is derived from it (slugified) unless 'id' is provided."
+        "description": "Display name. Required for 'save'; the id is derived from it unless 'id' is given."
       },
       "system_prompt": {
         "type": "string",
-        "description": "The agent's system prompt / instructions. Used by 'save'. On update it is only changed when provided."
+        "description": "The agent's instructions."
       },
       "tools": {
         "type": "array",
-        "items": { "type": "string" },
-        "description": "Folder names of the tools the agent may use (e.g. 'web_search', 'file_write', 'browse_web'). Used by 'save'. On update it is only changed when provided."
+        "items": {
+          "type": "string"
+        },
+        "description": "Tool folder names the agent may use (e.g. 'web_search', 'file_write'). An unknown name comes back with the valid list."
       },
       "id": {
         "type": "string",
-        "description": "Optional explicit agent id. If it matches an existing agent that agent is updated, otherwise a new one is created. Defaults to the slugified name."
+        "description": "Explicit agent id; if it matches an existing agent that agent is updated. Default: slugified name."
       },
       "copy_from": {
         "type": "string",
-        "description": "Optional id of an existing agent to clone as the starting point (copies its system_prompt, tools, model, etc.). Any of name/system_prompt/tools/... you also pass then override the copy. Ignored when updating an agent that already exists."
+        "description": "Id of an existing agent to clone as the starting point; fields you also pass override the copy. Ignored when updating."
       },
       "description": {
         "type": "string",
-        "description": "Optional short description of the agent."
+        "description": "Short description of the agent."
       },
       "model_id": {
         "type": "string",
-        "description": "Optional model id to use. Defaults to 'default' (the globally configured default model)."
+        "description": "Model id. Default 'default' (the globally configured model)."
       },
       "enabled": {
         "type": "boolean",
-        "description": "Optional. Whether the agent is enabled (default true)."
+        "description": "Whether the agent is enabled (default true)."
       },
       "temperature": {
         "type": "number",
-        "description": "Optional. Sampling temperature for tool-calling decisions (lower = more deterministic, fewer hallucinations). Omit to leave unchanged."
+        "description": "Sampling temperature for tool-calling decisions; lower = more deterministic."
       },
       "response_temperature": {
         "type": "number",
-        "description": "Optional. Sampling temperature for the final answer. Lower it (e.g. 0.2) to reduce made-up content. Omit to leave unchanged."
+        "description": "Sampling temperature for the final answer; lower = less made-up content."
       },
       "max_iterations": {
         "type": "integer",
-        "description": "Optional. Max LLM round-trips per turn (default 10). Raise it if the agent needs several tool calls before answering."
+        "description": "Max LLM round-trips per turn (default 10)."
       },
       "max_tool_calls": {
         "type": "integer",
-        "description": "Optional. Hard cap on total tool executions per turn (default 5)."
+        "description": "Max total tool executions per turn (default 5)."
       }
     },
-    "required": ["action"]
+    "required": [
+      "action"
+    ]
   },
   "timeout": 15,
   "max_output": 6000

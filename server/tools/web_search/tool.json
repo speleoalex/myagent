@@ -1,15 +1,17 @@
 {
   "name": "Web Search",
-  "description": "Search the web using DuckDuckGo. Returns a list of results with title, URL and snippet. Use this to find information online.",
+  "description": "Search the web (DuckDuckGo) and return title, URL and snippet for each result.",
   "parameters": {
     "type": "object",
     "properties": {
       "query": {
         "type": "string",
-        "description": "The search query (e.g. 'best caves in Italy')"
+        "description": "The search query"
       }
     },
-    "required": ["query"]
+    "required": [
+      "query"
+    ]
   },
   "timeout": 45,
   "max_output": 10000

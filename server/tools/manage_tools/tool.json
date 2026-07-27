@@ -1,0 +1,61 @@
+{
+  "name": "Manage Tools",
+  "description": "List, read, create, update, test or delete MyAgent tools. 'list' = all installed tools; 'get' = one tool's metadata and run script; 'save' = create or update (only the fields you pass change); 'test' = actually execute a tool with sample arguments; 'delete' = remove one.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "action": {
+        "type": "string",
+        "enum": [
+          "list",
+          "get",
+          "save",
+          "test",
+          "delete"
+        ],
+        "description": "The operation to perform."
+      },
+      "id": {
+        "type": "string",
+        "description": "Tool id = folder name, lowercase with underscores (e.g. 'word_count'). Required except for 'list'."
+      },
+      "name": {
+        "type": "string",
+        "description": "Human-readable name. Required when creating."
+      },
+      "description": {
+        "type": "string",
+        "description": "What the tool does — other models read this to decide when to call it. Required when creating."
+      },
+      "parameters": {
+        "type": "object",
+        "description": "JSON Schema of the tool's arguments: {\"type\": \"object\", \"properties\": {...}, \"required\": [...]}. Default: no arguments."
+      },
+      "script": {
+        "type": "string",
+        "description": "Full source of the executable 'run' script. Required when creating. Must start with a shebang; it reads one JSON object of arguments on stdin and prints its result on stdout."
+      },
+      "timeout": {
+        "type": "integer",
+        "description": "Seconds before the tool subprocess is killed (default 30)."
+      },
+      "max_output": {
+        "type": "integer",
+        "description": "Output characters before the result is truncated (default 10000)."
+      },
+      "enabled": {
+        "type": "boolean",
+        "description": "Disabled tools stay installed but hidden from agents (default true)."
+      },
+      "test_args": {
+        "type": "object",
+        "description": "Arguments for action='test' — the JSON object the tool receives on stdin. Default {}."
+      }
+    },
+    "required": [
+      "action"
+    ]
+  },
+  "timeout": 60,
+  "max_output": 8000
+}

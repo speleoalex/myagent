@@ -1,21 +1,26 @@
 {
   "name": "Browse Web",
-  "description": "Fetch a webpage using a real browser (headless Chrome). Renders JavaScript, bypasses bot detection. Returns extracted text content. For web search use: https://duckduckgo.com/?q=your+search+terms (Google blocks automated requests).",
+  "description": "Fetch a webpage with a real (headless) browser and return its text; renders JavaScript. To search, browse https://duckduckgo.com/?q=your+terms (Google blocks automation).",
   "parameters": {
     "type": "object",
     "properties": {
       "url": {
         "type": "string",
-        "description": "The URL to browse (e.g. https://www.google.com/search?q=caves)"
+        "description": "The URL to browse"
       },
       "extract": {
         "type": "string",
-        "description": "What to extract: 'text' (visible text only, default), 'html' (full HTML)",
-        "enum": ["text", "html"],
+        "description": "'text' (visible text, default) or 'html'",
+        "enum": [
+          "text",
+          "html"
+        ],
         "default": "text"
       }
     },
-    "required": ["url"]
+    "required": [
+      "url"
+    ]
   },
   "timeout": 45,
   "max_output": 15000

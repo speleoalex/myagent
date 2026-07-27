@@ -1,13 +1,18 @@
 {
   "name": "HTTP Request",
-  "description": "Make an HTTP request to a URL and return the response.",
+  "description": "Make an HTTP request and return the response. Use it for REST APIs and for IoT devices on the local network.",
   "parameters": {
     "type": "object",
     "properties": {
       "method": {
         "type": "string",
         "description": "HTTP method",
-        "enum": ["GET", "POST", "PUT", "DELETE"]
+        "enum": [
+          "GET",
+          "POST",
+          "PUT",
+          "DELETE"
+        ]
       },
       "url": {
         "type": "string",
@@ -15,14 +20,17 @@
       },
       "body": {
         "type": "string",
-        "description": "Request body (for POST/PUT)"
+        "description": "Request body (POST/PUT)"
       },
       "headers": {
         "type": "string",
         "description": "JSON string of headers"
       }
     },
-    "required": ["method", "url"]
+    "required": [
+      "method",
+      "url"
+    ]
   },
   "timeout": 30,
   "max_output": 10000

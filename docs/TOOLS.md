@@ -100,6 +100,21 @@ chmod +x run
 
 Enable it in an agent's tool list and it's immediately callable — no restart.
 
+## Letting the AI write the tool
+
+The bundled **Tool Manager** agent does all of the above for you: describe the
+tool you want and it writes the folder through the `manage_tools` tool, which
+covers `list`, `get` (metadata + run script), `save` (create/update), `test`
+(actually executes the tool with sample arguments) and `delete`.
+
+`save` refuses a script without a shebang, rejects Python syntax errors before
+writing, and never touches internal tools; `delete` refuses `manage_tools`
+itself. After a `save` the result tells the agent the tool is untested, so the
+normal loop is **save → test → fix → test**.
+
+Anything it creates is an ordinary tool folder in `~/myagent/tools/`, editable
+by hand or from **Tools** in the UI.
+
 ## Python dependencies
 
 The tool subprocess uses whatever interpreter its shebang points at. If a

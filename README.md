@@ -189,7 +189,7 @@ The Telegram connector server has its own variables — see
 
 ![The bundled agents in the web UI](docs/images/agents.png)
 
-First run seeds six agents:
+First run seeds seven agents:
 
 | Agent | Does | Needs internet? |
 |---|---|---|
@@ -198,6 +198,7 @@ First run seeds six agents:
 | **Home Automation** | drives IoT devices over their local HTTP APIs — customize with your devices | no |
 | **System Administrator** | shell and file operations on the machine | no |
 | **Conversation** | plain chat | no |
+| **Tool Manager** | writes new tools for the other agents, and tests them (`manage_tools`) | no |
 | **Web Researcher** | searches and reads web pages | yes |
 
 …plus three model configs: `llama-cpp` (whatever your llama.cpp server is

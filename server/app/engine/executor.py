@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import json
 import logging
@@ -251,19 +252,92 @@ class AgentExecutor:
             allow = ["*"]
         return "*" in allow or target.get("id") in allow
 
+    @staticmethod
+    def _tool_gist(description: str, limit: int = 90) -> str:
+        """First sentence of a tool description, for the directory legend.
+
+        The caller only needs to know what a sub-agent's tool is for; the full
+        text is already in that sub-agent's own prompt."""
+        text = " ".join((description or "").split())
+        if not text:
+            return ""
+        gist = re.split(r"(?<=[.!?])\s", text)[0]
+        return gist if len(gist) <= limit else gist[:limit].rstrip() + "…"
+
+    def _delegation_targets(self) -> list[dict]:
+        """Raw agent dicts this agent is allowed to delegate to."""
+        return [a for a in self.stores.agents.list_all() if self._agent_can_call(self.agent, a)]
+
     def _build_agents_directory(self) -> str:
-        """Build compact directory of available agents for call_agent tool."""
-        agents = self.stores.agents.list_all()
+        """Build compact directory of available agents for call_agent tool.
+
+        Each entry carries the agent's description *and* its tools: an agent can
+        only act through the tools it holds, so that list is the part of "what it
+        can do" the caller can rely on (a description is hand-written and may be
+        vague, stale or empty). Resolution goes through
+        ``get_definitions_for_agent()``, the same call the sub-agent's own turn
+        uses: disabled or uninstalled tools drop out, and MCP entries (including
+        ``mcp:<server>/*`` wildcards) are expanded — a tool the sub-agent cannot
+        actually run is not a capability. What each tool does is appended once as
+        a legend rather than repeated per agent, since agents share tools."""
+        entries: list[str] = []
+        legend: dict[str, str] = {}
+        for a in self._delegation_targets():
+            desc = a.get("description") or a.get("name", "")
+            declared = a.get("tools") or []
+            defs = self.tool_registry.get_definitions_for_agent(declared)
+            for d in defs:
+                legend.setdefault(d["id"], self._tool_gist(d.get("description", "")))
+            if defs:
+                can = ", ".join(d["id"] for d in defs)
+            elif declared:
+                # Declared but unresolvable: an MCP server that is down, or a
+                # deleted tool folder. Say so instead of claiming it has none.
+                can = "none reachable right now"
+            else:
+                can = "none — answers from its own model, no actions"
+            entries.append(f"- {a['id']}: {desc}\n  tools: {can}")
+        if not entries:
+            return ""
         lines = [
             "\n\n## Available Agents",
-            "You can delegate tasks to these agents using the call_agent tool:",
+            "You can delegate tasks to these agents using the call_agent tool. "
+            "An agent can only act through the tools listed under it, so pick the "
+            "one whose tools fit the request.",
+            *entries,
         ]
-        for a in agents:
-            if not self._agent_can_call(self.agent, a):
+        if legend:
+            lines.append(
+                "What those tools do: "
+                + "; ".join(f"{t} = {g}" for t, g in sorted(legend.items()) if g)
+            )
+        return "\n".join(lines)
+
+    def _with_delegation_targets(self, tool_defs: list[dict]) -> list[dict]:
+        """Pin call_agent's ``agent_id`` to the ids this agent may reach.
+
+        The prompt directory is advisory; constraining the schema is what keeps a
+        model from inventing an id and burning an iteration on "agent not found".
+        Definitions are cached by the registry, so the entry is deep-copied."""
+        ids = sorted(a["id"] for a in self._delegation_targets())
+        if not ids:
+            return tool_defs
+        out = []
+        for td in tool_defs:
+            if td.get("id") != "call_agent":
+                out.append(td)
                 continue
-            desc = a.get("description") or a.get("name", "")
-            lines.append(f"- {a['id']}: {desc}")
-        return "\n".join(lines) if len(lines) > 2 else ""
+            td = copy.deepcopy(td)
+            prop = td.get("parameters", {}).get("properties", {}).get("agent_id")
+            if isinstance(prop, dict):
+                prop["enum"] = ids
+                prop["description"] = (
+                    "The ID of the agent to call — one of: "
+                    f"{', '.join(ids)} (see Available Agents in your instructions "
+                    "for what each one can do)"
+                )
+            out.append(td)
+        return out
 
     @staticmethod
     def _flatten_content(content):
@@ -521,6 +595,8 @@ class AgentExecutor:
         it received, which items are inline vs available only as a workspace file
         (with its `path`, to hand to document_extract), and — for router agents —
         how to forward them to a sub-agent by index."""
+        if tool_defs and "call_agent" in self.agent.tools:
+            tool_defs = self._with_delegation_targets(tool_defs)
         openai_tools = ToolRegistry.to_openai_format(tool_defs) if tool_defs else None
         system_content = self._system_prompt_with_tools(tool_defs)
         has_attachment = bool(attachments) and any(
