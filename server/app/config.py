@@ -49,6 +49,12 @@ def ensure_config_dir() -> Path:
             CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     return CONFIG_DIR
 
+# MCP server definitions (one JSON file per server) and the cached tool
+# catalogue discovered from them. Part of the config dir, so it rides
+# MYAGENT_CONFIG and is covered by the same backup story.
+MCP_DIR = CONFIG_DIR / "mcp"
+MCP_CACHE_DIR = MCP_DIR / "cache"
+
 # Tools are runtime data too: users (and the AI itself) create/edit tools via
 # the API, so they must live outside the install dir or `deploy.sh`'s
 # rsync --delete would wipe them on every redeploy. Defaults to

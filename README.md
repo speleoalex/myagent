@@ -35,6 +35,10 @@ had no internet access.*
 - **Folder-based tools** — a tool is a folder with a `tool.json` and an
   executable `run` script in any language; hot-reloaded, no restart needed.
   The AI can write its own tools
+- **MCP servers** — connect Model Context Protocol servers (local processes over
+  stdio, or remote ones over HTTP) and their tools become available to your
+  agents like any other tool; paste an existing Claude Desktop configuration to
+  import them (see [MCP servers](#mcp-servers))
 - **Works with tool-less models** — tool calls are also parsed from plain
   model text, so small local models without native function calling still work
 - **Live chat** — token streaming, background generation you can leave and
@@ -134,6 +138,48 @@ section of its system prompt, one line each with the exact URL to call —
 `run` script that shells out to `mosquitto_pub`, a Python library, or
 whatever your hardware speaks — see [docs/TOOLS.md](docs/TOOLS.md).
 
+## MCP servers
+
+Besides its own folder-based tools, MyAgent speaks the
+[Model Context Protocol](https://modelcontextprotocol.io): add a server under
+**Tools → MCP servers** and its tools show up in the agent editor like any other
+tool. Two transports are supported — **stdio**, where the server runs as a local
+child process, and **HTTP** (Streamable HTTP) for remote or LAN servers.
+
+```text
+Command:    /usr/bin/npx
+Arguments:  -y
+            @modelcontextprotocol/server-filesystem
+            /home/me/documents
+```
+
+**Test connection** probes the server with the values in the form — saved or not —
+and lists the tools it found, with the exact name each one will have for the model
+(`mcp_<server>_<tool>`). **Import JSON** takes an `mcpServers` block straight from
+a Claude Desktop / VS Code / Cursor configuration.
+
+In the agent editor each server appears as a group with an *all tools from this
+server* entry: pick that and tools added on the server later are picked up
+automatically, or select them one by one. Selecting fewer is often better — every
+tool description ends up in the model's prompt, which matters with a small local
+model. Each server also has *allowed / excluded tools* fields for the same reason.
+
+Servers are started lazily, only for the agents that actually use them, and are
+shut down with MyAgent. A server that is unreachable simply contributes no tools:
+the agent keeps working with the rest, and the error is visible in the servers
+list. Notes and limits:
+
+- `npx` needs `-y`, otherwise it waits for a confirmation nobody can give. Under
+  systemd/launchd prefer an absolute path (`/usr/bin/npx`): the service's `PATH`
+  is minimal.
+- The first connection to an `npx -y` server can take tens of seconds while it
+  downloads. Use *Test connection* first; the turn that triggers it does not wait
+  forever, it just runs without that server.
+- Authentication is a static bearer token or custom headers; OAuth flows are not
+  supported.
+- Tokens in `env`/`headers` are stored under `~/myagent/config/mcp/` with `0600`
+  permissions and are never sent back to the browser.
+
 ## Security
 
 > **MyAgent includes tools that execute shell commands as the server user.**
@@ -145,6 +191,10 @@ whatever your hardware speaks — see [docs/TOOLS.md](docs/TOOLS.md).
 > `http://host:8888/?api_key=<key>` — the key is stored in the browser and
 > stripped from the URL). For anything internet-facing, still prefer an
 > authenticating reverse proxy on top.
+>
+> The same applies to MCP servers: adding one with the `stdio` transport means
+> MyAgent runs that command locally, and its tool descriptions become part of
+> your agents' prompts — so only add servers you trust.
 
 ## Runtime layout
 
@@ -152,7 +202,7 @@ MyAgent keeps all runtime state under `~/myagent/`, decoupled from the code:
 
 ```text
 ~/myagent/
-├── config/      # agents, models (API keys, 0600), settings — small & precious: back this up
+├── config/      # agents, models (API keys, 0600), MCP servers, settings — small & precious: back this up
 ├── connectors/  # Telegram bindings (bot tokens, 0600) and grants
 ├── tools/       # tool folders (hot-reloaded; user/AI-created tools live here)
 ├── library/     # your offline knowledge: Wikipedia ZIM archives + notes/documents

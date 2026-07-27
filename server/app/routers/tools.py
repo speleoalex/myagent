@@ -86,7 +86,16 @@ class ToolImportRequest(BaseModel):
 
 @router.get("")
 async def list_tools(request: Request):
-    return _registry(request).get_all_definitions()
+    """Every tool an agent can be given: folder-based tools plus the discovered
+    MCP catalogue (each entry marked ``source: "mcp"`` and ``available``).
+
+    MCP entries are read-only here — they have no folder, so the create/update/
+    delete/source routes below stay filesystem-only. Including the ones that are
+    only known from cache (``available: false``) matters: the agent form rebuilds
+    its tool list from what it renders, so omitting a temporarily-down server's
+    tools would silently drop them from every agent that uses them.
+    """
+    return _registry(request).get_all_definitions(include_mcp=True)
 
 
 # --- Native tool catalog -------------------------------------------------

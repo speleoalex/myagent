@@ -1,6 +1,8 @@
+import asyncio
 import hmac
 import logging
 import os
+from contextlib import asynccontextmanager
 
 import uvicorn
 from fastapi import FastAPI, Request
@@ -14,6 +16,8 @@ from app.config import (
     CONFIG_DIR,
     DEFAULT_CONFIG_DIR,
     CONFIG_SEEDED,
+    MCP_CACHE_DIR,
+    MCP_DIR,
     TOOLS_DIR,
     DEFAULT_TOOLS_DIR,
     WORKSPACE_DIR,
@@ -24,12 +28,13 @@ from app.config import (
 )
 from app.engine.executor import Stores
 from app.engine.live import LiveRunManager
+from app.mcp.manager import McpManager
 from app.storage.store import JsonStore
 from app.storage.sessions import SessionStore
 from app.storage.channel_sessions import NamedSessionStore
 from app.tools.registry import ToolRegistry
 from app.tools.internal import call_agent_handler
-from app.routers import agents, tools, llm_models, chat, system, sessions
+from app.routers import agents, tools, llm_models, chat, mcp, system, sessions
 
 logging.basicConfig(
     level=logging.INFO,
@@ -37,7 +42,28 @@ logging.basicConfig(
 )
 log = logging.getLogger("myagent")
 
-app = FastAPI(title="MyAgent", version="0.1.0")
+# How long shutdown waits for MCP connections to close. A hung server must not
+# wedge `systemctl restart`.
+MCP_SHUTDOWN_TIMEOUT = float(os.environ.get("MYAGENT_MCP_SHUTDOWN_TIMEOUT", "10"))
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Shutdown hook: stop MCP servers (stdio ones are child processes).
+
+    Everything else is still wired at import time below; app.state is read here
+    at call time, so startup ordering is unaffected.
+    """
+    yield
+    manager = getattr(app.state, "mcp", None)
+    if manager is not None:
+        try:
+            await asyncio.wait_for(manager.aclose(), timeout=MCP_SHUTDOWN_TIMEOUT)
+        except (asyncio.TimeoutError, Exception) as e:
+            log.warning("MCP shutdown did not complete cleanly: %s", e)
+
+
+app = FastAPI(title="MyAgent", version="0.1.0", lifespan=lifespan)
 
 # Optional API-key gate (MYAGENT_API_KEY). When set, it protects the API and
 # the OpenAPI docs; the static UI stays public (it holds no data — it prompts
@@ -80,6 +106,15 @@ else:
 tool_registry = ToolRegistry(TOOLS_DIR, workdir=WORKSPACE_DIR, app_dir=APP_DIR)
 tool_registry.register_internal("call_agent", call_agent_handler)
 
+# External MCP servers: their tools join the registry as a second source. No
+# connection is opened here — servers are started lazily, only for the agents
+# that actually reference their tools (see ToolRegistry.ensure_mcp).
+mcp_store = JsonStore(MCP_DIR)
+mcp_manager = McpManager(mcp_store, JsonStore(MCP_CACHE_DIR), WORKSPACE_DIR)
+tool_registry.mcp_manager = mcp_manager
+if mcp_manager.server_ids():
+    log.info("MCP servers configured: %s", ", ".join(sorted(mcp_manager.server_ids())))
+
 # Chat sessions on disk (one file per chat under the user's home)
 ensure_sessions()
 log.info("Chat sessions directory: %s", SESSIONS_DIR)
@@ -97,6 +132,8 @@ live_runs = LiveRunManager()
 # Store in app state
 app.state.stores = stores
 app.state.tool_registry = tool_registry
+app.state.mcp = mcp_manager
+app.state.mcp_store = mcp_store
 app.state.sessions = session_store
 app.state.named_sessions = named_sessions
 app.state.live = live_runs
@@ -106,6 +143,7 @@ app.include_router(agents.router, prefix="/api/agents", tags=["agents"])
 app.include_router(tools.router, prefix="/api/tools", tags=["tools"])
 app.include_router(llm_models.router, prefix="/api/models", tags=["models"])
 app.include_router(chat.router, prefix="/api/chat", tags=["chat"])
+app.include_router(mcp.router, prefix="/api/mcp", tags=["mcp"])
 app.include_router(sessions.router, prefix="/api/sessions", tags=["sessions"])
 app.include_router(system.router, prefix="/api/system", tags=["system"])
 

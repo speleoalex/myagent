@@ -64,6 +64,13 @@ SSE events emitted: `token`, `tool_start`, `tool_result`, `clear_tokens`,
   another agent (max depth 5). Delegation is gated per agent: `callable`
   controls whether an agent may be called at all, `callable_agents` lists who
   it may call (empty list = nobody, missing = everybody).
+  An agent holding `call_agent` is told automatically who it can reach and what
+  each one can do: the system prompt gets an **Available Agents** directory
+  listing every reachable agent with its description *and* its installed tools
+  (plus a one-line legend per tool), and `call_agent`'s `agent_id` parameter is
+  narrowed to an `enum` of those ids. Both are derived from the same
+  `_agent_can_call()` gate that enforces the call, so the advertised list and
+  the permitted list cannot drift.
 - **Live runs** — generation is decoupled from the HTTP client
   (`server/app/engine/live.py`): you can close the tab, re-attach to the
   stream later, or stop a run. In-flight runs live in memory only; finished
@@ -121,6 +128,61 @@ against the live runtime dirs, flagging local modifications.
 
 See [TOOLS.md](TOOLS.md) for the full contract and a worked example.
 
+## MCP servers (second tool source)
+
+External [MCP](https://modelcontextprotocol.io) servers are a second source of
+tools alongside the folders. One JSON file per server under
+`~/myagent/config/mcp/`; the UI lives in the Tools area at `#/tools/mcp`.
+
+- **Transports** — `stdio` (the server is launched as a child process, spoken to
+  in newline-delimited JSON-RPC) and Streamable HTTP (`url`, optional bearer /
+  extra headers). Protocol surface: `initialize`, `tools/list` (paginated),
+  `tools/call`, `ping`, plus `notifications/cancelled` on timeout and
+  `tools/list_changed` to invalidate the cache. No OAuth, no legacy HTTP+SSE
+  transport, no resources/prompts/sampling.
+- **No new dependencies** — the client is `server/app/mcp/client.py` (asyncio
+  subprocesses + the httpx already in use). It is the only module that knows the
+  wire format, behind five methods (`connect`, `list_tools`, `call_tool`, `ping`,
+  `aclose`), so it can be swapped for the official SDK without touching anything
+  else.
+- **Tool names** — a remote tool becomes `mcp_<server_id>_<name>`, sanitized to
+  `^[a-zA-Z0-9_-]{1,64}$` (remote OpenAI-compatible gateways reject dots) with a
+  short digest appended when the name had to be rewritten or truncated. The id is
+  never parsed back: the mapping lives in the tool metadata. An agent can also
+  hold `mcp:<server_id>/*`, meaning "every tool this server exposes", so tools
+  added server-side are picked up automatically.
+- **Lazy and isolated** — `ToolRegistry.ensure_mcp()` (called once per turn by
+  the executor) connects only the servers the current agent references. The wait
+  is capped by `connect_timeout` while the connect continues in the background
+  (`asyncio.shield`), so a cold `npx -y` costs one degraded turn instead of
+  blocking it. A server that is down contributes no tools and never breaks a
+  turn; failures reach the model in-band as `ERROR: ...`, like any tool error.
+  A failed refresh keeps the previously discovered list.
+- **Definitions** — discovery results are cached in memory with a TTL and
+  mirrored to `~/myagent/config/mcp/cache/`, so the agent tool picker keeps
+  showing a server's tools (marked unavailable) while it is offline instead of
+  silently dropping them from every agent that uses them. Input schemas are
+  flattened to a plain object schema (`$ref`/`anyOf`/union types resolved) because
+  llama.cpp grammars and strict gateways reject the full JSON Schema surface, and
+  descriptions are truncated: they are third-party text that lands in the prompt.
+- **Results** — content blocks are flattened to text; images, audio and blob
+  resources are written into `~/myagent/workspace/_attachments/` and referenced by
+  a note, never inlined as base64 (that would land in both the context window and
+  the session file).
+- **Teardown** — stdio servers are child processes, so `server/main.py` has a
+  FastAPI `lifespan` whose shutdown closes every connection (bounded by
+  `MYAGENT_MCP_SHUTDOWN_TIMEOUT`, default 10s).
+
+Endpoints: `GET/POST /api/mcp`, `GET/PUT/DELETE /api/mcp/{id}`,
+`POST /api/mcp/{id}/refresh`, `POST /api/mcp/test` (probes an unsaved draft and
+returns `{"ok": false, "error": ...}` with HTTP 200 on failure),
+`POST /api/mcp/import` (a Claude Desktop / VS Code `mcpServers` blob),
+`GET /api/mcp/tools`, `GET /api/mcp/status`. Secrets (`bearer`, `env` and
+`headers` values) are write-only: masked on GET, and a PUT that echoes the mask
+keeps the stored value. Note that configuring a stdio server means running a
+local command — the same capability `POST /api/tools` already grants by writing
+an executable `run` script.
+
 ## Data storage
 
 Everything is plain JSON under `~/myagent/` (see `server/app/config.py`):
@@ -130,6 +192,7 @@ Everything is plain JSON under `~/myagent/` (see `server/app/config.py`):
 | `~/myagent/config/agents/` | `MYAGENT_CONFIG` | one JSON per agent |
 | `~/myagent/config/models/` | `MYAGENT_CONFIG` | LLM configs; a remote `api_key` is stored 0600, masked in the API, and PUT treats mask/empty as "keep" |
 | `~/myagent/config/settings.json` | `MYAGENT_CONFIG` | default model, provider base URLs |
+| `~/myagent/config/mcp/` | `MYAGENT_CONFIG` | one JSON per MCP server (0600: `env`/`headers` may hold secrets) + `cache/` with the discovered tool catalogue |
 | `~/myagent/tools/` | `MYAGENT_TOOLS` | tool folders |
 | `~/myagent/library/` | `MYAGENT_LIBRARY` | offline knowledge for `local_search` (ZIM archives, notes) — user-placed, never written by the app |
 | `~/myagent/workspace/` | `MYAGENT_WORKSPACE` | working dir for agents' file operations; relative paths in file/shell tools resolve here |
@@ -165,6 +228,8 @@ under `ui/vendor/`.
 | Live (client-decoupled) runs | `server/app/engine/live.py` |
 | Tool discovery/execution | `server/app/tools/registry.py` |
 | Internal tool handlers | `server/app/tools/internal.py` |
+| MCP wire protocol (stdio + HTTP) | `server/app/mcp/client.py` |
+| MCP connections, discovery, policy | `server/app/mcp/manager.py` |
 | Data models (Pydantic) | `server/app/models.py` |
 | Paths and env vars | `server/app/config.py` |
 | API endpoints | `server/app/routers/` |

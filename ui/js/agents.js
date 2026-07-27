@@ -121,6 +121,87 @@ const AgentsPage = {
         }
     },
 
+    /** Tool checkbox list: folder tools first, then one group per MCP server.
+     *
+     * Every input carries class `tool-check` and its value is exactly what goes
+     * into agent.tools, so readForm() needs no special cases. Ids the agent holds
+     * but that no longer exist anywhere are rendered checked+disabled: readForm()
+     * reads checked inputs (disabled included), so opening and saving an agent
+     * while a server is down cannot silently drop its selections. */
+    toolPicker(tools, agentTools, mcpStatus) {
+        const local = tools.filter(t => t.source !== 'mcp');
+        const mcp = tools.filter(t => t.source === 'mcp');
+        const status = mcpStatus || {};
+
+        const row = (value, label, checked, extra = '', cls = '', attrs = '') => `
+            <div class="form-check">
+                <input class="form-check-input tool-check ${cls}" type="checkbox" value="${App.esc(value)}"
+                       id="tool-${App.esc(value)}" ${checked ? 'checked' : ''} ${attrs}>
+                <label class="form-check-label" for="tool-${App.esc(value)}">${label}</label>
+                ${extra}
+            </div>`;
+
+        let html = local.map(t => row(
+            t.id,
+            `<strong>${App.esc(t.name)}</strong> <small class="text-secondary">(${App.esc(t.id)})</small>`,
+            agentTools.includes(t.id),
+        )).join('');
+
+        // Group the MCP tools by server, each with a wildcard "all tools" entry.
+        // Every configured server gets a group, even with no tools discovered yet:
+        // that is where its error state shows, and the wildcard can be granted
+        // before the first connection (it is resolved server-side per turn).
+        const servers = Object.keys(status).sort().map(sid => ({ sid, tools: [] }));
+        mcp.forEach(t => {
+            const sid = (t.mcp || {}).server;
+            let group = servers.find(g => g.sid === sid);
+            if (!group) servers.push(group = { sid, tools: [] });
+            group.tools.push(t);
+        });
+        servers.forEach(group => {
+            const wildcard = `mcp:${group.sid}/*`;
+            const all = agentTools.includes(wildcard);
+            // The state belongs on the server, not on each tool: right after a
+            // restart nothing is connected yet and the tools still work (the
+            // first turn connects them), so only a real error is worth flagging.
+            const state = (status[group.sid] || {}).state;
+            const badge = state === 'error'
+                ? `<span class="badge bg-danger ms-1" title="${App.esc((status[group.sid] || {}).last_error || '')}">${i18n('mcp.stateError')}</span>`
+                : state === 'disabled'
+                    ? `<span class="badge bg-secondary ms-1">${i18n('mcp.stateDisabled')}</span>` : '';
+            html += `<div class="mt-2 pt-2 border-top" data-mcp-server="${App.esc(group.sid)}">
+                ${row(wildcard,
+                    `<i class="bi bi-plugin"></i> <strong>${App.esc(group.sid)}</strong>
+                     <small class="text-secondary">${i18n('agents.mcpAllTools')}</small> ${badge}`,
+                    all, '', 'mcp-all', `data-mcp-all="${App.esc(group.sid)}"`)}
+                ${group.tools.length > 10 ? `<div class="form-text text-warning ms-4">${i18n('agents.mcpManyTools', { n: group.tools.length })}</div>` : ''}
+                <div class="ms-4" data-mcp-group="${App.esc(group.sid)}">
+                    ${group.tools.length === 0 ? `<div class="form-text text-secondary">${i18n('agents.mcpNoTools')}</div>` : ''}
+                    ${group.tools.map(t => row(
+                        t.id,
+                        `${App.esc(t.name)} <small class="text-secondary">(${App.esc(t.id)})</small>`,
+                        agentTools.includes(t.id),
+                        '',
+                        'mcp-tool',
+                    )).join('')}
+                </div>
+            </div>`;
+        });
+
+        // Ids the agent references that no longer exist in any source.
+        const known = new Set([...tools.map(t => t.id), ...servers.map(g => `mcp:${g.sid}/*`)]);
+        const orphans = (agentTools || []).filter(id => !known.has(id));
+        if (orphans.length) {
+            html += `<div class="mt-2 pt-2 border-top">
+                <div class="form-text text-secondary">${i18n('agents.toolsMissing')}</div>
+                ${orphans.map(id => row(id,
+                    `<span class="text-secondary">${App.esc(id)}</span>`, true, '', '', 'disabled')).join('')}
+            </div>`;
+        }
+
+        return html || `<div class="text-secondary">${i18n('agents.noTools')}</div>`;
+    },
+
     async renderForm(agentId) {
         let agent = { id: '', name: '', description: '', model_id: '', system_prompt: '', tools: [], max_iterations: 10, max_tool_calls: 5, temperature: 0.7, enabled: true, callable: true, callable_agents: ['*'] };
         let isEdit = false;
@@ -136,10 +217,12 @@ const AgentsPage = {
             }
         }
 
-        let models = [], tools = [], agents = [];
+        let models = [], tools = [], agents = [], mcpStatus = {};
         try { models = await App.api('GET', '/models'); } catch (e) { /* empty */ }
         try { tools = await App.api('GET', '/tools'); } catch (e) { /* empty */ }
         try { agents = await App.api('GET', '/agents'); } catch (e) { /* empty */ }
+        // Per-server state, so a broken MCP server is visible in the tool picker.
+        try { mcpStatus = await App.api('GET', '/mcp/status'); } catch (e) { /* empty */ }
         // Cache for the preview tree (opened from this form with unsaved values).
         this._allAgents = agents;
         this._allTools = tools;
@@ -181,17 +264,8 @@ const AgentsPage = {
                         </div>
                         <div class="mb-3">
                             <label class="form-label">${i18n('agents.tools')}</label>
-                            <div class="border rounded p-2" style="max-height:200px;overflow-y:auto">
-                                ${tools.map(t => `
-                                    <div class="form-check">
-                                        <input class="form-check-input tool-check" type="checkbox" value="${t.id}" id="tool-${t.id}"
-                                            ${agentTools.includes(t.id) ? 'checked' : ''}>
-                                        <label class="form-check-label" for="tool-${t.id}">
-                                            <strong>${App.esc(t.name)}</strong> <small class="text-secondary">(${t.id})</small>
-                                        </label>
-                                    </div>
-                                `).join('')}
-                                ${tools.length === 0 ? `<div class="text-secondary">${i18n('agents.noTools')}</div>` : ''}
+                            <div class="border rounded p-2" style="max-height:260px;overflow-y:auto">
+                                ${this.toolPicker(tools, agentTools, mcpStatus)}
                             </div>
                         </div>
                         <div class="mb-3">
@@ -264,6 +338,22 @@ const AgentsPage = {
         };
         callableAllEl.onchange = syncCallable;
         syncCallable();
+
+        // An MCP server's "all tools" entry supersedes its individual tools:
+        // uncheck them as well as disabling them, since readForm() reads checked
+        // inputs regardless of the disabled state (both grants would be sent).
+        document.querySelectorAll('[data-mcp-all]').forEach(master => {
+            const group = document.querySelector(`[data-mcp-group="${master.dataset.mcpAll}"]`);
+            const sync = () => {
+                group.querySelectorAll('.mcp-tool').forEach(c => {
+                    if (master.checked) c.checked = false;
+                    c.disabled = master.checked;
+                });
+                group.style.opacity = master.checked ? '0.5' : '1';
+            };
+            master.onchange = sync;
+            sync();
+        });
 
         // Read the current (possibly unsaved) form values into an agent object.
         const readForm = () => {
@@ -383,9 +473,15 @@ const AgentsPage = {
         const hasCall = toolIds.includes('call_agent');
 
         const toolItems = toolIds.map(tid => {
+            const wildcard = /^mcp:([a-z0-9][a-z0-9_-]*)\/\*$/.exec(tid);
+            if (wildcard) {
+                return `<li><i class="bi bi-plugin"></i> <strong>${App.esc(wildcard[1])}</strong>
+                        <small class="text-secondary">${i18n('agents.mcpAllTools')}</small></li>`;
+            }
             const t = toolsById[tid];
             const label = t ? App.esc(t.name) : App.esc(tid);
-            const icon = tid === 'call_agent' ? 'bi-diagram-3' : 'bi-gear-wide-connected';
+            const icon = tid === 'call_agent' ? 'bi-diagram-3'
+                : (t && t.source === 'mcp') ? 'bi-plugin' : 'bi-gear-wide-connected';
             return `<li><i class="bi ${icon}"></i> ${label} <small class="text-secondary">(${App.esc(tid)})</small></li>`;
         }).join('');
 

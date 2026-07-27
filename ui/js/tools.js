@@ -1,13 +1,35 @@
 const ToolsPage = {
     async render(params) {
+        // Must come first: the catch-all below would treat 'mcp' as a tool id.
+        if (params[0] === 'mcp') return McpPage.render(params.slice(1));
         if (params[0] === 'new') return this.renderForm();
         if (params[0]) return this.renderForm(params[0]);
         return this.renderList();
     },
 
+    /** Pill row shared by the tools list and the MCP views.
+     *
+     * Plain buttons, not .nav-link: App.updateActiveNav() toggles .active on
+     * every .nav-link whose href prefixes the hash, which would light up both
+     * pills at once on #/tools/mcp. */
+    tabs(active) {
+        const pill = (href, key, icon, id) =>
+            `<a href="${href}" class="btn btn-sm ${active === id ? 'btn-primary' : 'btn-outline-secondary'}">
+                <i class="bi bi-${icon}"></i> ${i18n(key)}
+            </a>`;
+        return `<div class="d-flex flex-wrap gap-2 mb-3">
+            ${pill('#/tools', 'tools.title', 'tools', 'tools')}
+            ${pill('#/tools/mcp', 'mcp.title', 'plugin', 'mcp')}
+        </div>`;
+    },
+
     async renderList() {
         let tools = [];
         try { tools = await App.api('GET', '/tools'); } catch (e) { /* empty */ }
+        // MCP tools come from external servers and have no folder to edit: they
+        // live in their own tab, and only their count is mentioned here.
+        const mcpCount = tools.filter(t => t.source === 'mcp').length;
+        tools = tools.filter(t => t.source !== 'mcp');
         let native = [];
         try { native = await App.api('GET', '/tools/native'); } catch (e) { /* no catalog */ }
 
@@ -17,6 +39,7 @@ const ToolsPage = {
         };
 
         App.container.innerHTML = `
+            ${this.tabs('tools')}
             <div class="d-flex flex-wrap gap-2 justify-content-between align-items-center mb-3">
                 <h3 class="mb-0"><i class="bi bi-tools"></i> ${i18n('tools.title')}</h3>
                 <a href="#/tools/new" class="btn btn-primary"><i class="bi bi-plus-lg"></i> ${i18n('tools.new')}</a>
@@ -41,6 +64,9 @@ const ToolsPage = {
                     </tbody>
                 </table>
             </div>
+            ${mcpCount ? `<p class="text-secondary"><i class="bi bi-plugin"></i>
+                ${i18n('tools.mcpCount', { n: mcpCount })}
+                <a href="#/tools/mcp">${i18n('tools.mcpManage')}</a></p>` : ''}
             ${this.nativeSection(native)}`;
 
         this.wireNative();

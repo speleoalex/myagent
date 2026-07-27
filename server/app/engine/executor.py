@@ -606,10 +606,14 @@ class AgentExecutor:
             system_content += self._build_attachments_manifest(attachments)
         return system_content, tool_defs, openai_tools
 
-    def _parse_text_tool_calls(self, content: str) -> list[dict] | None:
+    def _parse_text_tool_calls(self, content: str, tool_defs: list[dict]) -> list[dict] | None:
         """Fallback parsing of tool calls from plain text (delegates to
-        toolcall_parser with this executor's context)."""
-        definitions = {d["id"]: d for d in self.tool_registry.get_all_definitions()}
+        toolcall_parser with this executor's context).
+
+        Scoped to THIS agent's definitions: that is the only way a text-mode
+        model can reach an MCP tool (they are not in get_all_definitions), and it
+        stops such a model from invoking tools its agent was never given."""
+        definitions = {d["id"]: d for d in tool_defs}
         agent_ids_provider = None
         if "call_agent" in self.agent.tools:
             agent_ids_provider = lambda: {
@@ -684,7 +688,12 @@ class AgentExecutor:
 
         messages: list[dict] = []
 
-        # Build OpenAI-format tool definitions (dropped if answering an attachment directly)
+        # Build OpenAI-format tool definitions (dropped if answering an attachment directly).
+        # ensure_mcp() lazily connects the MCP servers this agent's tools live on:
+        # discovery is async while the definition lookup below is sync. This is the
+        # single funnel for every caller (streaming, non-streaming and sub-agents,
+        # which run their own _run_stream_inner), and it never raises.
+        await self.tool_registry.ensure_mcp(self.agent.tools)
         tool_defs = self.tool_registry.get_definitions_for_agent(self.agent.tools)
         system_content, tool_defs, openai_tools = self._prepare_turn(tool_defs, attachments)
 
@@ -786,7 +795,7 @@ class AgentExecutor:
 
             # Fallback: parse tool calls from text content
             if not tool_calls and tool_defs and full_content:
-                parsed = self._parse_text_tool_calls(full_content)
+                parsed = self._parse_text_tool_calls(full_content, tool_defs)
                 if parsed:
                     log.info("Stream fallback: parsed %d tool call(s) from text", len(parsed))
                     self._debug_log(f"  Parsed from text: {json.dumps(parsed, ensure_ascii=False)[:500]}")

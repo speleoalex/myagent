@@ -8,6 +8,11 @@ from pydantic import BaseModel, field_validator, model_validator
 # safe charset so a crafted id can't traverse outside the data directories.
 _VALID_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
+# MCP server ids are stricter: they are embedded in the tool names sent to the
+# LLM, so no dots (rejected by remote providers) and short enough to leave room
+# for the remote tool name inside the 64-char function-name budget.
+_VALID_MCP_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,23}$")
+
 
 def _check_id(v: str) -> str:
     if not _VALID_ID.match(v or "") or ".." in v:
@@ -71,6 +76,66 @@ class ModelConfig(BaseModel):
         if not data.get("context_window"):
             data["context_window"] = opts["num_ctx"]
         return data
+
+
+class McpServer(BaseModel):
+    """An external MCP (Model Context Protocol) server providing tools.
+
+    The id becomes part of the tool name exposed to the LLM
+    (``mcp_<id>_<tool>``), which must match ``^[a-zA-Z0-9_-]{1,64}$`` — remote
+    OpenAI-compatible providers reject dots — hence the stricter id charset and
+    the length cap (see app.mcp.naming for the name budget).
+    """
+
+    id: str
+    name: str = ""
+    description: str = ""
+    transport: str = "stdio"  # "stdio" (local subprocess) | "http" (Streamable HTTP)
+    enabled: bool = True
+    # stdio transport
+    command: str = ""
+    args: list[str] = []
+    env: dict[str, str] = {}  # merged over os.environ; may hold secrets
+    cwd: str = ""
+    # http transport
+    url: str = ""
+    headers: dict[str, str] = {}  # may hold secrets
+    bearer: str = ""              # convenience, folded into Authorization
+    # limits
+    connect_timeout: int = 20  # initialize + tools/list budget inside a chat turn
+    timeout: int = 60          # per tools/call
+    max_output: int = 10000    # same semantics as tool.json max_output
+    max_tools: int = 32        # guard against flooding a small model's context
+    tools_ttl: int = 300       # discovery cache TTL (seconds)
+    # gating: which of the server's tools are exposed (empty allow = all)
+    allow_tools: list[str] = []
+    deny_tools: list[str] = []
+
+    @field_validator("id")
+    @classmethod
+    def validate_id(cls, v: str) -> str:
+        if not _VALID_MCP_ID.match(v or ""):
+            raise ValueError(
+                "MCP server id must be 1-24 chars, lowercase letters, digits, "
+                "hyphens or underscores, and start with a letter or digit"
+            )
+        return v
+
+    @field_validator("transport")
+    @classmethod
+    def validate_transport(cls, v: str) -> str:
+        if v not in ("stdio", "http"):
+            raise ValueError("transport must be 'stdio' or 'http'")
+        return v
+
+    @model_validator(mode="after")
+    def check_transport_fields(self):
+        if self.transport == "stdio":
+            if not (self.command or "").strip():
+                raise ValueError("stdio transport requires a command")
+        elif not (self.url or "").startswith(("http://", "https://")):
+            raise ValueError("http transport requires an http(s):// url")
+        return self
 
 
 class Agent(BaseModel):

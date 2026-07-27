@@ -35,6 +35,11 @@ class ToolRegistry:
         self._cache: dict[str, dict] = {}
         self._mtimes: dict[str, float] = {}
         self._internal_handlers: dict[str, Callable] = {}
+        # Second tool source: external MCP servers (app.mcp.manager.McpManager),
+        # assigned after construction because it needs no event loop here. Their
+        # definitions are kept OUT of self._cache: _scan() deletes every id it
+        # doesn't see on disk, which would evict them on the next rescan.
+        self.mcp_manager = None
 
     @property
     def tools_dir(self) -> Path:
@@ -101,19 +106,58 @@ class ToolRegistry:
 
     def get_definition(self, tool_id: str) -> dict | None:
         self._scan()
-        return self._cache.get(tool_id)
+        found = self._cache.get(tool_id)
+        if found is not None or self.mcp_manager is None:
+            return found
+        return self.mcp_manager.get_meta(tool_id)
 
-    def get_all_definitions(self) -> list[dict]:
+    def get_all_definitions(self, include_mcp: bool = False) -> list[dict]:
+        """Every enabled tool. MCP tools are opt-in: the tool CRUD surface deals
+        in folders, so they must not leak into it."""
         self._scan()
-        return [m for m in self._cache.values() if m.get("enabled", True)]
+        out = [m for m in self._cache.values() if m.get("enabled", True)]
+        if include_mcp and self.mcp_manager is not None:
+            known = set(self._cache)
+            out += [m for m in self.mcp_manager.catalogue() if m["id"] not in known]
+        return out
 
     def get_definitions_for_agent(self, tool_ids: list[str]) -> list[dict]:
+        """Definitions for an agent's tool list, MCP entries included.
+
+        MCP entries may be a qualified tool id or a per-server wildcard
+        (``mcp:<server>/*``); both are expanded here, so nothing downstream ever
+        sees a wildcard. A filesystem tool always wins an id collision."""
         self._scan()
-        return [
+        out = [
             self._cache[tid]
             for tid in tool_ids
             if tid in self._cache and self._cache[tid].get("enabled", True)
         ]
+        if self.mcp_manager is not None:
+            out += [
+                meta
+                for meta in self.mcp_manager.defs_for_tool_ids(tool_ids)
+                if meta["id"] not in self._cache
+            ]
+        return out
+
+    async def ensure_mcp(self, tool_ids: list[str]) -> None:
+        """Connect (lazily) the MCP servers this agent's tools live on.
+
+        Called once per turn before the definitions are built, since discovery is
+        async while the query methods above are sync. Cheap and side-effect free
+        when the agent references no MCP tool, and never raises: a server that is
+        down simply contributes no tools.
+        """
+        manager = self.mcp_manager
+        if manager is None or not tool_ids:
+            return
+        try:
+            server_ids = manager.servers_for_tool_ids(tool_ids)
+            if server_ids:
+                await manager.ensure_for(server_ids)
+        except Exception as e:  # belt and braces: the turn must go on
+            log.warning("MCP preparation failed: %s", e)
 
     # ------------------------------------------------------------------
     # OpenAI function-calling format
@@ -143,13 +187,29 @@ class ToolRegistry:
     # ------------------------------------------------------------------
 
     async def execute(self, tool_id: str, arguments: dict, **extra) -> str:
-        if tool_id not in self._cache:
-            self._scan()
-        meta = self._cache.get(tool_id)
+        # MCP first: their ids live outside the filesystem cache, and looking
+        # there first keeps every MCP call from triggering a directory rescan.
+        # `tool_id not in self._cache` preserves filesystem precedence without
+        # paying for a rescan (the cache was just refreshed when this turn's
+        # definitions were built).
+        meta = None
+        if self.mcp_manager is not None and tool_id not in self._cache:
+            meta = self.mcp_manager.get_meta(tool_id)
+        if meta is None:
+            if tool_id not in self._cache:
+                self._scan()
+            meta = self._cache.get(tool_id)
         if meta is None:
             return f"ERROR: Unknown tool '{tool_id}'"
         if not meta.get("enabled", True):
             return f"ERROR: Tool '{tool_id}' is disabled"
+
+        # External MCP server. `extra` (the executor handle) is deliberately not
+        # forwarded: a remote server has no business with executor context.
+        if meta.get("mcp"):
+            if self.mcp_manager is None:
+                return "ERROR: MCP support is not initialized"
+            return await self.mcp_manager.call(meta, arguments)
 
         # Internal tool (e.g. call_agent). Pass only the kwargs the handler
         # accepts — never retry on TypeError: a handler with side effects
