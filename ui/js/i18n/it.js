@@ -159,6 +159,7 @@ I18n.translations.it = {
     'mcp.timeout': 'Per chiamata (s)',
     'mcp.maxOutput': 'Output massimo',
     'mcp.maxTools': 'Strumenti max',
+    'mcp.toolsTtl': 'Cache (s)',
     'mcp.allowTools': 'Strumenti ammessi',
     'mcp.allowHint': 'Separati da virgola, con i nomi esposti dal server. Vuoto = tutti. Conviene restringere: ogni descrizione finisce nel prompt.',
     'mcp.denyTools': 'Strumenti esclusi',

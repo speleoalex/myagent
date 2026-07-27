@@ -32,6 +32,11 @@ from app.mcp import naming, result
 
 log = logging.getLogger(__name__)
 
+# After a failed connect, a server is left alone for this long instead of being
+# retried on every turn (each retry costs up to its connect_timeout). A manual
+# refresh or a config edit clears it immediately.
+FAILURE_COOLDOWN = 60.0
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
@@ -69,6 +74,7 @@ class McpManager:
         self._skipped: dict[str, list[dict]] = {}
         self._listed_at: dict[str, float] = {}   # sid -> monotonic
         self._status: dict[str, dict] = {}
+        self._failed_at: dict[str, float] = {}   # sid -> monotonic of last failure
         self._by_id: dict[str, dict] = {}        # qualified id -> live meta
         self._cached: dict[str, dict] = {}       # sid -> disk cache payload
         self._owner: dict[str, str] = {}         # qualified id -> sid (live + cached)
@@ -111,8 +117,21 @@ class McpManager:
     def _reindex(self) -> None:
         by_id: dict[str, dict] = {}
         owner: dict[str, str] = {}
-        for sid, metas in self._defs.items():
-            for meta in metas:
+        for sid in sorted(self._defs):
+            for meta in self._defs[sid]:
+                # Two servers can produce the same qualified id when one id is a
+                # prefix of the other (server "a" + tool "b_c" vs server "a_b" +
+                # tool "c"). Whoever got there first keeps it: silently routing a
+                # call to the wrong server would be far worse than dropping one.
+                if meta["id"] in by_id:
+                    other = owner.get(meta["id"])
+                    if other != sid:
+                        log.warning(
+                            "mcp[%s] tool '%s' collides with server '%s' on the "
+                            "name '%s' and is not offered — rename one server id",
+                            sid, meta["mcp"]["tool"], other, meta["id"],
+                        )
+                    continue
                 by_id[meta["id"]] = meta
                 owner[meta["id"]] = sid
         # Cached (possibly unavailable) tools still resolve to their server, so a
@@ -184,7 +203,10 @@ class McpManager:
             sid = naming.parse_wildcard(entry)
             if sid:
                 for meta in self._defs.get(sid, []):
-                    add(meta)
+                    # Only the definition that actually owns the qualified id (see
+                    # _reindex): a colliding one would dispatch to another server.
+                    if self._by_id.get(meta["id"]) is meta:
+                        add(meta)
                 continue
             meta = self._by_id.get(entry)
             if meta is not None:
@@ -250,14 +272,27 @@ class McpManager:
         Never raises: a failing server degrades to "no tools from that server".
         """
         self._maybe_reload()
-        for sid in sorted(server_ids or ()):
-            cfg = self._servers.get(sid)
-            if cfg is None or not cfg.enabled:
-                continue
-            await self._ensure_one(sid, cfg)
+        wanted = [
+            sid for sid in sorted(server_ids or ())
+            if (cfg := self._servers.get(sid)) is not None and cfg.enabled
+        ]
+        if not wanted:
+            return
+        # Concurrently: one unreachable server must not add its connect budget to
+        # the next one's before the turn can start.
+        await asyncio.gather(
+            *(self._ensure_one(sid, self._servers[sid]) for sid in wanted),
+            return_exceptions=True,
+        )
 
     async def _ensure_one(self, sid: str, cfg: McpServer) -> None:
         if self._fresh(sid, cfg):
+            return
+        # A server that just failed is not retried on every single turn: without
+        # this, two dead servers add 2x connect_timeout to every message the user
+        # sends. The Refresh button and any config edit clear the cooldown.
+        failed_at = self._failed_at.get(sid)
+        if failed_at is not None and (time.monotonic() - failed_at) < FAILURE_COOLDOWN:
             return
         # No awaits between the check and the task creation, so this is atomic
         # on the event loop: at most one connect task exists per server.
@@ -311,7 +346,12 @@ class McpManager:
         if conn is not None and (
             not conn.alive or self._conn_cfg.get(sid) != cfg.model_dump()
         ):
-            await self.aclose_server(sid)
+            # Closed directly, NOT through aclose_server(): this coroutine *is*
+            # the in-flight connect task, and aclose_server waits for that task
+            # to settle — i.e. it would wait on itself.
+            self._conns.pop(sid, None)
+            self._conn_cfg.pop(sid, None)
+            await self._close(conn, sid)
             conn = None
         if conn is None:
             conn = mcp_client.create_connection(cfg)
@@ -333,6 +373,7 @@ class McpManager:
         self._defs[sid] = metas
         self._skipped[sid] = skipped
         self._listed_at[sid] = time.monotonic()
+        self._failed_at.pop(sid, None)
         self._status[sid] = {
             "last_error": "",
             "server_info": conn.server_info,
@@ -353,18 +394,13 @@ class McpManager:
             return {"state": "error", "last_error": "unknown server"}
         lock = self._refresh_locks.setdefault(server_id, asyncio.Lock())
         async with lock:
-            # Let an in-flight connect settle first (bounded), so tearing the
-            # connection down can't race with it publishing a fresh one.
-            inflight = self._connecting.get(server_id)
-            if inflight is not None:
-                try:
-                    await asyncio.wait_for(asyncio.shield(inflight), timeout=5)
-                except Exception:
-                    pass
+            # aclose_server settles any in-flight connect first, so tearing the
+            # connection down cannot race with it publishing a fresh one.
             await self.aclose_server(server_id)
             self._listed_at.pop(server_id, None)
             self._defs.pop(server_id, None)
             self._status.pop(server_id, None)
+            self._failed_at.pop(server_id, None)  # explicit retry: no cooldown
             self._reindex()
             if not cfg.enabled:
                 return self.status(server_id)
@@ -419,6 +455,9 @@ class McpManager:
         try:
             try:
                 await asyncio.wait_for(conn.connect(), timeout=budget)
+                # A round trip after the handshake: proves the session answers,
+                # not just that it opened.
+                await asyncio.wait_for(conn.ping(), timeout=budget)
                 tools = await asyncio.wait_for(conn.list_tools(), timeout=budget)
             except asyncio.CancelledError:
                 raise
@@ -492,22 +531,52 @@ class McpManager:
             log.exception("mcp[%s] call to '%s' failed", sid, remote)
             return f"ERROR: MCP tool '{remote}' failed on server '{sid}': {e}"
 
-        return result.flatten(
-            raw,
-            max_output=int(info.get("max_output") or cfg.max_output or 10000),
-            workspace=self._workspace,
-            label=remote or "mcp",
-        )
+        try:
+            return result.flatten(
+                raw,
+                max_output=int(info.get("max_output") or cfg.max_output or 10000),
+                workspace=self._workspace,
+                label=remote or "mcp",
+            )
+        except Exception as e:
+            # Belt and braces: a malformed result must not raise into the turn.
+            log.exception("mcp[%s] cannot render the result of '%s'", sid, remote)
+            return f"ERROR: MCP tool '{remote}' returned an unreadable result: {e}"
 
     # ------------------------------------------------------------------
     # teardown
     # ------------------------------------------------------------------
 
     async def aclose_server(self, server_id: str) -> None:
+        # Settle any connect still in flight FIRST: it runs detached (a waiter
+        # may have timed out and walked away), and it publishes into _conns when
+        # it finishes — closing before that would leave its subprocess running.
+        await self._settle_connect(server_id)
         conn = self._conns.pop(server_id, None)
         self._conn_cfg.pop(server_id, None)
         if conn is not None:
             await self._close(conn, server_id)
+
+    async def _settle_connect(self, server_id: str, timeout: float = 10.0) -> None:
+        """Wait out (or cancel) an in-flight connect for one server."""
+        task = self._connecting.get(server_id)
+        if task is None or task.done():
+            return
+        if task is asyncio.current_task():
+            return  # called from inside the connect itself: never await on self
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=timeout)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Timed out or the connect failed: either way stop it, then give the
+            # cancellation a chance to unwind (client.connect() shields its own
+            # cleanup, so the subprocess is reaped).
+            task.cancel()
+            try:
+                await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=8)
+            except Exception:
+                pass
 
     @staticmethod
     async def _close(conn, server_id: str) -> None:
@@ -523,6 +592,7 @@ class McpManager:
         self._skipped.pop(server_id, None)
         self._listed_at.pop(server_id, None)
         self._status.pop(server_id, None)
+        self._failed_at.pop(server_id, None)
         self._reindex()
 
     async def aclose(self) -> None:
@@ -534,7 +604,9 @@ class McpManager:
             task.cancel()
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
-        ids = list(self._conns)
+        # Every server with either a live connection OR a connect in flight: an
+        # in-flight one would otherwise publish its subprocess after we are done.
+        ids = list(dict.fromkeys([*self._conns, *self._connecting]))
         if ids:
             log.info("Closing %d MCP connection(s)", len(ids))
         await asyncio.gather(*(self.aclose_server(sid) for sid in ids),
@@ -545,6 +617,7 @@ class McpManager:
     # ------------------------------------------------------------------
 
     def _mark_error(self, sid: str, message: str) -> None:
+        self._failed_at[sid] = time.monotonic()
         state = dict(self._status.get(sid) or {})
         state["last_error"] = message
         self._status[sid] = state

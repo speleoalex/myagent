@@ -20,6 +20,7 @@ server/
 │   ├── config.py      # all paths and env vars
 │   ├── models.py      # Pydantic models (Agent, ModelConfig, Settings, ...)
 │   ├── engine/        # executor, LLM provider, model probe, live runs
+│   ├── mcp/           # MCP client, connection manager, naming, result mapping
 │   ├── routers/       # /api/* endpoints
 │   ├── storage/       # JSON stores, sessions
 │   └── tools/         # tool registry + internal tool handlers
@@ -138,8 +139,10 @@ tools alongside the folders. One JSON file per server under
   in newline-delimited JSON-RPC) and Streamable HTTP (`url`, optional bearer /
   extra headers). Protocol surface: `initialize`, `tools/list` (paginated),
   `tools/call`, `ping`, plus `notifications/cancelled` on timeout and
-  `tools/list_changed` to invalidate the cache. No OAuth, no legacy HTTP+SSE
-  transport, no resources/prompts/sampling.
+  `tools/list_changed` to invalidate the cache (which on the HTTP transport only
+  arrives if a server interleaves it into a reply — there is no background listen
+  stream, so the TTL and the Refresh button are the real mechanism). No OAuth, no
+  legacy HTTP+SSE transport, no resources/prompts/sampling.
 - **No new dependencies** — the client is `server/app/mcp/client.py` (asyncio
   subprocesses + the httpx already in use). It is the only module that knows the
   wire format, behind five methods (`connect`, `list_tools`, `call_tool`, `ping`,
@@ -147,8 +150,10 @@ tools alongside the folders. One JSON file per server under
   else.
 - **Tool names** — a remote tool becomes `mcp_<server_id>_<name>`, sanitized to
   `^[a-zA-Z0-9_-]{1,64}$` (remote OpenAI-compatible gateways reject dots) with a
-  short digest appended when the name had to be rewritten or truncated. The id is
-  never parsed back: the mapping lives in the tool metadata. An agent can also
+  short digest appended when the name had to be rewritten or truncated. The
+  *tool* half is never recovered by parsing — that mapping lives in the tool
+  metadata, since a server id may itself contain underscores; only the server
+  segment is read back off the fixed prefix, to route a connect. An agent can also
   hold `mcp:<server_id>/*`, meaning "every tool this server exposes", so tools
   added server-side are picked up automatically.
 - **Lazy and isolated** — `ToolRegistry.ensure_mcp()` (called once per turn by

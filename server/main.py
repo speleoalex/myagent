@@ -59,7 +59,7 @@ async def lifespan(app: FastAPI):
     if manager is not None:
         try:
             await asyncio.wait_for(manager.aclose(), timeout=MCP_SHUTDOWN_TIMEOUT)
-        except (asyncio.TimeoutError, Exception) as e:
+        except Exception as e:
             log.warning("MCP shutdown did not complete cleanly: %s", e)
 
 

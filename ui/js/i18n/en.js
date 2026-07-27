@@ -159,6 +159,7 @@ I18n.translations.en = {
     'mcp.timeout': 'Per call (s)',
     'mcp.maxOutput': 'Max output',
     'mcp.maxTools': 'Max tools',
+    'mcp.toolsTtl': 'Cache (s)',
     'mcp.allowTools': 'Allowed tools',
     'mcp.allowHint': 'Comma separated, using the names the server exposes. Empty = all. Worth restricting: every tool description ends up in the prompt.',
     'mcp.denyTools': 'Excluded tools',

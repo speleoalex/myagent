@@ -156,7 +156,9 @@ Arguments:  -y
 **Test connection** probes the server with the values in the form — saved or not —
 and lists the tools it found, with the exact name each one will have for the model
 (`mcp_<server>_<tool>`). **Import JSON** takes an `mcpServers` block straight from
-a Claude Desktop / VS Code / Cursor configuration.
+a Claude Desktop / VS Code / Cursor configuration, reporting per entry what it
+created and what it skipped (an entry using the deprecated `sse` transport is
+skipped rather than imported as something that would only fail later).
 
 In the agent editor each server appears as a group with an *all tools from this
 server* entry: pick that and tools added on the server later are picked up
@@ -164,10 +166,12 @@ automatically, or select them one by one. Selecting fewer is often better — ev
 tool description ends up in the model's prompt, which matters with a small local
 model. Each server also has *allowed / excluded tools* fields for the same reason.
 
-Servers are started lazily, only for the agents that actually use them, and are
-shut down with MyAgent. A server that is unreachable simply contributes no tools:
-the agent keeps working with the rest, and the error is visible in the servers
-list. Notes and limits:
+A server is connected when it is saved or edited (so its tools show up in the
+agent editor right away) and otherwise only when an agent that uses it runs a
+turn; all of them are shut down with MyAgent. If a server becomes unreachable the
+agent keeps working with its other tools — the failure is reported to the model as
+a tool error and shown in the servers list — and its previously discovered tools
+stay on offer until a refresh succeeds. Notes and limits:
 
 - `npx` needs `-y`, otherwise it waits for a confirmation nobody can give. Under
   systemd/launchd prefer an absolute path (`/usr/bin/npx`): the service's `PATH`
@@ -223,7 +227,7 @@ Everything is configured via environment variables (none are required):
 | `MYAGENT_HOST`       | `127.0.0.1`            | bind address (see [Security](#security))   |
 | `MYAGENT_PORT`       | `8888`                 | bind port                                  |
 | `MYAGENT_API_KEY`    | *(unset = no auth)*    | require this key on every `/api` request (Bearer header or `?api_key=`) |
-| `MYAGENT_CONFIG`     | `~/myagent/config`     | agents, models, settings                   |
+| `MYAGENT_CONFIG`     | `~/myagent/config`     | agents, models, MCP servers, settings      |
 | `MYAGENT_TOOLS`      | `~/myagent/tools`      | tool folders                               |
 | `MYAGENT_WORKSPACE`  | `~/myagent/workspace`  | agents' file-operation root                |
 | `MYAGENT_SESSIONS`   | `~/myagent/sessions`   | chat sessions                              |
@@ -231,6 +235,7 @@ Everything is configured via environment variables (none are required):
 | `MYAGENT_DEBUG`      | *(off)*                | `1` = verbose executor trace (full chat content) |
 | `MYAGENT_DEBUG_FILE` | `~/myagent/logs/debug.log` | trace file location                    |
 | `MYAGENT_OLLAMA_DEFAULT_CTX` | `4096`         | assumed context window of an Ollama model when not probed |
+| `MYAGENT_MCP_SHUTDOWN_TIMEOUT` | `10`         | seconds shutdown waits for MCP servers to close |
 
 The Telegram connector server has its own variables — see
 [connectors/README.md](connectors/README.md).

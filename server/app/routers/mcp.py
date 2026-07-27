@@ -10,6 +10,7 @@ import re
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ValidationError
 
+from app.mcp import naming
 from app.models import McpServer
 
 router = APIRouter()
@@ -96,7 +97,7 @@ async def list_mcp_tools(request: Request):
             "server": cfg.id,
             "name": cfg.name or cfg.id,
             "enabled": cfg.enabled,
-            "wildcard": f"mcp:{cfg.id}/*",
+            "wildcard": naming.wildcard_for(cfg.id),
             "status": manager.status(cfg.id),
             "tools": by_server.get(cfg.id, []),
         })
@@ -116,13 +117,33 @@ async def test_server(draft: TestRequest, request: Request):
     """
     cfg = McpServer(**draft.model_dump())
     existing = _store(request).get(cfg.id)
-    # Mask sentinels are resolved only against the config of the SAME id: a
-    # caller must not be able to aim a stored secret at a different url/command.
-    if existing:
+    # Mask sentinels are resolved from the stored config ONLY when this draft
+    # still points at the same target. Otherwise a caller could probe
+    # {"id": "<known>", "url": "http://attacker/", "bearer": "********"} and have
+    # us deliver the stored token there — the whole point of keeping secrets
+    # write-only. When the target differs, masked values resolve to empty.
+    if existing and _same_target(cfg, existing):
         cfg = _unmask(cfg, existing)
     else:
         cfg = _unmask(cfg, {})
     return await _manager(request).test(cfg)
+
+
+def _same_target(draft: McpServer, stored: dict) -> bool:
+    """Whether a draft still addresses the same endpoint as the stored config.
+
+    A PUT deliberately allows moving a server to a new host while keeping its
+    token (a server that changed address is a normal case). A one-shot probe
+    carries no such intent, so it must not be able to redirect a secret.
+    """
+    if draft.transport != (stored.get("transport") or "stdio"):
+        return False
+    if draft.transport == "http":
+        return draft.url.rstrip("/") == (stored.get("url") or "").rstrip("/")
+    return (
+        draft.command == (stored.get("command") or "")
+        and [str(a) for a in (draft.args or [])] == [str(a) for a in (stored.get("args") or [])]
+    )
 
 
 class ImportRequest(BaseModel):
@@ -143,19 +164,23 @@ async def import_servers(req: ImportRequest, request: Request):
     store = _store(request)
     created: list[dict] = []
     skipped: list[dict] = []
-    used = {s.get("id") for s in store.list_all()}
+    # Ids taken WITHIN this request only. Deduping against the ids already on
+    # disk would rename an existing entry to "<id>-2" and import it again, so
+    # re-importing the same file would pile up duplicates instead of reporting
+    # "already exists" (which is what the caller needs to hear).
+    used: set[str] = set()
 
     for raw_name, spec in entries.items():
         if not isinstance(spec, dict):
             skipped.append({"name": str(raw_name), "reason": "not an object"})
             continue
-        server_id = _slugify_id(str(raw_name), used if not req.overwrite else set())
+        server_id = _slugify_id(str(raw_name), used)
         if not server_id:
             skipped.append({"name": str(raw_name), "reason": "cannot derive a valid id"})
             continue
         if store.exists(server_id) and not req.overwrite:
             skipped.append({"name": str(raw_name), "id": server_id,
-                            "reason": "already exists"})
+                            "reason": "already exists (tick overwrite to replace it)"})
             continue
         try:
             cfg = _from_blob(server_id, str(raw_name), spec)
@@ -243,7 +268,7 @@ async def refresh_server(server_id: str, request: Request):
         raise HTTPException(404, f"MCP server not found: {server_id}")
     status = await manager.refresh(server_id)
     return {"server": server_id, "status": status,
-            "tools": manager.defs_for_tool_ids([f"mcp:{server_id}/*"])}
+            "tools": manager.defs_for_tool_ids([naming.wildcard_for(server_id)])}
 
 
 # ----------------------------------------------------------------------
@@ -278,7 +303,17 @@ def _from_blob(server_id: str, display_name: str, spec: dict) -> McpServer:
     """
     url = spec.get("url") or spec.get("serverUrl") or ""
     declared = (spec.get("type") or spec.get("transport") or "").lower()
-    transport = "http" if (url or declared in ("http", "streamable-http", "sse")) else "stdio"
+    if declared == "sse":
+        # The 2024-11-05 HTTP+SSE transport is a different protocol from
+        # Streamable HTTP, not a variant of it: importing it as "http" would
+        # produce a server that only fails at connect time, with a confusing
+        # error. Say so instead. (Such a server can be fronted by mcp-remote
+        # over stdio.)
+        raise ValueError(
+            "the deprecated HTTP+SSE transport is not supported — use a "
+            "Streamable HTTP endpoint, or front it with mcp-remote over stdio"
+        )
+    transport = "http" if (url or declared in ("http", "streamable-http")) else "stdio"
     data = {
         "id": server_id,
         "name": display_name[:60],

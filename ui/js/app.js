@@ -135,6 +135,17 @@ const App = {
         return div.innerHTML;
     },
 
+    /** Escape for use INSIDE an attribute value.
+     *
+     * esc() serializes a text node, which escapes &, < and > but NOT quotes —
+     * safe in text position, unsafe in `attr="..."`, where a quote in the value
+     * closes the attribute and lets the rest inject further attributes (e.g. an
+     * event handler). Required for any attribute fed by text we do not control,
+     * such as an MCP server's error output. */
+    escAttr(str) {
+        return App.esc(str).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    },
+
     slugify(text) {
         return text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
     },

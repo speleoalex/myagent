@@ -23,6 +23,7 @@ import collections
 import json
 import logging
 import os
+import re
 
 import httpx
 
@@ -39,6 +40,12 @@ MAX_LIST_PAGES = 20
 # readline() and kills the reader task (which looks exactly like "the server
 # hung"). 8 MiB is the real ceiling for a tool result we would keep anyway.
 STREAM_LIMIT = 8 * 1024 * 1024
+
+# Never handed to an MCP server subprocess: it inherits our environment so that
+# `npx`/`uvx` keep working, but not the credentials protecting this API.
+_STRIPPED_ENV = {"MYAGENT_API_KEY", "MYAGENT_API_TOKEN"}
+
+_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 
 class McpError(Exception):
@@ -220,8 +227,10 @@ class StdioConnection(BaseConnection):
         if not (cfg.command or "").strip():
             raise McpError("no command configured")
         # Inherit the environment and layer the configured vars on top: a
-        # replaced environment would lose PATH and break `npx`/`uvx`.
-        env = {**os.environ}
+        # replaced environment would lose PATH and break `npx`/`uvx`. Our own
+        # secrets are stripped first — a third-party server has no business
+        # holding the key that unlocks this API.
+        env = {k: v for k, v in os.environ.items() if k not in _STRIPPED_ENV}
         env.update({str(k): str(v) for k, v in (cfg.env or {}).items()})
         try:
             self._proc = await asyncio.create_subprocess_exec(
@@ -503,7 +512,7 @@ class HttpConnection(BaseConnection):
             if resp.status_code == 202:
                 return None  # accepted notification: no body to parse
             elif resp.status_code >= 400:
-                body = (await resp.aread()).decode("utf-8", "replace")[:400].strip()
+                body = _clean_error_body(await resp.aread())
                 # The spec says an expired session answers 404, but the reference
                 # TypeScript server answers 400 "No valid session ID provided".
                 # Accept both — only when a session was actually in play, so a
@@ -600,6 +609,19 @@ def create_connection(cfg) -> BaseConnection:
     if cfg.transport == "http":
         return HttpConnection(cfg)
     raise McpError(f"unsupported transport '{cfg.transport}'")
+
+
+def _clean_error_body(raw: bytes) -> str:
+    """Shorten and de-fang a remote error body before it becomes an error string.
+
+    This text ends up in the server's ``last_error``, which the UI renders (and
+    the model may see): it is third-party content, so strip control characters,
+    collapse whitespace and keep it short.
+    """
+    text = raw.decode("utf-8", "replace")
+    text = _CONTROL.sub(" ", text)
+    text = " ".join(text.split())
+    return text[:200].strip()
 
 
 def _unwrap(msg: dict, method: str) -> dict:

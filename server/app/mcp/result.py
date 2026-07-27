@@ -69,6 +69,9 @@ def flatten(result: object, *, max_output: int, workspace: Path, label: str) -> 
                 text = json.dumps(structured, ensure_ascii=False)
             except (TypeError, ValueError):
                 text = str(structured)
+            # Bounded like everything else: structuredContent can carry the same
+            # blob the content path deliberately wrote to disk.
+            text = text[:MAX_RAW_CHARS]
 
     note_text = "\n".join(notes)
     # Truncate the prose, never the file markers: the markers are the only way
@@ -132,9 +135,13 @@ def _render_block(block: dict, body: list[str], notes: list[str], *,
     notes.append(f"[unsupported content type: {btype}]")
 
 
-def _store(data: object, mime: str, kind: str, workspace: Path, label: str,
+def _store(data: object, mime: object, kind: str, workspace: Path, label: str,
            uri: str = "") -> str:
     """Write base64 *data* under the workspace; return the note for the model."""
+    # A server can put anything in mimeType; an unhashable value would blow up
+    # the lookup below and take the whole chat turn with it.
+    if not isinstance(mime, str) or not mime:
+        mime = "application/octet-stream"
     if not isinstance(data, str) or not data:
         return f"[{kind} ({mime}) omitted: no data]"
     try:

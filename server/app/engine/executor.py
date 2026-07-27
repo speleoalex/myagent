@@ -29,6 +29,11 @@ def _now_iso() -> str:
 # Instruction for the forced final-answer pass: some local models keep
 # re-emitting the same tool call after a result instead of writing an answer,
 # which would otherwise leave the turn with the bare "(used tool: ...)" marker.
+# How many of a delegatable agent's tools the "Available Agents" directory names
+# before summarizing the rest. An MCP wildcard (mcp:<server>/*) can expand to
+# dozens, and this block goes into a router agent's prompt on every single turn.
+_DIRECTORY_TOOLS_PER_AGENT = 12
+
 _FORCE_ANSWER_PROMPT = (
     "Now write the final answer to the user's request using ONLY the information "
     "from the tool results above. Reply in the user's language as normal prose. "
@@ -286,10 +291,15 @@ class AgentExecutor:
             desc = a.get("description") or a.get("name", "")
             declared = a.get("tools") or []
             defs = self.tool_registry.get_definitions_for_agent(declared)
-            for d in defs:
+            for d in defs[:_DIRECTORY_TOOLS_PER_AGENT]:
                 legend.setdefault(d["id"], self._tool_gist(d.get("description", "")))
             if defs:
-                can = ", ".join(d["id"] for d in defs)
+                # Capped: one MCP wildcard can expand to dozens of tools, and this
+                # directory is injected into the router's prompt on every turn.
+                # The caller only needs enough to choose an agent.
+                shown = [d["id"] for d in defs[:_DIRECTORY_TOOLS_PER_AGENT]]
+                extra = len(defs) - len(shown)
+                can = ", ".join(shown) + (f", … and {extra} more" if extra > 0 else "")
             elif declared:
                 # Declared but unresolvable: an MCP server that is down, or a
                 # deleted tool folder. Say so instead of claiming it has none.

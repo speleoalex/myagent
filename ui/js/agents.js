@@ -135,9 +135,9 @@ const AgentsPage = {
 
         const row = (value, label, checked, extra = '', cls = '', attrs = '') => `
             <div class="form-check">
-                <input class="form-check-input tool-check ${cls}" type="checkbox" value="${App.esc(value)}"
-                       id="tool-${App.esc(value)}" ${checked ? 'checked' : ''} ${attrs}>
-                <label class="form-check-label" for="tool-${App.esc(value)}">${label}</label>
+                <input class="form-check-input tool-check ${cls}" type="checkbox" value="${App.escAttr(value)}"
+                       id="tool-${App.escAttr(value)}" ${checked ? 'checked' : ''} ${attrs}>
+                <label class="form-check-label" for="tool-${App.escAttr(value)}">${label}</label>
                 ${extra}
             </div>`;
 
@@ -166,7 +166,7 @@ const AgentsPage = {
             // first turn connects them), so only a real error is worth flagging.
             const state = (status[group.sid] || {}).state;
             const badge = state === 'error'
-                ? `<span class="badge bg-danger ms-1" title="${App.esc((status[group.sid] || {}).last_error || '')}">${i18n('mcp.stateError')}</span>`
+                ? `<span class="badge bg-danger ms-1" title="${App.escAttr((status[group.sid] || {}).last_error || '')}">${i18n('mcp.stateError')}</span>`
                 : state === 'disabled'
                     ? `<span class="badge bg-secondary ms-1">${i18n('mcp.stateDisabled')}</span>` : '';
             html += `<div class="mt-2 pt-2 border-top" data-mcp-server="${App.esc(group.sid)}">
@@ -239,16 +239,16 @@ const AgentsPage = {
                     <form id="agent-form">
                         <div class="mb-3">
                             <label class="form-label">${i18n('common.id')}</label>
-                            <input type="text" class="form-control" id="f-id" value="${App.esc(agent.id)}" ${isEdit ? 'readonly' : ''} required
+                            <input type="text" class="form-control" id="f-id" value="${App.escAttr(agent.id)}" ${isEdit ? 'readonly' : ''} required
                                    pattern="[a-z0-9_-]+" title="${i18n('agents.idHint')}">
                         </div>
                         <div class="mb-3">
                             <label class="form-label">${i18n('common.name')}</label>
-                            <input type="text" class="form-control" id="f-name" value="${App.esc(agent.name)}" required>
+                            <input type="text" class="form-control" id="f-name" value="${App.escAttr(agent.name)}" required>
                         </div>
                         <div class="mb-3">
                             <label class="form-label">${i18n('common.description')}</label>
-                            <input type="text" class="form-control" id="f-desc" value="${App.esc(agent.description || '')}">
+                            <input type="text" class="form-control" id="f-desc" value="${App.escAttr(agent.description || '')}">
                         </div>
                         <div class="mb-3">
                             <label class="form-label">${i18n('agents.model')}</label>

@@ -14,6 +14,12 @@ node_modules/
 # Environment / local
 .env
 
+# Runtime MCP data must never land in the seed tree: normally it lives under
+# ~/myagent/config/mcp/, but a dev pointing MYAGENT_CONFIG at server/config
+# would write server tokens (cleartext) straight into the repo. The rest of
+# server/config/ is the shipped seed template and stays tracked.
+server/config/mcp/
+
 # Test / editor artifacts
 .playwright-mcp/
 

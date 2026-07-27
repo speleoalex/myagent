@@ -34,7 +34,7 @@ const McpPage = {
                 <div class="card-body">
                     <p class="text-secondary small mb-2">${i18n('mcp.importHint')}</p>
                     <textarea class="form-control font-monospace" id="f-import" rows="8" spellcheck="false"
-                              placeholder='${App.esc(JSON.stringify({ mcpServers: { filesystem: { command: 'npx', args: ['-y', '@modelcontextprotocol/server-filesystem', '/tmp'] } } }, null, 2))}'></textarea>
+                              placeholder='${App.escAttr(JSON.stringify({ mcpServers: { filesystem: { command: 'npx', args: ['-y', '@modelcontextprotocol/server-filesystem', '/tmp'] } } }, null, 2))}'></textarea>
                     <div class="form-check mt-2">
                         <input class="form-check-input" type="checkbox" id="f-import-overwrite">
                         <label class="form-check-label" for="f-import-overwrite">${i18n('mcp.importOverwrite')}</label>
@@ -72,7 +72,7 @@ const McpPage = {
             <td>
                 ${App.esc(s.name || s.id)}
                 <div class="small text-secondary text-truncate" style="max-width:20rem"
-                     title="${App.esc(target || '')}">${App.esc(target || '')}</div>
+                     title="${App.escAttr(target || '')}">${App.esc(target || '')}</div>
             </td>
             <td><span class="badge bg-secondary">${s.transport === 'http' ? i18n('mcp.transportHttp') : i18n('mcp.transportStdio')}</span></td>
             <td>${this.stateBadge(status, s.enabled)}</td>
@@ -94,7 +94,7 @@ const McpPage = {
         if (state === 'error') {
             return `<span class="badge bg-danger">${i18n('mcp.stateError')}</span>
                     <div class="small text-danger text-truncate" style="max-width:16rem"
-                         title="${App.esc(status.last_error || '')}">${App.esc(status.last_error || '')}</div>`;
+                         title="${App.escAttr(status.last_error || '')}">${App.esc(status.last_error || '')}</div>`;
         }
         return `<span class="badge bg-secondary">${i18n('mcp.stateIdle')}</span>`;
     },
@@ -191,13 +191,17 @@ const McpPage = {
                     <form id="mcp-form">
                         <div class="mb-3">
                             <label class="form-label">${i18n('common.id')}</label>
-                            <input type="text" class="form-control" id="f-id" value="${App.esc(server.id)}" ${isEdit ? 'readonly' : ''} required
+                            <input type="text" class="form-control" id="f-id" value="${App.escAttr(server.id)}" ${isEdit ? 'readonly' : ''} required
                                    pattern="[a-z0-9][a-z0-9_-]{0,23}" title="${i18n('mcp.idHint')}">
                             <div class="form-text">${i18n('mcp.idHint')}</div>
                         </div>
                         <div class="mb-3">
                             <label class="form-label">${i18n('common.name')}</label>
-                            <input type="text" class="form-control" id="f-name" value="${App.esc(server.name || '')}">
+                            <input type="text" class="form-control" id="f-name" value="${App.escAttr(server.name || '')}">
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">${i18n('common.description')}</label>
+                            <input type="text" class="form-control" id="f-desc" value="${App.escAttr(server.description || '')}">
                         </div>
                         <div class="mb-3">
                             <label class="form-label">${i18n('mcp.transport')}</label>
@@ -217,7 +221,7 @@ const McpPage = {
                         <div id="block-stdio" class="${isHttp ? 'd-none' : ''}">
                             <div class="mb-3">
                                 <label class="form-label">${i18n('mcp.command')}</label>
-                                <input type="text" class="form-control" id="f-command" value="${App.esc(server.command || '')}" placeholder="npx">
+                                <input type="text" class="form-control" id="f-command" value="${App.escAttr(server.command || '')}" placeholder="npx">
                                 <div class="form-text">${i18n('mcp.commandHint')}</div>
                             </div>
                             <div class="mb-3">
@@ -234,7 +238,7 @@ const McpPage = {
                             </div>
                             <div class="mb-3">
                                 <label class="form-label">${i18n('mcp.cwd')}</label>
-                                <input type="text" class="form-control" id="f-cwd" value="${App.esc(server.cwd || '')}">
+                                <input type="text" class="form-control" id="f-cwd" value="${App.escAttr(server.cwd || '')}">
                                 <div class="form-text">${i18n('mcp.cwdHint')}</div>
                             </div>
                         </div>
@@ -242,12 +246,12 @@ const McpPage = {
                         <div id="block-http" class="${isHttp ? '' : 'd-none'}">
                             <div class="mb-3">
                                 <label class="form-label">${i18n('mcp.url')}</label>
-                                <input type="text" class="form-control" id="f-url" value="${App.esc(server.url || '')}" placeholder="http://127.0.0.1:3001/mcp">
+                                <input type="text" class="form-control" id="f-url" value="${App.escAttr(server.url || '')}" placeholder="http://127.0.0.1:3001/mcp">
                                 <div class="form-text">${i18n('mcp.urlHint')}</div>
                             </div>
                             <div class="mb-3">
                                 <label class="form-label">${i18n('mcp.bearer')}</label>
-                                <input type="password" class="form-control" id="f-bearer" value="${App.esc(server.bearer || '')}" autocomplete="off">
+                                <input type="password" class="form-control" id="f-bearer" value="${App.escAttr(server.bearer || '')}" autocomplete="off">
                                 <div class="form-text">${i18n('mcp.bearerHint')}</div>
                             </div>
                             <div class="mb-3">
@@ -275,15 +279,19 @@ const McpPage = {
                                 <label class="form-label">${i18n('mcp.maxTools')}</label>
                                 <input type="number" class="form-control" id="f-maxtools" value="${server.max_tools ?? 32}" min="1" max="200">
                             </div>
+                            <div class="col-6 col-md-3">
+                                <label class="form-label">${i18n('mcp.toolsTtl')}</label>
+                                <input type="number" class="form-control" id="f-ttl" value="${server.tools_ttl ?? 300}" min="5" max="86400">
+                            </div>
                         </div>
                         <div class="mb-3">
                             <label class="form-label">${i18n('mcp.allowTools')}</label>
-                            <input type="text" class="form-control font-monospace" id="f-allow" value="${App.esc((server.allow_tools || []).join(', '))}">
+                            <input type="text" class="form-control font-monospace" id="f-allow" value="${App.escAttr((server.allow_tools || []).join(', '))}">
                             <div class="form-text">${i18n('mcp.allowHint')}</div>
                         </div>
                         <div class="mb-3">
                             <label class="form-label">${i18n('mcp.denyTools')}</label>
-                            <input type="text" class="form-control font-monospace" id="f-deny" value="${App.esc((server.deny_tools || []).join(', '))}">
+                            <input type="text" class="form-control font-monospace" id="f-deny" value="${App.escAttr((server.deny_tools || []).join(', '))}">
                             <div class="form-text">${i18n('mcp.denyHint')}</div>
                         </div>
                         <div class="mb-3">
@@ -354,12 +362,14 @@ const McpPage = {
         const data = {
             id: val('f-id'),
             name: val('f-name'),
+            description: val('f-desc'),
             transport: http ? 'http' : 'stdio',
             enabled: document.getElementById('f-enabled').checked,
             connect_timeout: parseInt(val('f-connect-timeout')) || 20,
             timeout: parseInt(val('f-timeout')) || 60,
             max_output: parseInt(val('f-maxout')) || 10000,
             max_tools: parseInt(val('f-maxtools')) || 32,
+            tools_ttl: parseInt(val('f-ttl')) || 300,
             allow_tools: list('f-allow'),
             deny_tools: list('f-deny'),
         };
