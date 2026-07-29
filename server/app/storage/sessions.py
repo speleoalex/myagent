@@ -5,12 +5,49 @@ archives it into ``history/<id>.json``. Each session records everything about
 the conversation: user messages (with attachments), tools called (name, args,
 result preview), agents involved, and assistant replies — plus the compact
 ``conversation`` used to continue the chat with the LLM.
+
+The module-level helpers (``now_iso``, ``read_json``, ``write_json``,
+``new_session``) define the on-disk session format and are shared with the
+channel-scoped store (:mod:`app.storage.channel_sessions`), so web and
+connector chats stay format-compatible.
 """
 from __future__ import annotations
 
 import json
 from datetime import datetime
 from pathlib import Path
+
+
+def now_iso() -> str:
+    return datetime.now().isoformat(timespec="seconds")
+
+
+def read_json(path: Path) -> dict | None:
+    try:
+        return json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def write_json(path: Path, session: dict) -> None:
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(session, ensure_ascii=False, indent=2))
+    tmp.replace(path)  # atomic
+
+
+def new_session(session_id: str, agent_id: str = "", **extra) -> dict:
+    """A blank session in the canonical format. ``extra`` adds provenance
+    fields (e.g. ``channel``/``source`` for connector chats)."""
+    return {
+        "id": session_id,
+        "title": "",
+        "agent_id": agent_id,
+        "created_at": now_iso(),
+        "updated_at": now_iso(),
+        "messages": [],       # rich event log for display
+        "conversation": [],   # compact history for the LLM
+        **extra,
+    }
 
 
 class SessionStore:
@@ -25,10 +62,6 @@ class SessionStore:
         self._summaries: dict[str, tuple[float, dict]] = {}
 
     # ------------------------------------------------------------------ utils
-    @staticmethod
-    def _now() -> str:
-        return datetime.now().isoformat(timespec="seconds")
-
     def _gen_id(self) -> str:
         """A timestamped, sortable session id used as the on-disk file name
         (``history/<id>.json``). Second-granularity, so two chats created within
@@ -40,43 +73,19 @@ class SessionStore:
             n += 1
         return candidate
 
-    def _new_session(self, agent_id: str = "") -> dict:
-        return {
-            "id": self._gen_id(),
-            "title": "",
-            "agent_id": agent_id,
-            "created_at": self._now(),
-            "updated_at": self._now(),
-            "messages": [],       # rich event log for display
-            "conversation": [],   # compact history for the LLM
-        }
-
-    @staticmethod
-    def _read(path: Path) -> dict | None:
-        try:
-            return json.loads(path.read_text())
-        except (json.JSONDecodeError, OSError):
-            return None
-
-    @staticmethod
-    def _write(path: Path, session: dict) -> None:
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(session, ensure_ascii=False, indent=2))
-        tmp.replace(path)  # atomic
-
     # ---------------------------------------------------------------- current
     def get_current(self) -> dict:
         if self.current_file.exists():
-            s = self._read(self.current_file)
+            s = read_json(self.current_file)
             if s is not None:
                 return s
-        s = self._new_session()
-        self._write(self.current_file, s)
+        s = new_session(self._gen_id())
+        write_json(self.current_file, s)
         return s
 
     def save_current(self, session: dict) -> dict:
-        session["updated_at"] = self._now()
-        self._write(self.current_file, session)
+        session["updated_at"] = now_iso()
+        write_json(self.current_file, session)
         return session
 
     def persist(self, session: dict) -> dict:
@@ -84,55 +93,58 @@ class SessionStore:
         it is still the active chat, otherwise history/<id>.json. Used by
         background generation, which may finish after the user has already
         started/opened a different chat (so current.json must not be clobbered)."""
-        session["updated_at"] = self._now()
+        session["updated_at"] = now_iso()
         sid = session.get("id")
-        cur = self._read(self.current_file) if self.current_file.exists() else None
+        cur = read_json(self.current_file) if self.current_file.exists() else None
         if cur is not None and cur.get("id") == sid:
-            self._write(self.current_file, session)
+            write_json(self.current_file, session)
         else:
-            self._write(self.history_dir / f"{sid}.json", session)
+            write_json(self.history_dir / f"{sid}.json", session)
         return session
 
     def archive_current(self) -> str | None:
         """Move the current chat into history (only if it has content)."""
         if not self.current_file.exists():
             return None
-        s = self._read(self.current_file)
+        s = read_json(self.current_file)
         if s is None or not s.get("messages"):
             self.current_file.unlink(missing_ok=True)  # drop empty/corrupt
             return None
         sid = s.get("id") or self._gen_id()
         s["id"] = sid
-        self._write(self.history_dir / f"{sid}.json", s)
+        write_json(self.history_dir / f"{sid}.json", s)
         self.current_file.unlink(missing_ok=True)
         return sid
 
-    def archive_session(self, session: dict, title_prefix: str = "") -> str | None:
+    def archive_session(self, session: dict) -> str | None:
         """Archive an arbitrary session dict (e.g. an external channel session)
         into history under a fresh, unique id — so repeated resets of the same
         external chat don't clobber each other. Returns the new history id, or
-        None if there's nothing worth keeping. The original id is preserved in
-        ``channel_id`` for reference."""
+        None if there's nothing worth keeping. The channel key is preserved in
+        ``channel`` (with ``source``, when known) so the history list can show
+        where the chat came from."""
         if not session.get("messages"):
             return None
         sid = self._gen_id()
         s = dict(session)
-        s["channel_id"] = session.get("id")
+        s.setdefault("channel", session.get("id"))
         s["id"] = sid
         if not s.get("title"):
+            # Legacy light-format sessions carry no title: fall back to the
+            # first user message, then to the channel key.
             first = next((m.get("text", "") for m in s.get("messages", [])
                           if m.get("role") == "user" and m.get("text")), "")
             base = first.strip().replace("\n", " ")
             title = base[:60] + ("…" if len(base) > 60 else "")
-            s["title"] = (title_prefix + title) if title else (title_prefix or "(canale)")
-        self._write(self.history_dir / f"{sid}.json", s)
+            s["title"] = title or s.get("channel") or "(channel)"
+        write_json(self.history_dir / f"{sid}.json", s)
         return sid
 
     def new_chat(self, agent_id: str = "") -> dict:
         """Archive the current chat and start a fresh empty one."""
         self.archive_current()
-        s = self._new_session(agent_id)
-        self._write(self.current_file, s)
+        s = new_session(self._gen_id(), agent_id)
+        write_json(self.current_file, s)
         return s
 
     def resume(self, session_id: str) -> dict | None:
@@ -143,11 +155,11 @@ class SessionStore:
         if not src.exists():
             cur = self.get_current()
             return cur if cur.get("id") == session_id else None
-        s = self._read(src)
+        s = read_json(src)
         if s is None:
             return None
         self.archive_current()          # park whatever is active now
-        self._write(self.current_file, s)
+        write_json(self.current_file, s)
         src.unlink(missing_ok=True)     # it is now the current chat, not history
         return s
 
@@ -166,7 +178,7 @@ class SessionStore:
             if cached and cached[0] == mtime:
                 out.append(cached[1])
                 continue
-            s = self._read(f)
+            s = read_json(f)
             if s is None:
                 continue
             summary = {
@@ -176,6 +188,10 @@ class SessionStore:
                 "created_at": s.get("created_at", ""),
                 "updated_at": s.get("updated_at", ""),
                 "message_count": len(s.get("messages", [])),
+                # Provenance of archived connector chats ("channel_id" is the
+                # legacy spelling written by older archives).
+                "channel": s.get("channel") or s.get("channel_id") or "",
+                "source": s.get("source", ""),
             }
             self._summaries[key] = (mtime, summary)
             out.append(summary)
@@ -189,7 +205,7 @@ class SessionStore:
     def get(self, session_id: str) -> dict | None:
         f = self.history_dir / f"{session_id}.json"
         if f.exists():
-            return self._read(f)
+            return read_json(f)
         cur = self.get_current()
         return cur if cur.get("id") == session_id else None
 

@@ -1,10 +1,14 @@
 """CRUD + test + status for bot bindings, plus a small proxy to myagent's
-agent list so the admin UI can offer an agent dropdown."""
+agent list so the admin UI can offer an agent dropdown, and the /send endpoint
+for unsolicited outbound messages (autonomous agents' notify_user)."""
 from __future__ import annotations
+
+import hmac
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from app import config
 from app.channels.registry import available_types
 from app.channels.telegram import TelegramConnector
 from app.models import Binding
@@ -113,6 +117,41 @@ async def delete_binding(binding_id: str, request: Request):
     request.app.state.grants.clear(binding_id)
     await _manager(request).reconcile(binding_id)
     return {"ok": True}
+
+
+class SendReq(BaseModel):
+    chat_id: str | int
+    text: str
+
+
+def _check_send_key(request: Request) -> None:
+    """Bearer gate for /send only (the rest of the API has no auth today —
+    hardening the whole surface is a separate task). Empty key = open."""
+    if not config.SEND_API_KEY:
+        return
+    auth = request.headers.get("authorization", "")
+    candidate = auth[7:] if auth.lower().startswith("bearer ") else ""
+    if not hmac.compare_digest(candidate.encode(), config.SEND_API_KEY.encode()):
+        raise HTTPException(401, "Invalid or missing API key")
+
+
+@router.post("/{binding_id}/send")
+async def send_to_chat(binding_id: str, req: SendReq, request: Request):
+    """Send an unsolicited message to a chat through a running binding.
+
+    Best-effort in v1: the connector's send() logs and swallows transport
+    errors (Telegram chunking to 4096 included), so a 200 means "accepted",
+    not "delivered"."""
+    _check_send_key(request)
+    connector = _manager(request).get_connector(binding_id)
+    if connector is None:
+        raise HTTPException(409, "Binding is not running")
+    await connector.send(req.chat_id, req.text)
+    # The session key travels back with the ack: it is derived from the binding's
+    # session_prefix, which the caller has no way to know, and myagent needs it to
+    # append this unsolicited message to the right conversation (otherwise the
+    # user can see the notification in Telegram but the agent cannot).
+    return {"ok": True, "session_id": connector.session_id_for(req.chat_id)}
 
 
 class TestReq(BaseModel):

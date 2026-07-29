@@ -13,6 +13,30 @@ import uuid
 from typing import Callable
 
 
+# Keys a model may use for the text it wants to hand to a sub-agent, when it
+# writes the call as `{"name": "<agent_id>", ...}` instead of a call_agent call.
+# Ordered by how explicit they are.
+_MESSAGE_KEYS = ("message", "text", "query", "prompt", "input", "question", "task", "content")
+
+
+def _extract_message(arguments) -> str:
+    """Best-effort recovery of the message for a call_agent call the model wrote
+    with the agent id as the tool name. Such a call carries no `message` key
+    (that shape only exists on call_agent), so look under the usual aliases and,
+    failing that, accept a lone free-form string argument. Returns "" when there
+    is nothing to send — call_agent then rejects the call with a usable error
+    instead of waking a sub-agent up with an empty prompt."""
+    if not isinstance(arguments, dict):
+        return ""
+    for key in _MESSAGE_KEYS:
+        value = arguments.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    free = [v for k, v in arguments.items()
+            if k != "agent_id" and isinstance(v, str) and v.strip()]
+    return free[0] if len(free) == 1 else ""
+
+
 def _make_call(name: str, arguments) -> dict:
     return {
         "id": f"call_{uuid.uuid4().hex[:8]}",
@@ -85,23 +109,23 @@ def parse_tool_calls_from_text(
             except json.JSONDecodeError:
                 pass
 
-    # Extract from markdown code blocks first
-    code_block = re.search(r'```(?:json)?\s*\n?([\s\S]*?)\n?```', text)
-    if code_block:
-        text = code_block.group(1).strip()
+    # Extract from markdown code blocks first (all of them: a model may fence
+    # each call separately).
+    blocks = re.findall(r'```(?:json)?\s*\n?([\s\S]*?)\n?```', text)
+    if blocks:
+        text = "\n".join(b.strip() for b in blocks)
 
-    json_match = re.search(r'(\{[\s\S]*\}|\[[\s\S]*\])', text)
-    if not json_match:
-        return None
-
-    try:
-        parsed = json.loads(json_match.group(1))
-    except json.JSONDecodeError:
-        return None
-
-    if isinstance(parsed, dict):
-        parsed = [parsed]
-    elif not isinstance(parsed, list):
+    # A model may emit SEVERAL tool-call objects back to back (one per line or
+    # concatenated). Scan for every balanced top-level JSON value: a single
+    # greedy first-{-to-last-} regex captures the whole run and fails to parse
+    # on exactly that shape, silently dropping ALL the calls.
+    parsed = []
+    for value in _extract_json_values(text):
+        if isinstance(value, dict):
+            parsed.append(value)
+        elif isinstance(value, list):
+            parsed.extend(v for v in value if isinstance(v, dict))
+    if not parsed:
         return None
 
     tool_calls = []
@@ -132,8 +156,7 @@ def parse_tool_calls_from_text(
             agent_ids = agent_ids_provider()
             if name in agent_ids:
                 # Model used the agent id directly as the tool name
-                msg = arguments.get("message", "") if isinstance(arguments, dict) else ""
-                arguments = {"agent_id": name, "message": msg}
+                arguments = {"agent_id": name, "message": _extract_message(arguments)}
                 name = "call_agent"
             elif isinstance(arguments, dict) and "agent_id" in arguments:
                 # Placeholder name but call_agent-shaped arguments
@@ -146,6 +169,55 @@ def parse_tool_calls_from_text(
         tool_calls.append(_make_call(name, arguments))
 
     return tool_calls if tool_calls else None
+
+
+def _extract_json_values(text: str) -> list:
+    """Every balanced top-level ``{...}`` / ``[...]`` block in ``text`` that
+    parses as JSON, in order of appearance. Non-JSON braces (prose, code) are
+    skipped by advancing one character and rescanning."""
+    values = []
+    i, n = 0, len(text)
+    while i < n:
+        if text[i] not in "{[":
+            i += 1
+            continue
+        end = _scan_balanced_json(text, i)
+        if end is not None:
+            try:
+                values.append(json.loads(text[i:end]))
+                i = end
+                continue
+            except json.JSONDecodeError:
+                pass
+        i += 1
+    return values
+
+
+def _scan_balanced_json(text: str, start: int) -> int | None:
+    """Index just past the brace/bracket balancing ``text[start]``, honoring
+    JSON string literals and escapes. None when unbalanced."""
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch in "{[":
+            depth += 1
+        elif ch in "}]":
+            depth -= 1
+            if depth == 0:
+                return i + 1
+    return None
 
 
 def _parse_python_style_calls(text: str, known_tools: set[str]) -> list[dict] | None:
@@ -176,6 +248,14 @@ def _parse_python_style_calls(text: str, known_tools: set[str]) -> list[dict] | 
                 if val is not None:
                     val = val.replace('\\"', '"').replace("\\'", "'")
                 arguments[key] = val
+
+        # The parentheses carried something, but nothing parsed as key=value:
+        # a positional arg or plain prose — the shape of a reply MENTIONING
+        # the tool («check it with memory_search("ora")»), not calling it.
+        # Executing with {} would both do the wrong thing and eat the model's
+        # actual answer, so it is not a call.
+        if args_str.strip() and not arguments:
+            continue
 
         tool_calls.append(_make_call(name, arguments))
 

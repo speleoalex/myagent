@@ -1,0 +1,18 @@
+{
+  "name": "Make Directory",
+  "description": "Create a directory and any missing parents. Succeeds if it already exists. A relative path is created inside the agent workspace (the default); use an absolute path only for a location the user named.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "path": {
+        "type": "string",
+        "description": "Directory path to create. Relative = inside the workspace (default)"
+      }
+    },
+    "required": [
+      "path"
+    ]
+  },
+  "timeout": 10,
+  "max_output": 500
+}

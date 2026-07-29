@@ -20,8 +20,8 @@ from fastapi.staticfiles import StaticFiles
 from app import config
 from app.channels.manager import ConnectorManager
 from app.myagent_client import MyAgentClient
-from app.routers import bindings
-from app.storage import BindingStore, GrantStore
+from app.routers import bindings, contacts
+from app.storage import BindingStore, ContactStore, GrantStore
 
 logging.basicConfig(
     level=logging.INFO,
@@ -50,15 +50,18 @@ log.info("Connectors state directory: %s", config.STATE_DIR)
 
 bindings_store = BindingStore(config.BINDINGS_DIR)
 grants_store = GrantStore(config.GRANTS_DIR)
+contacts_store = ContactStore(config.CONTACTS_DIR)
 myagent_client = MyAgentClient()
 manager = ConnectorManager(bindings_store, grants_store, myagent_client)
 
 app.state.bindings = bindings_store
 app.state.grants = grants_store
+app.state.contacts = contacts_store
 app.state.myagent = myagent_client
 app.state.manager = manager
 
 app.include_router(bindings.router, prefix="/api/bindings", tags=["bindings"])
+app.include_router(contacts.router, prefix="/api/contacts", tags=["contacts"])
 
 # Admin UI (static). Created on first run so the mount never fails.
 config.UI_DIR.mkdir(parents=True, exist_ok=True)

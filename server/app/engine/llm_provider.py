@@ -24,7 +24,10 @@ DROPPABLE_PARAMS = (
 # What an endpoint refuses doesn't change between turns, and a provider
 # instance only lives for one run, so remember the adaptations process-wide
 # (keyed like the model_probe cache) to avoid paying a 400 round-trip per turn.
-# param name -> replacement name, or None to drop it.
+# param name -> replacement name, or None to drop it. The sentinel key "tools"
+# records a rejected `tools` array: later runs then start in the text protocol
+# (supports_tools=False) instead of re-paying the 400 AND losing their first
+# iteration to a system prompt without the text-protocol instructions.
 _PARAM_FIXES: dict[tuple[str, str], dict[str, str | None]] = {}
 
 
@@ -47,11 +50,15 @@ class LLMProvider:
             timeout=httpx.Timeout(read_timeout, connect=10.0),
             headers=headers,
         )
-        # llamacpp native tool support is unreliable — default to text-based
-        if model_config.provider == "llamacpp":
-            self.supports_tools: bool | None = False
-        else:
-            self.supports_tools: bool | None = None  # auto-detected on first call
+        # Native tool calling: None = ask the endpoint (tools are sent, and a 400
+        # downgrades this process to the text protocol — see _adapt_payload).
+        # An explicit ModelConfig.supports_tools skips the probe: False is the
+        # escape hatch for a server that accepts `tools` but never emits a
+        # tool_call, True for one that only reveals it mid-conversation.
+        # llama.cpp used to be pinned to False here; it does support tool calls
+        # (streaming included) with a tool-capable chat template, and the text
+        # protocol costs the model a whole extra convention to follow.
+        self.supports_tools: bool | None = model_config.supports_tools
         # Token budget for one request: resolved lazily on the first call (the
         # probe is async and cached process-wide, so this costs nothing after
         # the first turn). See model_probe.
@@ -60,6 +67,12 @@ class LLMProvider:
         self._param_fixes = _PARAM_FIXES.setdefault(
             (model_config.base_url, model_config.model), {}
         )
+        # An endpoint that already rejected `tools` won't accept them next run:
+        # start in the text protocol so the executor injects its instructions
+        # from the first iteration. Only in auto mode — an explicit config
+        # value always wins.
+        if self.supports_tools is None and "tools" in self._param_fixes:
+            self.supports_tools = False
 
     def _resolve_endpoint(self) -> str:
         """Accept both base-URL conventions: with or without a trailing /v1
@@ -250,9 +263,11 @@ class LLMProvider:
         if max_tokens:
             payload["max_tokens"] = max_tokens
 
-        # Re-apply what this endpoint already told us it doesn't accept.
+        # Re-apply what this endpoint already told us it doesn't accept. The
+        # "tools" sentinel is NOT a payload fix: it acts through supports_tools
+        # above (and an explicit supports_tools=True must be able to override it).
         for key, replacement in self._param_fixes.items():
-            if key in payload:
+            if key != "tools" and key in payload:
                 value = payload.pop(key)
                 if replacement:
                     payload[replacement] = value
@@ -323,7 +338,9 @@ class LLMProvider:
         if "tools" in payload:
             # Retry without tools, with tool messages sanitized out of the
             # conversation (models that reject `tools` also reject role:tool).
+            # Remembered process-wide so later runs start in text mode.
             self.supports_tools = False
+            self._param_fixes["tools"] = None
             payload.pop("tools", None)
             payload.pop("tool_choice", None)
             payload["messages"] = self._sanitize_messages(payload["messages"])

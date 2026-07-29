@@ -4,10 +4,32 @@ from datetime import datetime
 import asyncio
 import json
 
+from app import config
 from app.models import ChatRequest, ChatResponse, ChatMessage, _VALID_ID
 from app.engine.executor import AgentExecutor, Stores
+from app.engine.memory_compactor import compact_session
+from app.storage.sessions import new_session
 
 router = APIRouter()
+
+
+def _memory_context(session: dict) -> list | None:
+    """This session's archived-turn summaries (injected at prompt build)."""
+    return (session.get("memory") or {}).get("context")
+
+
+def _maybe_compact(executor, session_id: str, *, session_store=None,
+                   named=None, live=None) -> None:
+    """Fire-and-forget deep-memory compaction AFTER a persisted turn: the user
+    never waits on it (a summarization on a local model takes 10-60s). All
+    safety is inside compact_session (per-agent lock, head re-verification,
+    idempotent retry via content hash)."""
+    if not executor.agent.memory_enabled or executor.stores.memory is None:
+        return
+    asyncio.create_task(compact_session(
+        executor.agent, executor.model_config, executor.stores.memory,
+        session_id, session_store=session_store, named=named, live=live,
+    ))
 
 
 def _sse(agen):
@@ -92,38 +114,65 @@ def _record_turn(session: dict, steps: list[dict], reply: str, conversation) -> 
         ]
 
 
-def _record_turn_light(session: dict, req: ChatRequest, reply: str, conversation) -> None:
-    """Record a channel-session turn: keep only the user/assistant text log and
-    the compact LLM history — no full recursive tool trace (those grow large
-    and are only useful to the web UI's inspector)."""
-    session.setdefault("messages", []).append(
-        {"role": "user", "text": req.message, "ts": _now()}
-    )
-    session["agent_id"] = req.agent_id
-    session["messages"].append({"role": "assistant", "text": reply, "ts": _now()})
-    if conversation is not None:
-        session["conversation"] = [
-            m for m in conversation
-            if (m.get("role") if isinstance(m, dict) else m.role) != "system"
-        ]
+def _save_channel_session(named, session_store, sid: str, session: dict) -> None:
+    """Persist a channel session, rotating it once it outgrows
+    config.CHANNEL_ROTATE_BYTES: the recorded log is archived into the web
+    history (provenance preserved) and the file restarts with the same compact
+    LLM conversation, so the bot keeps its context while the file — which,
+    unlike a web chat, is never closed by "new chat" — stays bounded.
+    Runs in a worker thread (sessions grow large; blocking file I/O)."""
+    named.save(sid, session)
+    if named._path(sid).stat().st_size <= config.CHANNEL_ROTATE_BYTES:
+        return
+    session_store.archive_session(session)
+    fresh = new_session(sid, session.get("agent_id", ""),
+                        channel=session.get("channel") or sid,
+                        source=session.get("source", ""))
+    fresh["conversation"] = session.get("conversation", [])
+    # The medium-short memory travels with the conversation: losing it on
+    # rotation would drop the archived-turn summaries and the rewind offset.
+    if session.get("memory"):
+        fresh["memory"] = session["memory"]
+    named.save(sid, fresh)
 
 
 async def _chat_named(req: ChatRequest, request: Request, executor) -> ChatResponse:
     """Run one turn against a channel-scoped named session (external
     connectors). Serialized per session_id so concurrent messages from the same
-    external chat can't interleave their conversation writes."""
+    external chat can't interleave their conversation writes.
+
+    Turns are recorded with the same helpers as web chats (_record_user /
+    _record_turn), so channel sessions share the web session format — title,
+    attachments and the full recursive tool trace included."""
     named = request.app.state.named_sessions
+    session_store = request.app.state.sessions
     sid = req.session_id
     async with named.lock(sid):
-        session = named.get(sid, agent_id=req.agent_id)
+        session = await asyncio.to_thread(named.get, sid, req.agent_id)
+        # Provenance: upgrade sessions created before these fields existed.
+        session.setdefault("channel", sid)
+        if req.source:
+            session["source"] = req.source
+        if not session.get("title"):
+            # Legacy light-format sessions carry no title: backfill it from
+            # the conversation's first user message, so _record_user doesn't
+            # title a years-old chat with whatever message arrives today.
+            first = next((m.get("text") or "" for m in session.get("messages", [])
+                          if m.get("role") == "user" and m.get("text")), "")
+            if first:
+                session["title"] = _title_from(first, None)
         prior = [ChatMessage(**m) for m in session.get("conversation", [])]
         attachments = [a.model_dump() for a in req.attachments] or None
 
-        response = await executor.run(req.message, prior, attachments)
+        response = await executor.run(req.message, prior, attachments,
+                                      memory_context=_memory_context(session))
 
         conv = [m.model_dump(exclude_none=True) for m in response.conversation]
-        _record_turn_light(session, req, response.reply, conv)
-        await asyncio.to_thread(named.save, sid, session)
+        _record_user(session, req)
+        _record_turn(session, _steps_from(response.trace, response.tool_results),
+                     response.reply, conv)
+        await asyncio.to_thread(_save_channel_session, named, session_store, sid, session)
+    _maybe_compact(executor, sid, named=named)
     return response
 
 
@@ -152,7 +201,8 @@ async def chat(req: ChatRequest, request: Request) -> ChatResponse:
     _record_user(session, req)
     await asyncio.to_thread(session_store.save_current, session)
 
-    response = await executor.run(req.message, prior, attachments)
+    response = await executor.run(req.message, prior, attachments,
+                                  memory_context=_memory_context(session))
 
     conv = [m.model_dump(exclude_none=True) for m in response.conversation]
     steps = _steps_from(response.trace, response.tool_results)
@@ -160,10 +210,11 @@ async def chat(req: ChatRequest, request: Request) -> ChatResponse:
     # persist(), not save_current(): the user may have opened another chat
     # while this run was in flight — never clobber the new current.json.
     await asyncio.to_thread(session_store.persist, session)
+    _maybe_compact(executor, session["id"], session_store=session_store, live=live)
     return response
 
 
-def _make_drive(executor, message, prior, attachments, session, session_store):
+def _make_drive(executor, message, prior, attachments, session, session_store, live=None):
     """Build the async routine that drives one turn: stream events from the
     executor, persist the turn, and emit each event into the LiveRun. On Stop
     (task cancellation) it persists the partial answer instead of losing it."""
@@ -172,7 +223,8 @@ def _make_drive(executor, message, prior, attachments, session, session_store):
         reply_text = ""
         recorded = False  # the completed turn has been recorded to `session`
         try:
-            async for event in executor.run_stream(message, prior, attachments):
+            async for event in executor.run_stream(message, prior, attachments,
+                                                   _memory_context(session)):
                 et = event.get("type")
                 if et == "tool_result":
                     tool_events.append(event.get("data", {}))
@@ -196,6 +248,8 @@ def _make_drive(executor, message, prior, attachments, session, session_store):
                                  data.get("conversation"))
                     recorded = True
                     await asyncio.shield(asyncio.to_thread(session_store.persist, session))
+                    _maybe_compact(executor, session["id"],
+                                   session_store=session_store, live=live)
                 run.emit(event)
         except asyncio.CancelledError:
             # Stop pressed mid-generation: keep the partial answer, unless the
@@ -235,7 +289,8 @@ async def chat_stream(req: ChatRequest, request: Request):
     _record_user(session, req)
     await asyncio.to_thread(session_store.save_current, session)
 
-    drive = _make_drive(executor, req.message, prior, attachments, session, session_store)
+    drive = _make_drive(executor, req.message, prior, attachments, session,
+                        session_store, live)
     run = live.start(sid, drive)
     return _sse(run.subscribe())
 
@@ -289,7 +344,7 @@ async def get_named_session(session_id: str, request: Request):
     named = request.app.state.named_sessions
     if not named._path(session_id).exists():
         raise HTTPException(404, "Session not found")
-    return named.get(session_id)
+    return await asyncio.to_thread(named.get, session_id)
 
 
 @router.delete("/sessions/{session_id}")
@@ -307,9 +362,7 @@ async def delete_named_session(session_id: str, request: Request):
     archived = None
     async with named.lock(session_id):
         if named._path(session_id).exists():
-            session = named.get(session_id)
-            archived = await asyncio.to_thread(
-                session_store.archive_session, session, "🤖 "
-            )
+            session = await asyncio.to_thread(named.get, session_id)
+            archived = await asyncio.to_thread(session_store.archive_session, session)
         named.delete(session_id)
     return {"ok": True, "archived": archived}

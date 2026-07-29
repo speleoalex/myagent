@@ -1,0 +1,16 @@
+{
+  "name": "Autonomy Control",
+  "description": "Control YOUR OWN autonomous mode (live background wakes). Use it when the user tells you \"start yourself\", \"stop yourself\" or asks \"are you active/running?\": action 'start' turns your autonomous mode on, 'stop' turns it off and cancels a wake in flight, 'status' reports whether you are active plus last/next wake and pending events. Acts only on yourself; the setting persists across restarts.",
+  "internal": true,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "action": {
+        "type": "string",
+        "enum": ["start", "stop", "status"],
+        "description": "start = turn your autonomous mode on; stop = turn it off; status = report your current state"
+      }
+    },
+    "required": ["action"]
+  }
+}

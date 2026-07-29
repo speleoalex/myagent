@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
-"""Manage MyAgent tools: list, inspect, create/update, test or delete them.
+"""Manage MyAgent tools: list, inspect, create/update, test, reset or delete.
 
-Operates directly on the tool folders under the tools dir (``<tools>/<id>/``
-with ``tool.json`` + executable ``run``) so it does not depend on the HTTP API
-being reachable. Paths follow the same env overrides as the server (config.py):
-  MYAGENT_TOOLS     -> tools dir     (default ~/myagent/tools)
-  MYAGENT_WORKSPACE -> workspace dir (default ~/myagent/workspace)
+Operates directly on the tool folders (``tool.json`` + executable ``run``) so
+it does not depend on the HTTP API being reachable. Tools are an OVERLAY: the
+app's bundled catalog (native tools, always present, read-only) under the user
+tools dir, which holds user-created tools and local copies of edited native
+tools — editing a native tool copies it first (copy-on-write), 'reset' deletes
+the copy so the shipped original shows through again. Paths follow the same
+env overrides as the server (config.py):
+  MYAGENT_TOOLS     -> user tools dir (default ~/myagent/tools)
+  MYAGENT_APP_DIR   -> app server dir; bundled catalog at $MYAGENT_APP_DIR/tools
+  MYAGENT_WORKSPACE -> workspace dir  (default ~/myagent/workspace)
 The registry re-scans the filesystem with mtime caching, so a tool written here
 is callable immediately (no restart needed).
 """
@@ -40,6 +45,21 @@ def tools_dir() -> Path:
     return Path(os.environ.get("MYAGENT_TOOLS") or (Path.home() / "myagent" / "tools")).expanduser()
 
 
+def bundled_dir() -> Path | None:
+    """The app's read-only native catalog (server/tools). Located through
+    MYAGENT_APP_DIR (exported by the registry to every tool subprocess); when
+    absent, fall back to this script's own location, which IS the bundled
+    catalog unless the user has an override copy of manage_tools."""
+    app_dir = os.environ.get("MYAGENT_APP_DIR")
+    root = Path(app_dir) / "tools" if app_dir else Path(__file__).resolve().parent.parent
+    try:
+        if not root.is_dir() or root.resolve() == tools_dir().resolve():
+            return None
+    except OSError:
+        return None
+    return root
+
+
 def workspace_dir() -> Path:
     return Path(
         os.environ.get("MYAGENT_WORKSPACE") or (Path.home() / "myagent" / "workspace")
@@ -51,30 +71,96 @@ def fail(msg: str) -> None:
     sys.exit(1)
 
 
+def _walk_layer(root: Path | None) -> dict:
+    """One layer's tools as id -> (folder, category). A subfolder WITHOUT a
+    tool.json is a group (category); its subfolders are tools, one level deep.
+    Flat tools first, so on a duplicate id within the layer the flat copy
+    wins — same precedence as the server's registry."""
+    out = {}
+    if root is None or not root.is_dir():
+        return out
+    entries = sorted(e for e in root.iterdir() if e.is_dir())
+    for e in entries:
+        if (e / "tool.json").exists():
+            out.setdefault(e.name, (e, None))
+    for e in entries:
+        if (e / "tool.json").exists():
+            continue
+        for sub in sorted(e.iterdir()):
+            if sub.is_dir() and (sub / "tool.json").exists():
+                out.setdefault(sub.name, (sub, e.name))
+    return out
+
+
+def catalogue() -> dict:
+    """Every visible tool: the bundled catalog overlaid by the user dir.
+    id -> dict(path=resolved folder (user copy wins), category (the bundled
+    layout owns it for native tools), origin='native'|'custom',
+    has_override=bool, native_path, user_path)."""
+    native = _walk_layer(bundled_dir())
+    user = _walk_layer(tools_dir())
+    out = {}
+    for tid in set(native) | set(user):
+        u, ucat = user.get(tid, (None, None))
+        n, ncat = native.get(tid, (None, None))
+        out[tid] = {
+            "path": u if u is not None else n,
+            "category": ncat if n is not None else ucat,
+            "origin": "native" if n is not None else "custom",
+            "has_override": u is not None and n is not None,
+            "native_path": n,
+            "user_path": u,
+        }
+    return out
+
+
 def installed_ids() -> list[str]:
-    d = tools_dir()
-    if not d.is_dir():
-        return []
-    return sorted(e.name for e in d.iterdir() if e.is_dir() and (e / "tool.json").exists())
+    return sorted(catalogue())
 
 
-def read_meta(tool_id: str) -> dict | None:
+def find_tool(tool_id: str) -> dict | None:
+    return catalogue().get(tool_id)
+
+
+def read_meta(path: Path) -> dict | None:
     try:
-        return json.loads((tools_dir() / tool_id / "tool.json").read_text())
+        return json.loads((path / "tool.json").read_text())
     except (json.JSONDecodeError, OSError):
         return None
 
 
-def tool_dir(args: dict, *, must_exist: bool) -> tuple[str, Path]:
+def resolve(args: dict, *, must_exist: bool) -> tuple[str, dict | None]:
+    """Validate the id and look it up in the overlay catalogue."""
     tool_id = (args.get("id") or "").strip()
     if not tool_id:
         fail("Provide the tool 'id' (its folder name, e.g. 'word_count').")
     if not _VALID_TOOL_ID.match(tool_id) or ".." in tool_id:
         fail(f"Invalid tool id: {tool_id!r}. Use letters, digits, '.', '_' or '-'.")
-    path = tools_dir() / tool_id
-    if must_exist and not (path / "tool.json").exists():
+    info = find_tool(tool_id)
+    if info is None and must_exist:
         fail(f"Tool not found: {tool_id!r}. Installed tools: {', '.join(installed_ids()) or '(none)'}")
-    return tool_id, path
+    return tool_id, info
+
+
+def user_path_for(tool_id: str, category) -> Path:
+    """Where a user copy of this tool belongs: same group layout, under the
+    user tools dir."""
+    return tools_dir() / category / tool_id if category else tools_dir() / tool_id
+
+
+def ensure_user_copy(tool_id: str, info: dict) -> Path:
+    """Copy-on-write: a native tool served from the bundle gets its folder
+    copied (vendored deps included) into the user dir before any edit. The
+    bundled original is never written; the 'reset' action deletes the copy."""
+    if info["user_path"] is not None:
+        return info["user_path"]
+    dst = user_path_for(tool_id, info["category"])
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(
+        info["native_path"], dst,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
+    return dst
 
 
 def as_object(value, field: str) -> dict:
@@ -90,24 +176,32 @@ def as_object(value, field: str) -> dict:
 
 
 def do_list() -> None:
-    tools = []
-    for tool_id in installed_ids():
-        meta = read_meta(tool_id) or {}
-        tools.append({
-            "id": tool_id,
-            "name": meta.get("name", tool_id),
-            "description": meta.get("description", ""),
-            "enabled": meta.get("enabled", True),
-            "internal": bool(meta.get("internal")),
-            "parameters": sorted((meta.get("parameters") or {}).get("properties", {}).keys()),
-        })
-    print(json.dumps({"count": len(tools), "tools": tools}, ensure_ascii=False, indent=2))
+    # Plain text, one line per tool: the reader is a model, and a pretty JSON
+    # dump costs tokens without adding information.
+    lines = []
+    for tool_id, info in sorted(catalogue().items()):
+        meta = read_meta(info["path"]) or {}
+        tags = [info["origin"]]  # 'native' ships with the app; editing makes a copy
+        if info["category"]:
+            tags.insert(0, info["category"])
+        if info["has_override"]:
+            tags.append("modified")  # see action='reset'
+        if meta.get("internal"):
+            tags.append("internal")
+        if not meta.get("enabled", True):
+            tags.append("DISABLED")
+        params = ", ".join(sorted((meta.get("parameters") or {}).get("properties", {}).keys())) or "none"
+        desc = " ".join((meta.get("description") or "").split())
+        lines.append(f"- {tool_id} ({', '.join(tags)}) params: {params}"
+                     + (f"\n  {desc}" if desc else ""))
+    print(f"OK: {len(lines)} tool(s)")
+    print("\n".join(lines))
 
 
 def do_get(args: dict) -> None:
-    tool_id, path = tool_dir(args, must_exist=True)
-    meta = read_meta(tool_id) or {}
-    meta["id"] = tool_id
+    tool_id, info = resolve(args, must_exist=True)
+    path = info["path"]
+    meta = read_meta(path) or {}
     run_path = path / "run"
     script = None
     if run_path.exists():
@@ -115,7 +209,24 @@ def do_get(args: dict) -> None:
             script = run_path.read_text(errors="replace")
         except OSError as e:
             script = f"(cannot read run script: {e})"
-    print(json.dumps({"tool": meta, "script": script}, ensure_ascii=False, indent=2))
+    # Metadata as key: value lines; parameters as compact JSON (the model must
+    # reproduce that schema verbatim on save); the script verbatim between
+    # markers (needed whole for editing — save takes the full new script).
+    print(f"OK: tool '{meta.get('name', tool_id)}' (id: {tool_id})")
+    print(f"description: {meta.get('description', '')}")
+    if info["category"]:
+        print(f"category: {info['category']}")
+    print(f"origin: {info['origin']}; modified: {info['has_override']}; "
+          f"enabled: {meta.get('enabled', True)}; internal: {bool(meta.get('internal'))}")
+    print(f"timeout: {meta.get('timeout', 30)}; max_output: {meta.get('max_output', 10000)}")
+    print(f"parameters: {json.dumps(meta.get('parameters') or {}, ensure_ascii=False)}")
+    if script is None:
+        print("script: (none — this tool has no run script)")
+    else:
+        print("script (between the ---BEGIN/END SCRIPT--- markers):")
+        print("---BEGIN SCRIPT---")
+        print(script.rstrip("\n"))
+        print("---END SCRIPT---")
 
 
 def check_script(script: str) -> None:
@@ -134,21 +245,41 @@ def check_script(script: str) -> None:
 
 
 def do_save(args: dict) -> None:
-    tool_id, path = tool_dir(args, must_exist=False)
-    existed = (path / "tool.json").exists()
+    tool_id, info = resolve(args, must_exist=False)
+    existed = info is not None
 
-    meta = read_meta(tool_id) if existed else None
-    if existed and meta is None:
-        fail(f"Tool {tool_id!r} exists but its tool.json is unreadable — fix or delete it first.")
-    if meta and meta.get("internal"):
-        fail(f"Tool {tool_id!r} is internal (handled in-process): it has no run script and cannot be edited here.")
-    if meta is None:
+    if existed:
+        meta = read_meta(info["path"])
+        if meta is None:
+            fail(f"Tool {tool_id!r} exists but its tool.json is unreadable — fix or delete it first.")
+        if meta.get("internal"):
+            fail(f"Tool {tool_id!r} is internal (handled in-process): it has no run script and cannot be edited here.")
+        wanted = (args.get("category") or "").strip()
+        if wanted and wanted != (info["category"] or ""):
+            fail(
+                f"Tool {tool_id!r} already lives in "
+                f"{'group ' + info['category'] if info['category'] else 'the top level'}; "
+                "moving it is not supported here."
+            )
+        # Copy-on-write: edits to a native tool land on a user copy; the
+        # shipped original stays intact (action='reset' restores it).
+        path = ensure_user_copy(tool_id, info)
+    else:
         meta = dict(_META_DEFAULTS)
         # Creating from scratch: the model must at least say what it does and how.
         for required in ("name", "description", "script"):
             value = args.get(required)
             if not isinstance(value, str) or not value.strip():
                 fail(f"Creating a new tool needs '{required}'. Provide name, description and script.")
+        category = (args.get("category") or "").strip()
+        if category:
+            if not _VALID_TOOL_ID.match(category) or ".." in category:
+                fail(f"Invalid category: {category!r}. Use letters, digits, '.', '_' or '-'.")
+            if (tools_dir() / category / "tool.json").exists() or (
+                (bundled_dir() or tools_dir()) / category / "tool.json"
+            ).exists():
+                fail(f"{category!r} is a tool, not a group — pick another category name.")
+        path = user_path_for(tool_id, category or None)
 
     for key in ("name", "description"):
         if args.get(key) is not None:
@@ -211,12 +342,15 @@ def do_save(args: dict) -> None:
             f"works. Next call: {{\"name\": \"manage_tools\", \"arguments\": {{\"action\": \"test\", "
             f"\"id\": \"{tool_id}\", \"test_args\": {{...}}}}}}"
         )
-    print(json.dumps({**meta, "id": tool_id}, ensure_ascii=False, indent=2))
+    # Essentials only — the caller just sent this config, no need to echo it.
+    print(f"params: {', '.join(sorted((meta.get('parameters') or {}).get('properties', {}).keys())) or 'none'}; "
+          f"timeout: {meta.get('timeout', 30)}; enabled: {meta.get('enabled', True)}")
 
 
 def do_test(args: dict) -> None:
-    tool_id, path = tool_dir(args, must_exist=True)
-    meta = read_meta(tool_id) or {}
+    tool_id, info = resolve(args, must_exist=True)
+    path = info["path"]
+    meta = read_meta(path) or {}
     if meta.get("internal"):
         fail(f"Tool {tool_id!r} is internal and cannot be executed from here.")
     run_path = path / "run"
@@ -260,32 +394,58 @@ def do_test(args: dict) -> None:
     except OSError as e:
         fail(f"Cannot execute tool {tool_id!r}: {e} (check the shebang line).")
 
-    out = {
-        "tool": tool_id,
-        "test_args": test_args,
-        "exit_code": proc.returncode,
-        "stdout": proc.stdout[:4000],
-        "stderr": proc.stderr[:2000],
-    }
     status = "OK: test passed" if proc.returncode == 0 else f"ERROR: test failed (exit {proc.returncode})"
-    print(f"{status} for tool '{tool_id}'")
-    print(json.dumps(out, ensure_ascii=False, indent=2))
+    print(f"{status} for tool '{tool_id}' with args {json.dumps(test_args, ensure_ascii=False)}")
+    print(f"stdout:\n{proc.stdout[:4000] or '(empty)'}")
+    if proc.stderr:
+        print(f"stderr:\n{proc.stderr[:2000]}")
     # Exit 0 either way: a failing test is a result to reason about, not a
     # broken tool call — the agent needs stdout/stderr to fix the script.
 
 
+def _remove_user_copy(path: Path) -> None:
+    shutil.rmtree(path)
+    # Don't leave an empty group folder behind as a phantom category.
+    if path.parent != tools_dir():
+        try:
+            path.parent.rmdir()
+        except OSError:
+            pass
+
+
 def do_delete(args: dict) -> None:
-    tool_id, path = tool_dir(args, must_exist=True)
+    tool_id, info = resolve(args, must_exist=True)
     if tool_id == _SELF_ID:
         fail(f"Refusing to delete {_SELF_ID!r}: it is the tool used to manage tools.")
-    meta = read_meta(tool_id) or {}
+    meta = read_meta(info["path"]) or {}
     if meta.get("internal"):
         fail(f"Tool {tool_id!r} is internal and cannot be deleted.")
+    if info["origin"] == "native":
+        fail(
+            f"Tool {tool_id!r} ships with the app and cannot be deleted. "
+            "Use action='reset' to discard local changes, or save it with "
+            "enabled=false to hide it from agents."
+        )
     try:
-        shutil.rmtree(path)
+        _remove_user_copy(info["user_path"])
     except OSError as e:
         fail(f"Cannot delete tool {tool_id!r}: {e}")
-    print(f"OK: Deleted tool '{tool_id}' ({path})")
+    print(f"OK: Deleted tool '{tool_id}' ({info['user_path']})")
+
+
+def do_reset(args: dict) -> None:
+    """Discard the local copy of a native tool: the shipped original shows
+    through again immediately."""
+    tool_id, info = resolve(args, must_exist=True)
+    if info["origin"] != "native":
+        fail(f"Tool {tool_id!r} is not a native tool — use action='delete' instead.")
+    if info["user_path"] is None:
+        fail(f"Tool {tool_id!r} has no local copy: it is already the original version.")
+    try:
+        _remove_user_copy(info["user_path"])
+    except OSError as e:
+        fail(f"Cannot reset tool {tool_id!r}: {e}")
+    print(f"OK: Reset tool '{tool_id}' to the shipped version ({info['native_path']}).")
 
 
 def main() -> None:
@@ -307,8 +467,10 @@ def main() -> None:
         do_test(args)
     elif action in ("delete", "remove"):
         do_delete(args)
+    elif action in ("reset", "restore"):
+        do_reset(args)
     else:
-        fail("Unknown action. Use 'list', 'get', 'save', 'test' or 'delete'.")
+        fail("Unknown action. Use 'list', 'get', 'save', 'test', 'reset' or 'delete'.")
 
 
 if __name__ == "__main__":

@@ -13,10 +13,12 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from app import config
+from app.engine import prompts
 from app.models import Agent, ChatMessage, ChatResponse, ModelConfig
 from app.engine.llm_provider import LLMProvider
 from app.engine.toolcall_parser import parse_tool_calls_from_text
 from app.tools.registry import ToolRegistry
+from app.storage.memory import MemoryStore
 from app.storage.store import JsonStore
 
 log = logging.getLogger(__name__)
@@ -26,19 +28,34 @@ def _now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
-# Instruction for the forced final-answer pass: some local models keep
-# re-emitting the same tool call after a result instead of writing an answer,
-# which would otherwise leave the turn with the bare "(used tool: ...)" marker.
 # How many of a delegatable agent's tools the "Available Agents" directory names
 # before summarizing the rest. An MCP wildcard (mcp:<server>/*) can expand to
 # dozens, and this block goes into a router agent's prompt on every single turn.
 _DIRECTORY_TOOLS_PER_AGENT = 12
 
-_FORCE_ANSWER_PROMPT = (
-    "Now write the final answer to the user's request using ONLY the information "
-    "from the tool results above. Reply in the user's language as normal prose. "
-    "Do NOT output JSON and do NOT call any tool."
-)
+# Every injected string lives in app.engine.prompts — see its docstring for why
+# the scaffolding markers in particular must have exactly one definition.
+_FORCE_ANSWER_PROMPT = prompts.FORCE_ANSWER
+_MALFORMED_CALL_PROMPT = prompts.MALFORMED_CALL
+_MAX_MALFORMED_RETRIES = 2
+
+
+def _tool_call_args(tc: dict) -> dict:
+    """A tool call's arguments as a dict — {} when they don't parse."""
+    raw = tc["function"].get("arguments", "{}")
+    if isinstance(raw, dict):
+        return raw
+    try:
+        args = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return args if isinstance(args, dict) else {}
+
+
+def _step_summary(step: dict) -> dict:
+    """The lightweight projection of a trace step used for SSE tool_result
+    events and ChatResponse.tool_results (full results stay in the trace)."""
+    return {k: step[k] for k in ("tool", "arguments", "result_preview")}
 
 
 def _tool_call_key(tc: dict) -> tuple[str, str]:
@@ -64,6 +81,10 @@ def _tool_call_key(tc: dict) -> tuple[str, str]:
 class Stores:
     agents: JsonStore
     models: JsonStore
+    # Per-agent deep memory (None = memory subsystem not wired, e.g. in tests).
+    # Carried here so sub-agents inherit the pointer via create_for_agent —
+    # access is still gated per-agent by Agent.memory_enabled.
+    memory: MemoryStore | None = None
 
 
 class AgentExecutor:
@@ -97,6 +118,9 @@ class AgentExecutor:
         # them to a sub-agent by index (see call_agent_handler). The tool-call
         # JSON only carries small indices — never the base64 blobs themselves.
         self._turn_attachments: list[dict] = []
+        # Turn-scoped system-prompt suffix (memory digest + attachments
+        # manifest), re-appended when the no-tools fallback rebuilds the prompt.
+        self._system_suffix: str = ""
 
     # ------------------------------------------------------------------
     # Small helpers
@@ -114,10 +138,13 @@ class AgentExecutor:
 
     @staticmethod
     def _is_degenerate_reply(text: str) -> bool:
-        """A final reply that is empty or just the '(used tool: ...)' marker
-        means the model looped on tool calls instead of answering."""
+        """A final reply that is empty or just one of the plumbing markers means
+        the model looped on tool calls (or echoed a marker) instead of answering.
+
+        One of the two places that must recognize the markers the text-protocol
+        path writes; both read them from app.engine.prompts."""
         t = (text or "").strip()
-        return (not t) or t.startswith("(used tool:")
+        return (not t) or t.startswith(prompts.ASSISTANT_MARKER_PREFIXES)
 
     def _synthesis_messages(self, messages: list[dict]) -> list[dict]:
         """Messages for a forced, no-tool answer: drop empty/dangling turns and
@@ -152,6 +179,24 @@ class AgentExecutor:
                 f.write(msg + "\n")
         except Exception:
             pass
+
+    # base64 data URIs (attached images/audio) are the one thing that must NOT
+    # go verbatim into the debug trace: a single photo is megabytes of noise.
+    _DATA_URI = re.compile(r"data:([\w/+.-]+);base64,([A-Za-z0-9+/=]{64,})")
+
+    @classmethod
+    def _dbg_content(cls, content) -> str:
+        """Render a message content for the debug trace IN FULL: text as-is,
+        multimodal part-lists as JSON, with only base64 payloads replaced by a
+        size placeholder."""
+        if content is None:
+            return ""
+        if not isinstance(content, str):
+            content = json.dumps(content, ensure_ascii=False)
+        return cls._DATA_URI.sub(
+            lambda m: f"data:{m.group(1)};base64,<{len(m.group(2))} chars omitted>",
+            content,
+        )
 
     def _debug_reset(self, user_message: str):
         """Truncate the debug file at the start of a top-level turn."""
@@ -207,14 +252,7 @@ class AgentExecutor:
         if not tool_defs:
             return ""
         lines = [
-            "\n\n## Available Tools\n"
-            "When you need to use a tool, respond ONLY with a JSON object (no other text):\n"
-            "```json\n"
-            '{"name": "TOOL_NAME", "arguments": {"PARAM_NAME": "value"}}\n'
-            "```\n\n"
-            "Use the tool's EXACT name and EXACT parameter names shown below "
-            "(do NOT use the literal words TOOL_NAME or PARAM_NAME).\n"
-            "Available tools:"
+            prompts.SECTION_TOOLS + prompts.TOOLS_PROTOCOL
         ]
         for td in tool_defs:
             schema = td.get("parameters", {})
@@ -223,7 +261,13 @@ class AgentExecutor:
             parts = []
             for pname, pinfo in params.items():
                 opt = "" if pname in required else ", optional"
-                parts.append(f'{pname} ({pinfo.get("type", "string")}{opt}): {pinfo.get("description", "")}')
+                desc = pinfo.get("description", "")
+                # Enums are constraints the model must see in text mode (the
+                # native path carries them in the schema itself).
+                if isinstance(pinfo.get("enum"), list) and pinfo["enum"]:
+                    values = "|".join(str(v) for v in pinfo["enum"][:20])
+                    desc = (desc + " " if desc else "") + f"(one of: {values})"
+                parts.append(f'{pname} ({pinfo.get("type", "string")}{opt}): {desc}')
             params_desc = ", ".join(parts)
             # Concrete example using this tool's real parameter names so small
             # models don't copy a generic placeholder key like "param".
@@ -257,71 +301,51 @@ class AgentExecutor:
             allow = ["*"]
         return "*" in allow or target.get("id") in allow
 
-    @staticmethod
-    def _tool_gist(description: str, limit: int = 90) -> str:
-        """First sentence of a tool description, for the directory legend.
-
-        The caller only needs to know what a sub-agent's tool is for; the full
-        text is already in that sub-agent's own prompt."""
-        text = " ".join((description or "").split())
-        if not text:
-            return ""
-        gist = re.split(r"(?<=[.!?])\s", text)[0]
-        return gist if len(gist) <= limit else gist[:limit].rstrip() + "…"
-
     def _delegation_targets(self) -> list[dict]:
         """Raw agent dicts this agent is allowed to delegate to."""
         return [a for a in self.stores.agents.list_all() if self._agent_can_call(self.agent, a)]
 
-    def _build_agents_directory(self) -> str:
-        """Build compact directory of available agents for call_agent tool.
+    def _granted_tools(self) -> set[str]:
+        """The agent's tool grants with group wildcards (``<category>/*``)
+        expanded — the wildcard-aware form of ``x in self.agent.tools``."""
+        return set(self.tool_registry.expand_tool_ids(self.agent.tools))
 
-        Each entry carries the agent's description *and* its tools: an agent can
-        only act through the tools it holds, so that list is the part of "what it
-        can do" the caller can rely on (a description is hand-written and may be
+    def _build_agents_directory(self) -> str:
+        """Compact directory of the agents this one may call: one line per
+        agent — description + tool ids, nothing else. An agent can only act
+        through the tools it holds, so that list is the part of "what it can
+        do" the caller can rely on (a description is hand-written and may be
         vague, stale or empty). Resolution goes through
         ``get_definitions_for_agent()``, the same call the sub-agent's own turn
         uses: disabled or uninstalled tools drop out, and MCP entries (including
         ``mcp:<server>/*`` wildcards) are expanded — a tool the sub-agent cannot
-        actually run is not a capability. What each tool does is appended once as
-        a legend rather than repeated per agent, since agents share tools."""
+        actually run is not a capability. This block lands in the router's
+        prompt on every turn, so it stays as small as it can be."""
         entries: list[str] = []
-        legend: dict[str, str] = {}
         for a in self._delegation_targets():
             desc = a.get("description") or a.get("name", "")
             declared = a.get("tools") or []
             defs = self.tool_registry.get_definitions_for_agent(declared)
-            for d in defs[:_DIRECTORY_TOOLS_PER_AGENT]:
-                legend.setdefault(d["id"], self._tool_gist(d.get("description", "")))
             if defs:
-                # Capped: one MCP wildcard can expand to dozens of tools, and this
-                # directory is injected into the router's prompt on every turn.
+                # Capped: one MCP wildcard can expand to dozens of tools.
                 # The caller only needs enough to choose an agent.
                 shown = [d["id"] for d in defs[:_DIRECTORY_TOOLS_PER_AGENT]]
                 extra = len(defs) - len(shown)
-                can = ", ".join(shown) + (f", … and {extra} more" if extra > 0 else "")
+                can = ", ".join(shown) + (f", +{extra} more" if extra > 0 else "")
             elif declared:
                 # Declared but unresolvable: an MCP server that is down, or a
                 # deleted tool folder. Say so instead of claiming it has none.
                 can = "none reachable right now"
             else:
-                can = "none — answers from its own model, no actions"
-            entries.append(f"- {a['id']}: {desc}\n  tools: {can}")
+                can = "no tools — answers from its own model"
+            entries.append(f"- {a['id']}: {desc} [tools: {can}]")
         if not entries:
             return ""
-        lines = [
-            "\n\n## Available Agents",
-            "You can delegate tasks to these agents using the call_agent tool. "
-            "An agent can only act through the tools listed under it, so pick the "
-            "one whose tools fit the request.",
+        return "\n".join([
+            prompts.SECTION_AGENTS.rstrip("\n"),
+            prompts.AGENTS_PREAMBLE,
             *entries,
-        ]
-        if legend:
-            lines.append(
-                "What those tools do: "
-                + "; ".join(f"{t} = {g}" for t, g in sorted(legend.items()) if g)
-            )
-        return "\n".join(lines)
+        ])
 
     def _with_delegation_targets(self, tool_defs: list[dict]) -> list[dict]:
         """Pin call_agent's ``agent_id`` to the ids this agent may reach.
@@ -341,11 +365,9 @@ class AgentExecutor:
             prop = td.get("parameters", {}).get("properties", {}).get("agent_id")
             if isinstance(prop, dict):
                 prop["enum"] = ids
-                prop["description"] = (
-                    "The ID of the agent to call — one of: "
-                    f"{', '.join(ids)} (see Available Agents in your instructions "
-                    "for what each one can do)"
-                )
+                # The ids live in the enum and in the Available Agents block —
+                # repeating them here would be a third copy on every turn.
+                prop["description"] = "Agent to call (see Available Agents)"
             out.append(td)
         return out
 
@@ -514,6 +536,33 @@ class AgentExecutor:
         return (b64 or None), fmt
 
     @classmethod
+    def is_scaffolding_message(cls, role: str, content, tool_calls=None) -> bool:
+        """True when a conversation entry is tool-call plumbing rather than a
+        turn of the dialogue: the tool results we hand back as a user turn, the
+        '(used tool: ...)' assistant marker, native tool_calls/tool messages.
+
+        Two callers must agree on this: history injection (below, which drops
+        them so the model doesn't mimic the format in later turns) and the
+        session rewind endpoint (which counts real user turns to cut the stored
+        history at the right place).
+
+        Every literal comes from app.engine.prompts, the same module the writer
+        side uses — a marker reworded here but not there (or vice versa) fails
+        silently: the plumbing leaks into the next turn's history and rewind cuts
+        in the wrong place, with nothing raised anywhere."""
+        text = cls._flatten_content(content) or ""
+        if role == "user":
+            return (
+                text.startswith((prompts.TOOL_RESULTS_PREFIX, prompts.MALFORMED_PREFIX))
+                or any(s in text for s in prompts.LEGACY_USER_SUBSTRINGS)
+            )
+        if role == "assistant":
+            return (bool(tool_calls)
+                    or text.startswith(prompts.ASSISTANT_MARKER_PREFIXES
+                                       + prompts.LEGACY_ASSISTANT_PREFIXES))
+        return role == "tool"
+
+    @classmethod
     def _clean_conversation(cls, conversation: list[ChatMessage], max_messages: int = 10) -> list[dict]:
         """Remove internal tool-call artifacts from conversation history.
         Keeps only clean user/assistant exchanges so the LLM doesn't
@@ -522,23 +571,7 @@ class AgentExecutor:
         cleaned = []
         for msg in conversation:
             content = cls._flatten_content(msg.content) or ""
-            # Skip tool-scaffolding user turns (results + continue/answer nudge)
-            if msg.role == "user" and (
-                "Do NOT call any more tools" in content
-                or content.startswith("TOOL RESULTS:")
-                or "reply with ONLY the next tool-call JSON" in content
-            ):
-                continue
-            # Skip assistant tool-call markers ("[Called tool ..." / "(used tool: ..")
-            if msg.role == "assistant" and (
-                content.startswith("[Called tool") or content.startswith("(used tool:")
-            ):
-                continue
-            # Skip tool role messages
-            if msg.role == "tool":
-                continue
-            # Skip messages with tool_calls
-            if msg.tool_calls:
+            if cls.is_scaffolding_message(msg.role, content, msg.tool_calls):
                 continue
             data = msg.model_dump(exclude_none=True)
             data["content"] = content  # store flattened (string) content
@@ -549,15 +582,18 @@ class AgentExecutor:
         return cleaned
 
     def _system_prompt_with_tools(self, tool_defs: list[dict]) -> str:
-        """Return system prompt, always appending tool instructions.
-        Local models may accept the tools param but still not use structured
-        tool_calls — text instructions ensure they know the JSON format."""
+        """Return the system prompt, appending the text-protocol tool
+        instructions ONLY when this run uses the text protocol
+        (supports_tools is False). In native/auto mode the `tools` payload is
+        the tool documentation — injecting the JSON instructions on top made
+        models emit JSON as prose (double protocol) and cost ~650 tokens per
+        turn. A server that accepts `tools` but never calls one is handled by
+        the per-model override (ModelConfig.supports_tools = False)."""
         prompt = self.agent.system_prompt
         # Inject agent directory if agent can call other agents
-        if "call_agent" in self.agent.tools:
+        if "call_agent" in self._granted_tools():
             prompt += self._build_agents_directory()
-        # Always inject tool instructions so models know the JSON format
-        if tool_defs:
+        if tool_defs and self.provider.supports_tools is False:
             prompt += self._build_tools_prompt(tool_defs)
         return prompt
 
@@ -568,8 +604,9 @@ class AgentExecutor:
         sub-agent by index (call_agent's attachment_indices)."""
         vision = getattr(self.model_config, "supports_vision", True)
         audio_ok = getattr(self.model_config, "supports_audio", False)
-        has_extract = "document_extract" in self.agent.tools
-        has_call = "call_agent" in self.agent.tools
+        granted = self._granted_tools()
+        has_extract = "document_extract" in granted
+        has_call = "call_agent" in granted
 
         hints = ["Items marked 'inline' are already included in the message — "
                  "read them directly."]
@@ -581,7 +618,7 @@ class AgentExecutor:
             hints.append("You may forward one or more items to a sub-agent via "
                          "call_agent's `attachment_indices` (0-based), e.g. attachment_indices=[0].")
 
-        lines = ["\n\n## Attachments (this turn)",
+        lines = [prompts.SECTION_ATTACHMENTS,
                  "The user attached the item(s) below. " + " ".join(hints)]
         for i, a in enumerate(attachments or []):
             a = a or {}
@@ -598,23 +635,70 @@ class AgentExecutor:
             lines.append(f"- [{i}] {kind}: {name} ({tag}){extra}")
         return "\n".join(lines)
 
-    def _prepare_turn(self, tool_defs: list[dict], attachments: list[dict] | None):
+    def _build_memory_section(self, memory_context: list | None) -> str:
+        """The '## Memory' block injected into the system prompt: the agent's
+        long-term root digest plus the summaries of this session's archived
+        turns (session["memory"].context, filled by the memory compactor).
+        Kept OUT of conversation[] so the scaffolding predicate and the rewind
+        endpoint never see it. Empty unless the agent opted into memory."""
+        if not self.agent.memory_enabled or self.stores.memory is None:
+            return ""
+        parts = []
+        try:
+            root = self.stores.memory.get_root_summary(self.agent.id)
+        except Exception:
+            root = ""
+        if root:
+            parts.append("### Long-term memory (from all past conversations)\n" + root)
+        lines = [
+            f"- [{(c.get('ts') or '')[:10]}] {c['summary']}"
+            for c in (memory_context or []) if c.get("summary")
+        ]
+        if lines:
+            parts.append("### Earlier in this conversation (summarized)\n" + "\n".join(lines))
+        if not parts:
+            return ""
+        if self._granted_tools() & {"memory_search", "memory_read"}:
+            parts.append("Details are retrievable with the memory_search / memory_read tools.")
+        return prompts.SECTION_MEMORY + "\n\n".join(parts)
+
+    def _prepare_turn(self, tool_defs: list[dict], attachments: list[dict] | None,
+                      memory_context: list | None = None):
         """Return (system_content, tool_defs, openai_tools) for this turn.
 
         When the user attaches files, append a manifest so the model knows what
         it received, which items are inline vs available only as a workspace file
         (with its `path`, to hand to document_extract), and — for router agents —
         how to forward them to a sub-agent by index."""
-        if tool_defs and "call_agent" in self.agent.tools:
+        if tool_defs and any(d["id"] == "call_agent" for d in tool_defs):
             tool_defs = self._with_delegation_targets(tool_defs)
         openai_tools = ToolRegistry.to_openai_format(tool_defs) if tool_defs else None
-        system_content = self._system_prompt_with_tools(tool_defs)
+        # Turn-scoped additions (memory digest, attachments manifest) are kept
+        # as a suffix on self too: the no-tools fallback rebuilds the system
+        # prompt mid-loop from _system_prompt_with_tools alone and would
+        # otherwise silently drop them (llama.cpp starts in that mode).
+        suffix = self._build_memory_section(memory_context)
         has_attachment = bool(attachments) and any(
             (a or {}).get("data") or (a or {}).get("path") for a in attachments
         )
         if has_attachment:
-            system_content += self._build_attachments_manifest(attachments)
+            suffix += self._build_attachments_manifest(attachments)
+        self._system_suffix = suffix
+        system_content = self._system_prompt_with_tools(tool_defs) + suffix
         return system_content, tool_defs, openai_tools
+
+    # A reply that carries the shape of a tool call: a JSON-ish object mentioning
+    # the call keys or a fenced json block. Deliberately narrow — it only gates
+    # the "resend that call" retry, and prose must never match.
+    _CALL_SHAPE = re.compile(r'"name"\s*:|"arguments"\s*:|"parameters"\s*:|```json', re.I)
+
+    def _looks_like_tool_call(self, content: str, tool_defs: list[dict]) -> bool:
+        """True when the model clearly ATTEMPTED a tool call that failed to parse:
+        the text has the call shape and names one of this agent's tools."""
+        text = (content or "").strip()
+        if "{" not in text or not self._CALL_SHAPE.search(text):
+            return False
+        return any(d["id"] in text for d in tool_defs)
 
     def _parse_text_tool_calls(self, content: str, tool_defs: list[dict]) -> list[dict] | None:
         """Fallback parsing of tool calls from plain text (delegates to
@@ -625,7 +709,7 @@ class AgentExecutor:
         stops such a model from invoking tools its agent was never given."""
         definitions = {d["id"]: d for d in tool_defs}
         agent_ids_provider = None
-        if "call_agent" in self.agent.tools:
+        if "call_agent" in definitions:
             agent_ids_provider = lambda: {
                 a["id"] for a in self.stores.agents.list_all()
                 if self._agent_can_call(self.agent, a)
@@ -641,12 +725,14 @@ class AgentExecutor:
         user_message: str,
         conversation: list[ChatMessage] | None = None,
         attachments: list[dict] | None = None,
+        memory_context: list | None = None,
     ) -> ChatResponse:
         """Non-streaming entry point: drain run_stream() and return the final
         ChatResponse (single implementation of the loop lives there)."""
         response: ChatResponse | None = None
         error: str | None = None
-        async for event in self.run_stream(user_message, conversation, attachments):
+        async for event in self.run_stream(user_message, conversation, attachments,
+                                           memory_context):
             et = event.get("type")
             if et == "done":
                 response = ChatResponse(**event.get("data", {}))
@@ -669,13 +755,15 @@ class AgentExecutor:
         user_message: str,
         conversation: list[ChatMessage] | None = None,
         attachments: list[dict] | None = None,
+        memory_context: list | None = None,
     ):
         """The agent loop, as an async generator of SSE-compatible event dicts.
 
         Event types: token, clear_tokens, tool_start, tool_result, error, done.
         """
         try:
-            async for event in self._run_stream_inner(user_message, conversation, attachments):
+            async for event in self._run_stream_inner(user_message, conversation,
+                                                      attachments, memory_context):
                 yield event
         finally:
             # Runs on normal completion AND on generator abort (Stop button /
@@ -687,6 +775,7 @@ class AgentExecutor:
         user_message: str,
         conversation: list[ChatMessage] | None,
         attachments: list[dict] | None,
+        memory_context: list | None = None,
     ):
         self._debug_reset(user_message)
         # Write attachments to workspace files (stamping a `path` on each) so the
@@ -705,14 +794,20 @@ class AgentExecutor:
         # which run their own _run_stream_inner), and it never raises.
         await self.tool_registry.ensure_mcp(self.agent.tools)
         tool_defs = self.tool_registry.get_definitions_for_agent(self.agent.tools)
-        system_content, tool_defs, openai_tools = self._prepare_turn(tool_defs, attachments)
+        system_content, tool_defs, openai_tools = self._prepare_turn(
+            tool_defs, attachments, memory_context)
 
         # System prompt (tool descriptions injected if model doesn't support native tools)
         messages.append({"role": "system", "content": system_content})
 
-        # Prior conversation (cleaned of tool-call artifacts)
+        # Prior conversation (cleaned of tool-call artifacts). Memory-enabled
+        # agents get a wide safety net: their real limit is the token-based
+        # compactor (and _truncate_messages remains the last defense).
         if conversation:
-            messages.extend(self._clean_conversation(conversation))
+            messages.extend(self._clean_conversation(
+                conversation,
+                max_messages=200 if self.agent.memory_enabled else 10,
+            ))
 
         # New user message (with attachments folded in / images as content parts)
         messages.append({"role": "user", "content": self._build_user_content(user_message, attachments)})
@@ -724,9 +819,10 @@ class AgentExecutor:
         iterations = 0
         total_tool_calls = 0
         max_tool_calls = self.agent.max_tool_calls  # hard limit per run
-        all_tool_results: list[dict] = []
         trace_steps: list[dict] = []  # rich recursive trace (full results + sub-agents)
-        executed_calls: dict[tuple, str] = {}  # (name, args) -> result
+        executed_calls: set[tuple] = set()  # (name, args) keys already run
+        malformed_retries = 0  # text-mode tool calls we asked the model to resend
+        tools_downgrade_retried = False  # one free redo when the endpoint rejects `tools` mid-run
         use_response_temp = False  # switch to response_temperature after tool results
         stream_error: str | None = None  # last LLM failure, surfaced if no reply
 
@@ -740,21 +836,24 @@ class AgentExecutor:
                 self._debug_log(f"  Using response_temperature: {current_temp}")
 
             # Update system prompt if provider fell back to no-tools mode
+            # (keeping the turn-scoped suffix: memory + attachments manifest)
             if self.provider.supports_tools is False and tool_defs:
-                new_prompt = self._system_prompt_with_tools(tool_defs)
+                new_prompt = self._system_prompt_with_tools(tool_defs) + self._system_suffix
                 if messages[0]["content"] != new_prompt:
                     messages[0]["content"] = new_prompt
 
-            # Debug log: dump messages sent to LLM
+            # Debug log: dump the COMPLETE payload sent to the LLM (system
+            # prompt included — this is where "Available Agents" shows up).
             self._debug_log(f"=== Agent '{self.agent.id}' iteration {iterations} ===")
             self._debug_log(f"Messages sent ({len(messages)}):")
             for i, m in enumerate(messages):
                 role = m.get("role", "?")
-                content = (m.get("content") or "")[:200]
+                content = self._dbg_content(m.get("content"))
                 tc = m.get("tool_calls")
                 self._debug_log(f"  [{i}] {role}: {content}" + (f" [tool_calls: {len(tc)}]" if tc else ""))
 
             # Stream LLM response token by token
+            pre_tools = self.provider.supports_tools  # to detect a mid-call downgrade
             try:
                 full_content = ""
                 tool_calls_accum: dict[int, dict] = {}
@@ -798,21 +897,59 @@ class AgentExecutor:
 
             tool_calls = [tool_calls_accum[i] for i in sorted(tool_calls_accum)] if tool_calls_accum else None
 
-            # Debug log LLM response
-            self._debug_log(f"LLM response content: {(full_content or '')[:300]}")
+            # Debug log LLM response (complete)
+            self._debug_log(f"LLM response content: {full_content or ''}")
             if tool_calls:
-                self._debug_log(f"  Structured tool_calls: {json.dumps(tool_calls, ensure_ascii=False)[:500]}")
+                self._debug_log(f"  Structured tool_calls: {json.dumps(tool_calls, ensure_ascii=False)}")
 
-            # Fallback: parse tool calls from text content
-            if not tool_calls and tool_defs and full_content:
+            # Fallback: parse tool calls from text content. In NATIVE mode a
+            # structured call is how the model calls tools, so prose is only
+            # scavenged when it carries an explicit JSON call shape
+            # (_looks_like_tool_call) — a final answer that merely MENTIONS
+            # tool names (e.g. «retrieve it with memory_read(s-000014)») must
+            # survive as the answer, not get eaten and replayed as junk calls.
+            # In text mode the reply is the only call channel, so parse always.
+            if not tool_calls and tool_defs and full_content and (
+                    self.provider.supports_tools is False
+                    or self._looks_like_tool_call(full_content, tool_defs)):
                 parsed = self._parse_text_tool_calls(full_content, tool_defs)
                 if parsed:
                     log.info("Stream fallback: parsed %d tool call(s) from text", len(parsed))
-                    self._debug_log(f"  Parsed from text: {json.dumps(parsed, ensure_ascii=False)[:500]}")
+                    self._debug_log(f"  Parsed from text: {json.dumps(parsed, ensure_ascii=False)}")
                     tool_calls = parsed
                     full_content = ""
                     # Tell frontend to clear the streamed JSON text
                     yield {"type": "clear_tokens"}
+                elif (self.provider.supports_tools is False
+                        and malformed_retries < _MAX_MALFORMED_RETRIES
+                        and self._looks_like_tool_call(full_content, tool_defs)):
+                    # The model decided on a tool but its JSON doesn't parse — one
+                    # stray quote inside a message is enough. Treating that as the
+                    # final answer silently drops the step it had decided on (and
+                    # ends a multi-step chain), so show it the problem and ask for
+                    # the call again. Bounded, and only in text mode: a native
+                    # tool_call is structured by construction.
+                    malformed_retries += 1
+                    log.info("Malformed text tool call, asking the model to resend")
+                    self._debug_log("  MALFORMED tool call -> asking for a resend")
+                    yield {"type": "clear_tokens"}
+                    messages.append({"role": "assistant",
+                                     "content": f"{prompts.UNPARSED_CALL_PREFIX} unparsed)\n{full_content}"})
+                    messages.append({"role": "user", "content": _MALFORMED_CALL_PROMPT})
+                    continue
+
+            # The endpoint rejected `tools` mid-call (auto probe -> text
+            # protocol downgrade): this reply was produced WITHOUT the
+            # text-protocol instructions in the prompt, so its lack of a tool
+            # call means nothing. Redo the round once — the loop head rebuilds
+            # the system prompt now that supports_tools is False.
+            if (not tool_calls and tool_defs and not tools_downgrade_retried
+                    and pre_tools is None and self.provider.supports_tools is False):
+                tools_downgrade_retried = True
+                iterations -= 1  # the model was flying blind; don't charge the round
+                yield {"type": "clear_tokens"}
+                self._debug_log("  Endpoint rejected tools -> redoing round with text-protocol prompt")
+                continue
 
             # Deduplicate within same response + skip cross-iteration repeats
             if tool_calls:
@@ -865,12 +1002,11 @@ class AgentExecutor:
                 if not isinstance(func_args, dict):
                     result = f"ERROR: Could not parse tool arguments: {raw_args}"
                     total_tool_calls += 1
-                    executed_calls[_tool_call_key(tc)] = result
-                    summary = {"tool": func_name, "arguments": {}, "result_preview": result[:200]}
-                    all_tool_results.append(summary)
-                    trace_steps.append(self._make_step(func_name, {}, result))
+                    executed_calls.add(_tool_call_key(tc))
+                    step = self._make_step(func_name, {}, result)
+                    trace_steps.append(step)
                     yield {"type": "tool_start", "data": {"tool": func_name, "arguments": {}}}
-                    yield {"type": "tool_result", "data": summary}
+                    yield {"type": "tool_result", "data": _step_summary(step)}
                     if self.provider.supports_tools is False:
                         call_result_parts.append(f"- {func_name}: {result}")
                     else:
@@ -884,15 +1020,16 @@ class AgentExecutor:
                 )
                 total_tool_calls += 1
 
-                executed_calls[_tool_call_key(tc)] = result
-                summary = {"tool": func_name, "arguments": func_args, "result_preview": result[:200]}
-                all_tool_results.append(summary)
+                executed_calls.add(_tool_call_key(tc))
                 # Rich trace step (full result + nested sub-agent trace). Built
                 # here so the call_agent sub-trace queued by call_agent_handler
-                # is consumed in the same order it was produced.
-                trace_steps.append(self._make_step(func_name, func_args, result))
-                yield {"type": "tool_result", "data": summary}
-                self._debug_log(f"  Tool result: {func_name} -> {result[:200]}")
+                # is consumed in the same order it was produced. The SSE/
+                # tool_results summary is a projection of the same step —
+                # single source of truth.
+                step = self._make_step(func_name, func_args, result)
+                trace_steps.append(step)
+                yield {"type": "tool_result", "data": _step_summary(step)}
+                self._debug_log(f"  Tool result: {func_name} -> {self._dbg_content(result)}")
 
                 # Forward sub-agent tool events (populated by call_agent_handler)
                 while self._pending_sub_events:
@@ -907,23 +1044,39 @@ class AgentExecutor:
                         "content": result,
                     })
 
-            # For models without tool support: deliver results as a labeled user
-            # turn; keep the assistant turn a bare marker so the model doesn't
-            # mimic a '[Called tool ...]' format instead of writing an answer.
+            # For models without tool support: the text protocol has no
+            # role:tool message, so the results come back as a labeled user turn
+            # and the assistant turn replays the call the model just made.
+            #
+            # That replay matters. The turn used to be a bare "(used tool: X)"
+            # marker, and models COPIED it as their next reply — a dead end: a
+            # marker carries no call, so the turn ended there and a second agent
+            # could never be reached. Echoing the canonical JSON teaches the
+            # protocol instead, and the worst case (an identical repeat) is
+            # caught by the dedup above rather than losing the turn. The marker
+            # stays as the first line: is_scaffolding_message() keys on it to
+            # keep this plumbing out of the next turn's history.
             if self.provider.supports_tools is False and call_result_parts:
                 names = ", ".join(tc["function"]["name"] for tc in tool_calls)
-                messages[-1] = {"role": "assistant", "content": f"(used tool: {names})"}
+                messages[-1] = {
+                    "role": "assistant",
+                    "content": f"{prompts.USED_TOOL_PREFIX} {names})\n" + "\n".join(
+                        json.dumps({"name": tc["function"]["name"],
+                                    "arguments": _tool_call_args(tc)}, ensure_ascii=False)
+                        for tc in tool_calls),
+                }
                 messages.append({
                     "role": "user",
-                    "content": (
-                        "TOOL RESULTS:\n" + "\n\n".join(call_result_parts) +
-                        "\n\nIf you still need another tool, reply with ONLY the next tool-call JSON. "
-                        "Otherwise write the final answer for the user, in their language, "
-                        "summarizing ALL the results above. Do NOT repeat these lines or the tool names."
-                    ),
+                    "content": (prompts.TOOL_RESULTS_PREFIX + "\n"
+                                + "\n\n".join(call_result_parts)
+                                + prompts.TOOL_RESULTS_NUDGE),
                 })
-                use_response_temp = True
-                self._debug_log("  Added 'now answer' nudge")
+                # The answering temperature belongs to the answer. While the
+                # budget still allows a tool call, the next turn is a DECISION,
+                # so keep the tool-calling temperature for it.
+                if total_tool_calls >= max_tool_calls or iterations + 1 >= self.agent.max_iterations:
+                    use_response_temp = True
+                self._debug_log("  Added 'decide: next tool or answer' nudge")
 
         # Final response: last assistant content produced THIS turn only (never
         # reach into injected prior-turn history — see turn_start).
@@ -936,7 +1089,7 @@ class AgentExecutor:
         # If the model looped on tool calls and never wrote an answer, force one
         # last no-tool synthesis from the tool results, streaming it to the user
         # (avoids ending the turn with the bare "(used tool: ...)" marker).
-        if self._is_degenerate_reply(final_text) and all_tool_results:
+        if self._is_degenerate_reply(final_text) and trace_steps:
             yield {"type": "clear_tokens"}
             forced = ""
             try:
@@ -961,7 +1114,7 @@ class AgentExecutor:
             yield {"type": "error", "data": stream_error}
             final_text = f"ERROR: LLM call failed: {stream_error}"
         elif not final_text and iterations >= self.agent.max_iterations:
-            final_text = "[Agent reached maximum iterations without a final response]"
+            final_text = prompts.NO_FINAL_RESPONSE
 
         clean_messages = []
         for m in messages:
@@ -977,7 +1130,7 @@ class AgentExecutor:
             reply=final_text,
             conversation=clean_messages,
             iterations=iterations,
-            tool_results=all_tool_results,
+            tool_results=[_step_summary(s) for s in trace_steps],
             trace=self._build_trace(final_text, iterations, trace_steps),
         )
         yield {"type": "done", "data": response.model_dump()}

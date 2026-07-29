@@ -60,6 +60,16 @@ class BaseConnector:
         # before the previous answer is ready.
         self._busy: set = set()
 
+    def session_id_for(self, chat_id) -> str:
+        """The myagent session key this chat maps to.
+
+        The ONE place that answers it. myagent must not recompute it: the key is
+        built from ``session_prefix`` (which defaults to, but is not, the binding
+        id) and a sanitized chat id, so it is not derivable from what myagent
+        knows. ``/send`` returns this value precisely so an unsolicited message
+        can be appended to the right conversation."""
+        return _safe_session_id(self.binding.effective_prefix(), chat_id)
+
     # ------------------------------------------------- transport (subclass API)
     async def start(self) -> None:
         raise NotImplementedError
@@ -129,7 +139,7 @@ class BaseConnector:
                 "Commands: /reset to clear the conversation."
             )
         if cmd == "/reset":
-            sid = _safe_session_id(self.binding.effective_prefix(), chat_id)
+            sid = self.session_id_for(chat_id)
             try:
                 await self.client.reset_session(sid)
             except Exception as e:
@@ -182,14 +192,15 @@ class BaseConnector:
             await self.send(chat_id, "⏳ Sto ancora elaborando il messaggio precedente…")
             return
 
-        sid = _safe_session_id(self.binding.effective_prefix(), chat_id)
+        sid = self.session_id_for(chat_id)
         self._busy.add(chat_id)
         # Keep a "typing…" indicator alive for the whole (possibly slow) agent
         # turn — a single action would expire after ~5s and look stalled.
         typing = asyncio.create_task(self._typing_loop(chat_id))
         try:
             reply = await self.client.chat(self.binding.agent_id, text, sid,
-                                           attachments=attachments)
+                                           attachments=attachments,
+                                           source=self.type)
         except Exception as e:
             log.exception("agent call failed (%s): %s", self.binding.id, e)
             await self.send(chat_id, "⚠️ Error generating the reply. Please try again later.")

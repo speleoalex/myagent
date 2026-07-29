@@ -40,6 +40,12 @@ class ModelConfig(BaseModel):
     # attachment manifest) so the model can read it via a tool (document_extract).
     supports_vision: bool = True   # images inlined by default (back-compat)
     supports_audio: bool = False   # audio inlined only when explicitly enabled
+    # Native tool calling (OpenAI `tools` + `tool_calls` in the reply).
+    # None = auto: the tools are sent and the endpoint's answer decides (a 400
+    # falls back to the text protocol, where tool calls are parsed out of the
+    # model's text — the JSON instructions are in the system prompt either way).
+    # Set False for a server that accepts `tools` but never emits a tool_call.
+    supports_tools: bool | None = None
     # Context window in tokens. None (or 0) means "auto": the real value is
     # probed from the model server — llama.cpp /props, Ollama /api/show +
     # /api/ps, remote /v1/models when it declares one — see
@@ -138,6 +144,35 @@ class McpServer(BaseModel):
         return self
 
 
+class AutonomousConfig(BaseModel):
+    """Optional tuning for a live (autonomous) agent. All fields have sane
+    defaults, so ``live: true`` alone is a working configuration — this block
+    only customizes it. There is deliberately NO ``enabled`` here:
+    ``Agent.live`` is the single switch."""
+
+    interval_s: int = 1800          # heartbeat period; 0 = wake on events only
+    instructions: str = ""          # standing instructions injected at each wake
+    max_wakes_per_hour: int = 12
+    max_consecutive_errors: int = 5
+    wake_timeout_s: int = 600
+    notify_binding_id: str = ""     # default target for the notify_user tool
+    notify_chat_id: str = ""
+    # How many messages of the PREVIOUS wakes a wake may see. Default 0: none.
+    #
+    # Nothing like the interactive window (200 with memory on). A heartbeat is a
+    # self-similar task, so its own history is dozens of near-identical copies of
+    # the same wake prompt and the same reply — not continuity but a feedback
+    # loop: the model reads its last output and reproduces it, which is how an
+    # already-fixed misconfiguration keeps being reported as broken (observed,
+    # for three wakes running, after the fix landed). Continuity that actually
+    # matters belongs to deep memory, which is injected as a digest, and an agent
+    # that needs more can be told to call memory_search in its instructions.
+    #
+    # The full conversation is still written to the session file either way: this
+    # governs only what goes back INTO the prompt. Raise it if you have a reason.
+    history_messages: int = 0
+
+
 class Agent(BaseModel):
     id: str
     name: str
@@ -152,6 +187,20 @@ class Agent(BaseModel):
     enabled: bool = True
     callable: bool = True             # can be called/selected by others (delegation + pickers)
     callable_agents: list[str] = ["*"]  # agents this agent may delegate to via call_agent; ["*"] = all
+    # Per-agent deep memory (opt-in). False = hard exclusion: no compaction, no
+    # prompt injection, and the memory_* tools refuse even if attached.
+    memory_enabled: bool = False
+    # Compaction threshold in estimated tokens of the CLEANED conversation:
+    # above it, the oldest turns are archived to deep memory and summarized.
+    memory_threshold: int = 4000
+    # THE autonomy switch (default off). True = the AutonomyService wakes this
+    # agent on a heartbeat and on queued events. Persisted with the agent, so a
+    # started agent restarts on its own after a service/machine reboot;
+    # live=false (or enabled=false) is the kill switch, effective within one
+    # scheduler scan.
+    live: bool = False
+    # Optional autonomy knobs; None = all defaults (live alone is enough).
+    autonomous: AutonomousConfig | None = None
 
     @field_validator("id")
     @classmethod
@@ -187,11 +236,22 @@ class ChatRequest(BaseModel):
     # current chat. Constrained to the same safe charset as entity ids, since
     # it becomes a filename.
     session_id: str | None = None
+    # Optional provenance of a channel-scoped turn — the connector type (e.g.
+    # "telegram"). Stored on the session so the history UI can show where the
+    # chat came from. Ignored for regular web chats.
+    source: str | None = None
 
     @field_validator("session_id")
     @classmethod
     def validate_session_id(cls, v: str | None) -> str | None:
+        # Strict: an empty string is a malformed channel key and must fail
+        # loudly (422), not silently fall through to the web current chat.
         return None if v is None else _check_id(v)
+
+    @field_validator("source")
+    @classmethod
+    def validate_source(cls, v: str | None) -> str | None:
+        return None if not v else _check_id(v)
 
 
 class ChatResponse(BaseModel):
@@ -210,3 +270,8 @@ class Settings(BaseModel):
     default_model_id: str | None = None
     ollama_base_url: str = "http://localhost:11434"
     llamacpp_base_url: str = "http://localhost:8080"
+    # Where the notify_user tool delivers messages: the standalone connectors
+    # server (POST /api/bindings/{id}/send) and its optional bearer key
+    # (MYAGENT_CONNECTORS_API_KEY on the connectors side).
+    connectors_base_url: str = "http://localhost:8899"
+    connectors_api_key: str = ""

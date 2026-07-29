@@ -62,6 +62,22 @@
       "max_tool_calls": {
         "type": "integer",
         "description": "Max total tool executions per turn (default 5)."
+      },
+      "memory_enabled": {
+        "type": "boolean",
+        "description": "Give the agent persistent deep memory across chats (default false). When true, old conversation turns are archived and summarized automatically."
+      },
+      "memory_threshold": {
+        "type": "integer",
+        "description": "Conversation size (estimated tokens) above which the oldest turns are archived to deep memory (default 4000)."
+      },
+      "live": {
+        "type": "boolean",
+        "description": "Start/stop the agent as an autonomous agent (default false). A live agent wakes up periodically and on events, and restarts by itself after a server reboot."
+      },
+      "autonomous": {
+        "type": "object",
+        "description": "Optional autonomy tuning: {interval_s, instructions, max_wakes_per_hour, max_consecutive_errors, wake_timeout_s, notify_binding_id, notify_chat_id}. null = defaults (30 min heartbeat)."
       }
     },
     "required": [

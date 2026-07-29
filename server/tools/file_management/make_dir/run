@@ -9,7 +9,7 @@ path = Path(args["path"])
 
 try:
     path.mkdir(parents=True, exist_ok=True)
-    print(f"OK: Directory ready: {path}")
+    print(f"OK: Directory ready: {path.resolve()}")
 except OSError as e:
     print(f"ERROR: {e}", file=sys.stderr)
     sys.exit(1)

@@ -1,0 +1,23 @@
+{
+  "name": "Write File",
+  "description": "Write content to a file. Creates the file and parent directories if they don't exist. A relative path lands in the agent workspace — the default place for new files: pass just a filename unless the user asked for a specific absolute location.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "path": {
+        "type": "string",
+        "description": "File path to write. Relative = inside the workspace (default); absolute only when the user asked for a specific location"
+      },
+      "content": {
+        "type": "string",
+        "description": "Content to write to the file"
+      }
+    },
+    "required": [
+      "path",
+      "content"
+    ]
+  },
+  "timeout": 10,
+  "max_output": 1000
+}

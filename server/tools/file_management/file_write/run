@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Append content to a file (creating it and parent dirs if needed)."""
+"""Write content to a file."""
 import json
 import sys
 from pathlib import Path
@@ -10,9 +10,8 @@ content = args["content"]
 
 try:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "a") as f:
-        n = f.write(content)
-    print(f"OK: Appended {n} chars to {path}")
+    path.write_text(content)
+    print(f"OK: Written {len(content)} chars to {path.resolve()}")
 except OSError as e:
     print(f"ERROR: {e}", file=sys.stderr)
     sys.exit(1)

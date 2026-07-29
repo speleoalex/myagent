@@ -55,39 +55,25 @@ def ensure_config_dir() -> Path:
 MCP_DIR = CONFIG_DIR / "mcp"
 MCP_CACHE_DIR = MCP_DIR / "cache"
 
-# Tools are runtime data too: users (and the AI itself) create/edit tools via
-# the API, so they must live outside the install dir or `deploy.sh`'s
-# rsync --delete would wipe them on every redeploy. Defaults to
-# ~/myagent/tools, seeded on first run from the app's bundled tools/;
-# override with the MYAGENT_TOOLS env var.
+# Tools the user (or the AI itself) creates or edits live outside the install
+# dir — `deploy.sh`'s rsync --delete would wipe them on every redeploy.
+# Defaults to ~/myagent/tools; override with the MYAGENT_TOOLS env var.
+# This dir is the OVERLAY on the bundled catalog: native tools are served
+# straight from DEFAULT_TOOLS_DIR with no install step, editing one copies it
+# here first (copy-on-write), and deleting the copy restores the original.
 TOOLS_DIR = Path(
     os.environ.get("MYAGENT_TOOLS") or (Path.home() / "myagent" / "tools")
 ).expanduser()
 
-# Bundled tool templates shipped with the app (seed source, like DEFAULT_CONFIG_DIR).
+# Bundled native tool catalog shipped with the app (read-only underlay).
 DEFAULT_TOOLS_DIR = APP_DIR / "tools"
 
-# Set to True by ensure_tools_dir() when it seeds TOOLS_DIR from the defaults.
-TOOLS_SEEDED = False
-
-
 def ensure_tools_dir() -> Path:
-    """On first run, initialize TOOLS_DIR from the app's bundled tools.
-
-    If TOOLS_DIR already exists it is left untouched (user/AI-created tools are
-    never overwritten). If the bundled tools are missing, creates an empty dir.
-    """
-    global TOOLS_SEEDED
-    if not TOOLS_DIR.exists():
-        if DEFAULT_TOOLS_DIR.is_dir() and DEFAULT_TOOLS_DIR.resolve() != TOOLS_DIR.resolve():
-            shutil.copytree(
-                DEFAULT_TOOLS_DIR,
-                TOOLS_DIR,
-                ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
-            )
-            TOOLS_SEEDED = True
-        else:
-            TOOLS_DIR.mkdir(parents=True, exist_ok=True)
+    """Make sure TOOLS_DIR exists. Nothing is seeded: the bundled catalog
+    (DEFAULT_TOOLS_DIR) is served directly as the read-only underlay of the
+    registry's overlay, and this dir only holds user/AI-created tools plus
+    copy-on-write overrides of edited native tools."""
+    TOOLS_DIR.mkdir(parents=True, exist_ok=True)
     return TOOLS_DIR
 
 
@@ -117,6 +103,45 @@ def ensure_sessions() -> Path:
     """Create the sessions directory (and its history subdir)."""
     (SESSIONS_DIR / "history").mkdir(parents=True, exist_ok=True)
     return SESSIONS_DIR
+
+
+# Per-agent deep memory (summary tree + archived conversation chunks). Written
+# by the memory compactor and read by the memory_* tools; strictly one
+# subdirectory per agent id. Defaults to ~/myagent/memory; override with the
+# MYAGENT_MEMORY env var.
+MEMORY_DIR = Path(
+    os.environ.get("MYAGENT_MEMORY") or (Path.home() / "myagent" / "memory")
+).expanduser()
+
+
+def ensure_memory() -> Path:
+    """Create the deep-memory directory if it doesn't exist and return it."""
+    MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+    return MEMORY_DIR
+
+
+# Autonomy runtime state (event queues + per-agent scheduler state), one
+# subdirectory per live agent. Defaults to ~/myagent/autonomy; override with
+# the MYAGENT_AUTONOMY env var.
+AUTONOMY_DIR = Path(
+    os.environ.get("MYAGENT_AUTONOMY") or (Path.home() / "myagent" / "autonomy")
+).expanduser()
+
+
+def ensure_autonomy() -> Path:
+    """Create the autonomy state directory if it doesn't exist and return it."""
+    AUTONOMY_DIR.mkdir(parents=True, exist_ok=True)
+    return AUTONOMY_DIR
+
+
+# A channel (connector) session is one perpetual file — unlike web chats it is
+# never rotated by "new chat", and since it records the same full format
+# (traces, attachments) it would grow without bound. Once the file exceeds
+# this size, the session is archived into the web history and restarted with
+# the same compact LLM conversation (the bot keeps its context).
+CHANNEL_ROTATE_BYTES = int(
+    os.environ.get("MYAGENT_CHANNEL_ROTATE_BYTES") or 2 * 1024 * 1024
+)
 
 
 # Optional API key protecting the whole /api surface. Empty (default) = no

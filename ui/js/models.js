@@ -172,18 +172,18 @@ const ModelsPage = {
     optionSpecs(provider) {
         const local = provider === 'ollama' || provider === 'llamacpp';
         const specs = [
-            { key: 'temperature',       min: 0,  max: 2, step: 0.05, ph: '0.7' },
-            { key: 'top_p',             min: 0,  max: 1, step: 0.05, ph: '0.9' },
-            { key: 'max_tokens',        min: 0,  step: 256, int: true, ph: local ? '2048' : i18n('models.optUnset') },
-            { key: 'request_timeout',   min: 5,  step: 30,  int: true, ph: '600' },
-            { key: 'frequency_penalty', min: -2, max: 2, step: 0.1, ph: '0' },
-            { key: 'presence_penalty',  min: -2, max: 2, step: 0.1, ph: '0' },
+            { key: 'temperature',       min: 0,  max: 2, ph: '0.7' },
+            { key: 'top_p',             min: 0,  max: 1, ph: '0.9' },
+            { key: 'max_tokens',        min: 0,  int: true, ph: local ? '2048' : i18n('models.optUnset') },
+            { key: 'request_timeout',   min: 5,  int: true, ph: '600' },
+            { key: 'frequency_penalty', min: -2, max: 2, ph: '0' },
+            { key: 'presence_penalty',  min: -2, max: 2, ph: '0' },
         ];
         if (local) specs.push(
-            { key: 'top_k',          min: 0,  step: 1,  int: true, ph: '40' },
-            { key: 'min_p',          min: 0,  max: 1, step: 0.01, ph: '0.05' },
-            { key: 'repeat_penalty', min: 0,  max: 2, step: 0.05, ph: '1.1' },
-            { key: 'repeat_last_n',  min: -1, step: 16, int: true, ph: '64' },
+            { key: 'top_k',          min: 0,  int: true, ph: '40' },
+            { key: 'min_p',          min: 0,  max: 1, ph: '0.05' },
+            { key: 'repeat_penalty', min: 0,  max: 2, ph: '1.1' },
+            { key: 'repeat_last_n',  min: -1, int: true, ph: '64' },
         );
         return specs;
     },
@@ -205,6 +205,11 @@ const ModelsPage = {
         return i18n('models.opt' + camel);
     },
 
+    // No step grid on these fields: in HTML5 `step` is a VALIDATION rule, not
+    // just the arrow increment. Any stored value off the grid (repeat_last_n 320
+    // against a step of 16, request_timeout 600 against 5+30k — both shipped
+    // defaults) makes the field :invalid, and the form then refuses to submit
+    // with nothing on screen to explain why. Integers step by 1, floats by "any".
     renderOptionFields(provider, options) {
         const cell = (s) => {
             const v = options[s.key];
@@ -213,7 +218,8 @@ const ModelsPage = {
                     <label class="form-label small mb-1" for="opt-${s.key}">${this.optionLabel(s.key)}</label>
                     <input type="number" class="form-control form-control-sm opt-field" id="opt-${s.key}"
                            data-key="${s.key}" ${s.int ? 'data-int="1"' : ''}
-                           min="${s.min}" ${s.max !== undefined ? `max="${s.max}"` : ''} step="${s.step}"
+                           min="${s.min}" ${s.max !== undefined ? `max="${s.max}"` : ''}
+                           step="${s.int ? '1' : 'any'}"
                            value="${v === undefined || v === null ? '' : App.esc(String(v))}"
                            placeholder="${App.esc(s.ph)}">
                 </div>`;
@@ -288,7 +294,7 @@ const ModelsPage = {
     },
 
     async renderForm(modelId) {
-        let model = { id: '', name: '', provider: 'ollama', model: '', base_url: 'http://localhost:11434', api_key: '', api_format: 'openai', supports_vision: true, supports_audio: false, context_window: null, options: {} };
+        let model = { id: '', name: '', provider: 'ollama', model: '', base_url: 'http://localhost:11434', api_key: '', api_format: 'openai', supports_vision: true, supports_audio: false, supports_tools: null, context_window: null, options: {} };
         let isEdit = false;
 
         if (modelId) {
@@ -369,6 +375,15 @@ const ModelsPage = {
                                 <label class="form-check-label" for="f-audio">${i18n('models.supportsAudio')}</label>
                             </div>
                             <div class="form-text">${i18n('models.capabilitiesHelp')}</div>
+                            <div class="mt-2" style="max-width:260px">
+                                <label class="form-label small mb-1" for="f-tools">${i18n('models.toolCalling')}</label>
+                                <select class="form-select form-select-sm" id="f-tools">
+                                    <option value="" ${model.supports_tools === null || model.supports_tools === undefined ? 'selected' : ''}>${i18n('models.toolsAuto')}</option>
+                                    <option value="native" ${model.supports_tools === true ? 'selected' : ''}>${i18n('models.toolsNative')}</option>
+                                    <option value="text" ${model.supports_tools === false ? 'selected' : ''}>${i18n('models.toolsText')}</option>
+                                </select>
+                                <div class="form-text">${i18n('models.toolCallingHelp')}</div>
+                            </div>
                         </div>
                         <div class="mb-3">
                             <label class="form-label" for="f-ctx">${i18n('models.contextWindow')}</label>
@@ -483,6 +498,8 @@ const ModelsPage = {
                 api_format: 'openai',
                 supports_vision: document.getElementById('f-vision').checked,
                 supports_audio: document.getElementById('f-audio').checked,
+                // Empty = auto: send the tools and let the endpoint answer.
+                supports_tools: { native: true, text: false }[document.getElementById('f-tools').value] ?? null,
                 // Empty = auto: the server tells us the real window (see model_probe).
                 context_window: ctxRaw === '' ? null : parseInt(ctxRaw, 10),
                 options: options,

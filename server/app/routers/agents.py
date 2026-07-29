@@ -1,5 +1,6 @@
 import json
 import re
+import shutil
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
@@ -32,11 +33,19 @@ def _load_json(path: Path) -> dict | None:
 def _agent_fingerprint(data: dict) -> dict:
     """Normalize an agent dict through the Agent model for comparison, so that
     omitted defaults and key ordering don't register as spurious differences.
-    Falls back to the raw dict if the data doesn't validate."""
+    Falls back to the raw dict if the data doesn't validate.
+
+    ``live`` is deliberately excluded: it is the runtime on/off switch (stored
+    in the agent file only so a started agent survives a restart), not part of
+    the definition. Starting or stopping an agent must not flag it as locally
+    modified — and it is `import_native_agent` that keeps the two consistent by
+    preserving the flag across a reset."""
     try:
-        return Agent(**data).model_dump()
+        out = Agent(**data).model_dump()
     except Exception:
-        return data
+        out = dict(data)
+    out.pop("live", None)
+    return out
 
 
 class AgentImportRequest(BaseModel):
@@ -115,7 +124,8 @@ async def import_native_agent(agent_id: str, req: AgentImportRequest, request: R
         raise HTTPException(404, f"Native agent not found: {agent_id}")
 
     store = _store(request)
-    if store.exists(agent_id) and not req.overwrite:
+    installed = store.get(agent_id)
+    if installed is not None and not req.overwrite:
         raise HTTPException(409, f"Agent already installed: {agent_id}")
 
     data["id"] = agent_id
@@ -123,6 +133,11 @@ async def import_native_agent(agent_id: str, req: AgentImportRequest, request: R
         agent = Agent(**data)
     except Exception as e:
         raise HTTPException(422, f"Native agent is malformed: {e}")
+    # A reset restores the DEFINITION. Whether the agent is currently running is
+    # operational state the user drives from its card, so carry it over instead
+    # of silently starting or stopping the agent (see _agent_fingerprint).
+    if installed is not None:
+        agent.live = bool(installed.get("live", False))
     store.save(agent_id, agent.model_dump())
     return agent.model_dump()
 
@@ -154,9 +169,56 @@ async def update_agent(agent_id: str, agent: Agent, request: Request):
     return agent.model_dump()
 
 
+class EventRequest(BaseModel):
+    """External event producer (webhooks, scripts, other services). Already
+    behind the global API-key middleware when MYAGENT_API_KEY is set."""
+    type: str = "message"          # message | schedule | reminder | webhook
+    payload: dict = {}
+    due_at: str = ""               # ISO timestamp; empty = due now
+    source: str = "api"
+    repeat_s: int = 0              # > 0 = recurring
+
+
+@router.post("/{agent_id}/events", status_code=201)
+async def queue_agent_event(agent_id: str, req: EventRequest, request: Request):
+    """Queue an event for an agent. A live agent is woken right away; a
+    non-live agent accumulates events until it is started."""
+    if _store(request).get(agent_id) is None:
+        raise HTTPException(404, f"Agent not found: {agent_id}")
+    try:
+        event = request.app.state.events.append(
+            agent_id, type=req.type, payload=req.payload,
+            due_at=req.due_at, source=req.source or "api",
+            repeat_s=req.repeat_s,
+        )
+    except RuntimeError as e:
+        raise HTTPException(429, str(e))
+    return {"id": event["id"], "due_at": event["due_at"]}
+
+
+@router.get("/{agent_id}/events")
+async def list_agent_events(agent_id: str, request: Request):
+    """Pending events plus the recent audit trail (reacted + reaction)."""
+    if _store(request).get(agent_id) is None:
+        raise HTTPException(404, f"Agent not found: {agent_id}")
+    events = request.app.state.events
+    return {"pending": events.pending(agent_id, now="9999"),
+            "archive": events.archive(agent_id)}
+
+
 @router.delete("/{agent_id}")
 async def delete_agent(agent_id: str, request: Request):
     store = _store(request)
     if not store.delete(agent_id):
         raise HTTPException(404, f"Agent not found: {agent_id}")
+    # Autonomy state (event queues, scheduler state) is operational data of
+    # the deleted agent: remove it. Deep memory is deliberately KEPT — an
+    # agent recreated with the same id finds its memory again.
+    autonomy = getattr(request.app.state, "autonomy", None)
+    if autonomy is not None:
+        await autonomy.stop(agent_id)
+        autonomy.drop_agent(agent_id)
+    agent_dir = config.AUTONOMY_DIR / agent_id
+    if agent_dir.is_dir():
+        shutil.rmtree(agent_dir, ignore_errors=True)
     return {"ok": True}

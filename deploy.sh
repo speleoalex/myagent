@@ -81,6 +81,10 @@ Environment=MYAGENT_PORT=8888
 # Require an API key on every /api request (Bearer header or ?api_key=).
 # Recommended if you expose the port beyond localhost:
 #Environment=MYAGENT_API_KEY=change-me
+# Trace every executor turn (messages sent to the LLM, raw replies, parsed tool
+# calls) to ~/myagent/logs/debug.log. Logs full chat content — enable it while
+# debugging an agent, not permanently:
+#Environment=MYAGENT_DEBUG=1
 
 [Install]
 WantedBy=multi-user.target

@@ -1,6 +1,6 @@
 {
   "name": "Manage Tools",
-  "description": "List, read, create, update, test or delete MyAgent tools. 'list' = all installed tools; 'get' = one tool's metadata and run script; 'save' = create or update (only the fields you pass change); 'test' = actually execute a tool with sample arguments; 'delete' = remove one.",
+  "description": "List, read, create, update, test, reset or delete MyAgent tools. 'list' = every tool (native tools ship with the app and are always present); 'get' = one tool's metadata and run script; 'save' = create or update — editing a native tool transparently works on a local copy, the original is kept; 'test' = actually execute a tool with sample arguments; 'reset' = discard the local copy of a native tool, restoring the shipped version; 'delete' = remove a user-created tool (native tools cannot be deleted).",
   "parameters": {
     "type": "object",
     "properties": {
@@ -11,6 +11,7 @@
           "get",
           "save",
           "test",
+          "reset",
           "delete"
         ],
         "description": "The operation to perform."
@@ -18,6 +19,10 @@
       "id": {
         "type": "string",
         "description": "Tool id = folder name, lowercase with underscores (e.g. 'word_count'). Required except for 'list'."
+      },
+      "category": {
+        "type": "string",
+        "description": "Optional group folder for a NEW tool (e.g. 'file_management'): it is created in <tools>/<category>/<id> and agents can be granted the whole group as '<category>/*'. Existing tools cannot be moved."
       },
       "name": {
         "type": "string",

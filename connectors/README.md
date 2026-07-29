@@ -23,7 +23,10 @@ Each **binding** links one bot ↔ one agent, configured from the admin UI:
   Ideal for a bot driven from a local PC.
 - **Per-chat conversations** — every Telegram chat maps to its own persistent
   session on myagent (`session_id = "<prefix>_<chat_id>"`), so context is kept
-  per user without polluting the web UI's chat history.
+  per user without polluting the web UI's chat history. Sessions use the same
+  format as web chats (tagged with `source: "telegram"`); on `/reset` the
+  closed conversation is archived into the web UI's history, marked with a
+  channel badge.
 - **Access control** per binding: `allowlist` (Telegram user ids),
   `password` (`/start <password>` unlocks), or `open`.
 - **Built-in commands**: `/start`, `/help`, `/reset` (clears the conversation).
@@ -32,6 +35,11 @@ Each **binding** links one bot ↔ one agent, configured from the admin UI:
   Multilingual (English / Italian), following the myagent UI i18n pattern
   (`ui/js/i18n.js` + `ui/js/i18n/{en,it}.js`); language switcher in the header,
   choice persisted in `localStorage`.
+- **Address book** — save people once (name + numeric id and/or @username,
+  `/api/contacts`, stored in `contacts/` next to bindings); the binding form's
+  authorized-users field shows them as one-click chips, so allowlists are
+  built by name instead of pasting ids. The text field stays authoritative —
+  chips only add/remove their contact's id in it.
 
 ## Requirements
 
@@ -63,7 +71,8 @@ MYAGENT_API_URL=http://192.168.1.10:8888 python server/main.py
 | `MYAGENT_API_TOKEN`             | *(empty)*               | Bearer token — set it to the myagent server's `MYAGENT_API_KEY` if that is configured |
 | `MYAGENT_CONNECTORS_HOST`       | `127.0.0.1`             | bind host                             |
 | `MYAGENT_CONNECTORS_PORT`       | `8899`                  | bind port                             |
-| `MYAGENT_CONNECTORS_DIR`        | `~/myagent/connectors`  | bindings + grants storage             |
+| `MYAGENT_CONNECTORS_DIR`        | `~/myagent/connectors`  | bindings, grants and contacts storage |
+| `MYAGENT_CONNECTORS_API_KEY`    | *(empty = open)*        | Bearer key for the `/send` endpoint   |
 | `MYAGENT_TELEGRAM_POLL_TIMEOUT` | `30`                    | long-poll seconds                     |
 | `MYAGENT_CHAT_TIMEOUT`          | `180`                   | max seconds per agent turn            |
 
@@ -92,6 +101,17 @@ This bridge relies on **channel-scoped sessions** added to myagent:
 
 Those live in the myagent repo (`server/app/storage/channel_sessions.py`,
 `server/app/routers/chat.py`). No other myagent change is required.
+
+## Outbound push (autonomous agents)
+
+`POST /api/bindings/{binding_id}/send` with `{"chat_id": ..., "text": ...}`
+sends an unsolicited message through a **running** binding (409 otherwise).
+It is what myagent's `notify_user` tool calls when a live agent wants to reach
+the user. The endpoint is best-effort (the connector logs and swallows
+transport errors; Telegram messages are chunked at 4096 chars) and is the only
+authenticated route: set `MYAGENT_CONNECTORS_API_KEY` here and the same value
+as "Connectors send key" in myagent's Settings. Empty key = open, fine on
+localhost.
 
 ## Adding another channel (Slack, Discord, …)
 

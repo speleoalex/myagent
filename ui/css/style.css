@@ -165,6 +165,208 @@ body {
     transform: translateY(-2px);
 }
 
+/* Agent descriptions are prompt-facing text and range from a line to a
+   paragraph: clamp them so one verbose agent doesn't stretch a whole row of
+   cards. The full text stays in the tooltip. */
+.card-desc {
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+/* A native agent missing from the workspace: shown in place so it can be
+   restored where it went missing. Only the body is dimmed — an Import button at
+   half opacity would read as disabled. */
+.card-ghost {
+    border-style: dashed;
+}
+
+.card-ghost .card-body {
+    opacity: 0.5;
+}
+
+/* ---- Agent form tabs ---------------------------------------------------- */
+
+/* Five tabs don't fit a phone, and a wrapped .nav-tabs stops reading as a tab
+   strip (two rows, only one of them joined to the panel). Scroll instead:
+   flex-nowrap + overflow-x is the whole trick, and the scrollbar is hidden
+   because the active tab is scrolled into view for you. */
+.agent-tabs {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: none;                       /* Firefox */
+    -webkit-overflow-scrolling: touch;
+    /* A scrolling container clips the tabs' own 1px bottom border against the
+       panel; carry the line on the container so it stays continuous. */
+    border-bottom: var(--bs-nav-tabs-border-width) solid var(--bs-nav-tabs-border-color);
+}
+
+.agent-tabs::-webkit-scrollbar {
+    display: none;
+}
+
+.agent-tabs .nav-link {
+    white-space: nowrap;
+}
+
+/* State indicators in a tab label: the pane is hidden, its state is not. */
+.tab-state:not(:empty) {
+    margin-left: 0.25rem;
+}
+
+.tab-dot {
+    display: inline-block;
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 50%;
+    vertical-align: middle;
+    background: var(--bs-success);
+}
+
+/* Amber = saving would widen this agent's grants (see AgentsPage.refreshState). */
+.tab-dot.tab-dot-warn {
+    background: var(--bs-warning);
+}
+
+/* The tab a failed submit points at (see validateAcrossTabs). */
+.agent-tabs .nav-link.tab-error,
+.agent-tabs .nav-link.tab-error.active {
+    color: var(--bs-danger);
+}
+
+@media (pointer: coarse) {
+    /* Real touch target on the strip; Bootstrap's default row is ~38px tall. */
+    .agent-tabs .nav-link {
+        padding-block: 0.6rem;
+    }
+}
+
+/* ---- Explained numeric fields (RangeField) ------------------------------
+   Slider + number input pair. Bootstrap already themes .form-range's track with
+   var(--bs-secondary-bg); only the thumb is a hardcoded #0d6efd, so it is the one
+   colour worth overriding. Everything else here is layout. */
+.range-field {
+    margin-bottom: 0.25rem;
+}
+
+.range-field .rf-head {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.range-field .rf-head .form-label {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.range-field .rf-value {
+    flex: 0 0 auto;
+    font-variant-numeric: tabular-nums;  /* badge width stops twitching as you drag */
+}
+
+.range-field .rf-controls {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+}
+
+.range-field .form-range {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.range-field .rf-num {
+    flex: 0 0 5.5rem;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+
+/* End-of-range labels, aligned to the track (not to the number box). */
+.range-field .rf-ends {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.72rem;
+    color: var(--bs-secondary-color);
+    padding-right: 6.1rem;
+}
+
+/* Reserve two lines: the sentence changes length on every move and the fields
+   below must not jump around while dragging. */
+.range-field .rf-desc {
+    min-height: 2.4em;
+}
+
+.range-field .rf-more > summary {
+    cursor: pointer;
+    user-select: none;
+}
+
+/* Switched off (response_temperature inheriting) vs merely irrelevant
+   (memory_threshold while memory is off): both dim, only the first is disabled. */
+.range-field.rf-off .rf-controls,
+.range-field.rf-off .rf-ends,
+.range-field.rf-idle .rf-controls,
+.range-field.rf-idle .rf-ends {
+    opacity: 0.5;
+}
+
+/* Thumb follows the theme's primary, and the track shows how far along the range
+   we are (--rf-pct is set inline by RangeField.refresh). */
+.range-field .form-range::-webkit-slider-thumb {
+    background-color: var(--bs-primary);
+}
+
+.range-field .form-range::-moz-range-thumb {
+    background-color: var(--bs-primary);
+}
+
+.range-field .form-range::-webkit-slider-runnable-track {
+    background-image: linear-gradient(to right,
+        var(--bs-primary) 0 var(--rf-pct, 0%), transparent var(--rf-pct, 0%));
+}
+
+.range-field .form-range::-moz-range-progress {
+    height: 0.5rem;
+    border-radius: 1rem;
+    background-color: var(--bs-primary);
+}
+
+@media (pointer: coarse) {
+    /* A 16px thumb is not a touch target. Keep it centred on the .5rem track:
+       margin-top = -(thumb - track) / 2. */
+    .range-field .form-range {
+        height: 2.25rem;
+    }
+
+    .range-field .form-range::-webkit-slider-thumb {
+        width: 1.5rem;
+        height: 1.5rem;
+        margin-top: -0.5rem;
+    }
+
+    .range-field .form-range::-moz-range-thumb {
+        width: 1.5rem;
+        height: 1.5rem;
+    }
+}
+
+@media (max-width: 576px) {
+    /* iOS Safari auto-zooms inputs under 16px (same reason as
+       .system-prompt-textarea above). */
+    .range-field .rf-num {
+        font-size: 1rem;
+        flex-basis: 4.75rem;
+    }
+
+    .range-field .rf-ends {
+        padding-right: 5.35rem;
+    }
+}
+
 .spinner-chat {
     display: none;
 }
@@ -182,6 +384,69 @@ body {
 }
 .msg-assistant .msg-time {
     text-align: left;
+}
+
+/* Per-message actions: copy / markdown source on answers, edit on prompts,
+   regenerate on the last answer. */
+.msg-actions {
+    display: flex;
+    gap: 0.15rem;
+    margin-top: 0.25rem;
+}
+.msg-user .msg-actions {
+    justify-content: flex-end;
+}
+.msg-act {
+    padding: 0.05rem 0.3rem;
+    line-height: 1.15;
+    font-size: 0.85rem;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    opacity: 0.55;
+}
+.msg-act:hover,
+.msg-act:focus-visible {
+    opacity: 1;
+    color: inherit;
+    background: var(--bs-tertiary-bg);
+}
+.msg-user .msg-act:hover,
+.msg-user .msg-act:focus-visible {
+    background: rgba(255, 255, 255, 0.25);
+}
+/* Desktop: keep the bubbles clean until pointed at. Touch screens have no
+   hover, so there the buttons stay visible (the query simply doesn't apply). */
+@media (hover: hover) and (pointer: fine) {
+    .msg-actions {
+        opacity: 0;
+        transition: opacity 0.12s ease-in-out;
+    }
+    .msg:hover .msg-actions,
+    .msg-actions:focus-within {
+        opacity: 1;
+    }
+}
+
+/* Raw markdown of an answer, shown in place of the rendered version */
+.msg-assistant .md-source {
+    white-space: pre-wrap;
+    font-size: 0.8rem;
+    margin: 0;
+}
+
+/* Inline prompt editor (a user bubble turned into a form) */
+.msg.editing {
+    max-width: 100%;
+    width: 100%;
+}
+.msg-edit {
+    font-size: 0.9rem;
+}
+.msg-edit-note {
+    font-size: 0.72rem;
+    opacity: 0.85;
+    margin-top: 0.25rem;
 }
 
 /* "Thinking" indicator (animated dots) shown while awaiting the first token */
@@ -428,4 +693,37 @@ body {
 }
 .agent-tree details > summary:hover {
     color: var(--bs-primary);
+}
+
+/* Tool description under the name: one line, so every row in the list has the
+   same height and the list stays scannable. The full text is in the title. */
+.tool-desc {
+    display: -webkit-box;
+    -webkit-line-clamp: 1;
+    line-clamp: 1;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+/* Collapsible section on the Tools page: the summary IS the card header, so it
+   keeps the default triangle out and draws its own (same idiom as .tool-call). */
+.tool-section > summary {
+    cursor: pointer;
+    user-select: none;
+    list-style: none;
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+}
+.tool-section > summary::-webkit-details-marker {
+    display: none;
+}
+.tool-section > summary::after {
+    content: "\25B8";  /* ▸ */
+    margin-left: auto;
+    font-size: 0.75rem;
+    opacity: 0.6;
+}
+.tool-section[open] > summary::after {
+    content: "\25BE";  /* ▾ */
 }

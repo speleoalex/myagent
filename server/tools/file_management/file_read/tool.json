@@ -6,7 +6,7 @@
     "properties": {
       "path": {
         "type": "string",
-        "description": "Absolute or relative file path to read"
+        "description": "Absolute or relative file path to read (relative = inside the agent workspace)"
       },
       "max_lines": {
         "type": "integer",
@@ -14,7 +14,9 @@
         "default": 200
       }
     },
-    "required": ["path"]
+    "required": [
+      "path"
+    ]
   },
   "timeout": 10,
   "max_output": 10000

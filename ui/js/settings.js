@@ -50,6 +50,16 @@ const SettingsPage = {
                             <label class="form-label">${i18n('settings.llamacppUrl')}</label>
                             <input type="text" class="form-control" id="f-llamacpp-url" value="${App.esc(settings.llamacpp_base_url || 'http://localhost:8080')}">
                         </div>
+                        <div class="mb-3">
+                            <label class="form-label">${i18n('settings.connectorsUrl')}</label>
+                            <input type="text" class="form-control" id="f-connectors-url" value="${App.esc(settings.connectors_base_url || 'http://localhost:8899')}">
+                            <small class="text-secondary">${i18n('settings.connectorsUrlHint')}</small>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">${i18n('settings.connectorsKey')}</label>
+                            <input type="password" class="form-control" id="f-connectors-key" value="${App.esc(settings.connectors_api_key || '')}" autocomplete="off">
+                            <small class="text-secondary">${i18n('settings.connectorsKeyHint')}</small>
+                        </div>
                         <button type="submit" class="btn btn-primary">${i18n('settings.save')}</button>
                     </form>
 
@@ -74,6 +84,8 @@ const SettingsPage = {
                 ollama_base_url: document.getElementById('f-ollama-url').value.trim(),
                 llamacpp_base_url: document.getElementById('f-llamacpp-url').value.trim(),
                 default_model_id: document.getElementById('f-default-model').value || null,
+                connectors_base_url: document.getElementById('f-connectors-url').value.trim(),
+                connectors_api_key: document.getElementById('f-connectors-key').value.trim(),
             };
             try {
                 await App.api('PUT', '/system/settings', data);

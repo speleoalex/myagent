@@ -1,0 +1,23 @@
+{
+  "name": "Append to File",
+  "description": "Append content to the end of a file, creating it and any parent directories. Use instead of file_write to add without overwriting. A relative path lands in the agent workspace (the default place for new files); use an absolute path only for a location the user named.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "path": {
+        "type": "string",
+        "description": "File path to append to. Relative = inside the workspace (default); absolute only when the user asked for a specific location"
+      },
+      "content": {
+        "type": "string",
+        "description": "Content to append"
+      }
+    },
+    "required": [
+      "path",
+      "content"
+    ]
+  },
+  "timeout": 10,
+  "max_output": 1000
+}

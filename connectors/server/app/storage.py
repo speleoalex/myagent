@@ -1,8 +1,8 @@
-"""Disk storage for bindings and password grants.
+"""Disk storage for bindings, contacts and password grants.
 
-One JSON file per binding (``bindings/<id>.json``), mirroring myagent's simple
-JsonStore pattern. Bot tokens are written with 0600 perms and never returned to
-the UI in clear (the router masks them).
+One JSON file per record (``bindings/<id>.json``, ``contacts/<id>.json``),
+mirroring myagent's simple JsonStore pattern. Bot tokens are written with 0600
+perms and never returned to the UI in clear (the router masks them).
 """
 from __future__ import annotations
 
@@ -11,13 +11,19 @@ import os
 from pathlib import Path
 
 
-class BindingStore:
-    def __init__(self, base_dir: Path):
+class JsonDirStore:
+    """One JSON file per record, keyed by the record's ``id`` field.
+
+    ``file_mode`` (when set) restricts perms before the file becomes visible —
+    used for records holding secrets.
+    """
+    def __init__(self, base_dir: Path, file_mode: int | None = None):
         self.base = Path(base_dir)
         self.base.mkdir(parents=True, exist_ok=True)
+        self.file_mode = file_mode
 
-    def _path(self, binding_id: str) -> Path:
-        return self.base / f"{binding_id}.json"
+    def _path(self, record_id: str) -> Path:
+        return self.base / f"{record_id}.json"
 
     def list_all(self) -> list[dict]:
         out = []
@@ -28,8 +34,8 @@ class BindingStore:
                 continue
         return out
 
-    def get(self, binding_id: str) -> dict | None:
-        p = self._path(binding_id)
+    def get(self, record_id: str) -> dict | None:
+        p = self._path(record_id)
         if not p.exists():
             return None
         try:
@@ -41,17 +47,28 @@ class BindingStore:
         p = self._path(data["id"])
         tmp = p.with_suffix(".tmp")
         tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2))
-        # Tokens are secrets: restrict perms before the file becomes visible.
-        os.chmod(tmp, 0o600)
+        if self.file_mode is not None:
+            os.chmod(tmp, self.file_mode)
         tmp.replace(p)
         return data
 
-    def delete(self, binding_id: str) -> bool:
-        p = self._path(binding_id)
+    def delete(self, record_id: str) -> bool:
+        p = self._path(record_id)
         if p.exists():
             p.unlink()
             return True
         return False
+
+
+class BindingStore(JsonDirStore):
+    def __init__(self, base_dir: Path):
+        # Tokens are secrets: restrict perms before the file becomes visible.
+        super().__init__(base_dir, file_mode=0o600)
+
+
+class ContactStore(JsonDirStore):
+    """Address book: people the admin knows, with their messaging ids.
+    No secrets inside — default perms are fine."""
 
 
 class GrantStore:

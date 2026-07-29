@@ -18,6 +18,10 @@ MYAGENT_API_TOKEN = os.environ.get("MYAGENT_API_TOKEN", "")
 # --- this server ------------------------------------------------------------
 HOST = os.environ.get("MYAGENT_CONNECTORS_HOST", "127.0.0.1")
 PORT = int(os.environ.get("MYAGENT_CONNECTORS_PORT", "8899"))
+# Bearer key required by POST /api/bindings/{id}/send (unsolicited outbound
+# messages, used by myagent's notify_user tool). Empty = open — same
+# convention as myagent's MYAGENT_API_KEY; fine on localhost.
+SEND_API_KEY = os.environ.get("MYAGENT_CONNECTORS_API_KEY", "")
 
 # --- runtime state (bindings + password grants) -----------------------------
 # Kept under the user's home (not inside the source tree) so it survives
@@ -28,6 +32,7 @@ STATE_DIR = Path(
 )
 BINDINGS_DIR = STATE_DIR / "bindings"
 GRANTS_DIR = STATE_DIR / "grants"  # password-mode authorized user ids per binding
+CONTACTS_DIR = STATE_DIR / "contacts"  # address book (name + messaging ids)
 
 # Where the admin UI static files live (shipped with the server).
 PROJECT_ROOT = Path(__file__).resolve().parent.parent  # .../connectors/server
@@ -43,3 +48,4 @@ CHAT_TIMEOUT = float(os.environ.get("MYAGENT_CHAT_TIMEOUT", "180"))
 def ensure_dirs() -> None:
     BINDINGS_DIR.mkdir(parents=True, exist_ok=True)
     GRANTS_DIR.mkdir(parents=True, exist_ok=True)
+    CONTACTS_DIR.mkdir(parents=True, exist_ok=True)

@@ -30,6 +30,16 @@ had no internet access.*
   (see [Local devices](#local-devices--home-automation))
 - **Atomic agents** — each agent is just `model + system prompt + tools`,
   editable from the UI and stored as a JSON file
+- **Long-term memory** *(opt-in, per agent)* — old conversation turns are
+  automatically archived into a per-agent memory tree and replaced by compact
+  summaries, so an agent remembers across chats without blowing up a small
+  model's context; the `memory_search` / `memory_read` / `memory_note` tools
+  let it explore and annotate that memory
+- **Autonomous agents** *(opt-in, per agent)* — start any agent with its
+  **Live** switch and it wakes up on a heartbeat and on scheduled events,
+  takes initiatives, schedules its own future tasks (`schedule_task`) and
+  pushes messages to you on Telegram (`notify_user`); a started agent restarts
+  by itself after a reboot, and stopping it is one click
 - **Agent delegation** — agents can call other agents (`call_agent`), with
   per-agent permission control
 - **Folder-based tools** — a tool is a folder with a `tool.json` and an
@@ -42,7 +52,8 @@ had no internet access.*
 - **Works with tool-less models** — tool calls are also parsed from plain
   model text, so small local models without native function calling still work
 - **Live chat** — token streaming, background generation you can leave and
-  re-attach to, stop button, session history
+  re-attach to, stop button, session history; regenerate an answer, edit a
+  prompt and send it again, copy any answer as Markdown
 - **Telegram connector** — bridge any agent to a Telegram bot
   (see [connectors/](connectors/README.md))
 - **Optional online tools** — web search and page reading are there when you
@@ -207,11 +218,13 @@ MyAgent keeps all runtime state under `~/myagent/`, decoupled from the code:
 ```text
 ~/myagent/
 ├── config/      # agents, models (API keys, 0600), MCP servers, settings — small & precious: back this up
-├── connectors/  # Telegram bindings (bot tokens, 0600) and grants
-├── tools/       # tool folders (hot-reloaded; user/AI-created tools live here)
+├── connectors/  # Telegram bindings (bot tokens, 0600), grants, address book
+├── tools/       # your tools: the ones you (or the AI) create, plus your edits to the built-in ones
 ├── library/     # your offline knowledge: Wikipedia ZIM archives + notes/documents
 ├── workspace/   # working directory for agents' file operations
 ├── sessions/    # chat state: current, history, connector channels
+├── memory/      # per-agent long-term memory (only for agents that enable it)
+├── autonomy/    # live agents' state and event queues (only for started agents)
 └── logs/        # debug.log (only with MYAGENT_DEBUG=1)
 ```
 
@@ -231,6 +244,8 @@ Everything is configured via environment variables (none are required):
 | `MYAGENT_TOOLS`      | `~/myagent/tools`      | tool folders                               |
 | `MYAGENT_WORKSPACE`  | `~/myagent/workspace`  | agents' file-operation root                |
 | `MYAGENT_SESSIONS`   | `~/myagent/sessions`   | chat sessions                              |
+| `MYAGENT_MEMORY`     | `~/myagent/memory`     | per-agent long-term memory                 |
+| `MYAGENT_AUTONOMY`   | `~/myagent/autonomy`   | live agents' state and event queues        |
 | `MYAGENT_LIBRARY`    | `~/myagent/library`    | `local_search` knowledge folder            |
 | `MYAGENT_DEBUG`      | *(off)*                | `1` = verbose executor trace (full chat content) |
 | `MYAGENT_DEBUG_FILE` | `~/myagent/logs/debug.log` | trace file location                    |
@@ -259,9 +274,10 @@ First run seeds seven agents:
 …plus three model configs: `llama-cpp` (whatever your llama.cpp server is
 serving on `:8080`), `gemma4` and `qwen3` (Ollama). The Ollama entries are
 models with native tool-calling support, which is what makes agents usable
-with small local models. Everything is editable and individually
-re-importable from the UI (**Agents → Native agents**, **Tools → Native
-tools**).
+with small local models. Everything is editable, and nothing is lost by
+editing: an agent or tool you changed shows a *modified* badge with a **reset
+to original** button next to it, and an agent you deleted stays in the list as
+a dimmed card you can re-import in one click.
 
 ## Optional features
 
@@ -274,6 +290,31 @@ dependencies are present (`./setup.sh` reports what it finds):
 | Document extraction (PDF, images, audio) | `document_extract`           | `poppler-utils`, `tesseract`, `pandoc`, `ffmpeg` (each optional) |
 | Offline Wikipedia archives       | `local_search`                       | `pip install libzim` (`.zim` files only — Markdown/text notes need nothing) |
 | Voice notes on Telegram          | connectors server                    | `ffmpeg` (uses faster-whisper)                    |
+
+## Autonomous agents
+
+Any agent can run unattended: open it (or use the play button on its card)
+and switch **Live** on. From then on it wakes up every 30 minutes (tunable,
+or event-only) and whenever an event is due, reads its standing instructions,
+and decides what to do — including nothing: a wake that ends with `NOOP`
+leaves no trace in the session. Both memory and autonomy are **off by
+default**; a started agent restarts by itself after a reboot, and the stop
+button (or `live: false`) halts it within seconds.
+
+Useful pieces to give a live agent:
+
+- `schedule_task` — it schedules its own reminders and recurring jobs
+  ("check the backup log every morning")
+- `notify_user` — it messages you on Telegram through the
+  [connectors server](connectors/README.md) (`POST /api/bindings/{id}/send`,
+  protected by `MYAGENT_CONNECTORS_API_KEY`; set the URL/key in Settings and
+  the default chat in the agent's autonomy settings)
+- memory (`memory_enabled`) — so it remembers what it did across wakes
+- `POST /api/agents/{id}/events` — feed it events from scripts and webhooks
+
+Its activity shows up in the chat history as a session marked with a robot
+icon; `GET /api/autonomy/status` (or the badge on the agent card) shows the
+scheduler state, and repeated errors auto-pause the agent instead of looping.
 
 ## Run as a service
 

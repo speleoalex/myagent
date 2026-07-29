@@ -24,6 +24,10 @@ server/config/mcp/
 .playwright-mcp/
 
 # Local-only files (never shipped)
+docs_local/TODO-internal.md
+docs_local/
+
 .claude/
 CLAUDE.md
-TODO-internal.md
+
+

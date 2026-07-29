@@ -10,17 +10,19 @@ This store keeps those conversations in their own namespace
 (``sessions/channels/<id>.json``) so they never mix with the web UI's
 ``current.json`` / history flow (``list_history()`` only globs ``history/``).
 
-Unlike the web sessions, channel sessions are kept deliberately light: we store
-the compact ``conversation`` used to continue the chat with the LLM plus a
-plain user/assistant text log — NOT the full recursive tool trace, which grows
-large and is only useful to the web UI's inspector.
+Channel sessions use the SAME on-disk format as web sessions (the shared
+``new_session`` factory in :mod:`app.storage.sessions`), plus two provenance
+fields: ``channel`` (the stable external key) and ``source`` (the connector
+type, e.g. ``telegram``). When a channel chat is reset it is archived into the
+regular web history (``SessionStore.archive_session``), where those fields let
+the UI show where the chat came from.
 """
 from __future__ import annotations
 
 import asyncio
-import json
-from datetime import datetime
 from pathlib import Path
+
+from app.storage.sessions import new_session, now_iso, read_json, write_json
 
 
 class NamedSessionStore:
@@ -33,26 +35,8 @@ class NamedSessionStore:
         # external chat (a user hammering the bot) without blocking other chats.
         self._locks: dict[str, asyncio.Lock] = {}
 
-    # ------------------------------------------------------------------ utils
-    @staticmethod
-    def _now() -> str:
-        return datetime.now().isoformat(timespec="seconds")
-
     def _path(self, session_id: str) -> Path:
         return self.base / f"{session_id}.json"
-
-    @staticmethod
-    def _read(path: Path) -> dict | None:
-        try:
-            return json.loads(path.read_text())
-        except (json.JSONDecodeError, OSError):
-            return None
-
-    @staticmethod
-    def _write(path: Path, session: dict) -> None:
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(session, ensure_ascii=False, indent=2))
-        tmp.replace(path)  # atomic
 
     def lock(self, session_id: str) -> asyncio.Lock:
         lk = self._locks.get(session_id)
@@ -64,22 +48,36 @@ class NamedSessionStore:
     # --------------------------------------------------------------- sessions
     def get(self, session_id: str, agent_id: str = "") -> dict:
         """Load a channel session, creating an empty one if it doesn't exist."""
-        s = self._read(self._path(session_id))
+        s = read_json(self._path(session_id))
         if s is not None:
             return s
-        return {
-            "id": session_id,
-            "agent_id": agent_id,
-            "created_at": self._now(),
-            "updated_at": self._now(),
-            "messages": [],      # light user/assistant text log
-            "conversation": [],  # compact history for the LLM
-        }
+        return new_session(session_id, agent_id, channel=session_id, source="")
 
     def save(self, session_id: str, session: dict) -> dict:
-        session["updated_at"] = self._now()
-        self._write(self._path(session_id), session)
+        session["updated_at"] = now_iso()
+        write_json(self._path(session_id), session)
         return session
+
+    def list_summaries(self, prefix: str = "") -> list[dict]:
+        """Summaries of (a subset of) channel sessions, same shape as
+        SessionStore.list_history() — used to surface the autonomous sessions
+        (``autonomous_*``) in the web UI's session list."""
+        out = []
+        for f in self.base.glob(f"{prefix}*.json"):
+            s = read_json(f)
+            if s is None or not s.get("messages"):
+                continue
+            out.append({
+                "id": s.get("id", f.stem),
+                "title": s.get("title") or "(untitled)",
+                "agent_id": s.get("agent_id", ""),
+                "created_at": s.get("created_at", ""),
+                "updated_at": s.get("updated_at", ""),
+                "message_count": len(s.get("messages", [])),
+                "channel": s.get("channel", ""),
+                "source": s.get("source", ""),
+            })
+        return out
 
     def delete(self, session_id: str) -> bool:
         p = self._path(session_id)

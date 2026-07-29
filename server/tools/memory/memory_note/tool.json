@@ -1,0 +1,24 @@
+{
+  "name": "Memory Note",
+  "description": "Save an important fact to your long-term memory so you can find it again in future conversations (with memory_search). Use it for stable facts, preferences and decisions - not for chit-chat. Only works for agents with memory enabled.",
+  "internal": true,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "content": {
+        "type": "string",
+        "description": "The fact to remember, written so it is understandable on its own"
+      },
+      "keywords": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Optional search keywords, e.g. ['backup', 'server']"
+      }
+    },
+    "required": [
+      "content"
+    ]
+  }
+}

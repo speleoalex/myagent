@@ -1,0 +1,25 @@
+{
+  "name": "Notify User",
+  "description": "Send a push message to the user on their messaging channel (e.g. Telegram) via the connectors server. Use it when you have something worth telling the user proactively - your normal reply text is NOT delivered anywhere when you run autonomously.",
+  "internal": true,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "text": {
+        "type": "string",
+        "description": "The message to send to the user"
+      },
+      "binding_id": {
+        "type": "string",
+        "description": "Connector binding to send through. LEAVE THIS ARGUMENT OUT to use the agent's configured target — do not pass the word \"default\" or any placeholder."
+      },
+      "chat_id": {
+        "type": "string",
+        "description": "Target chat id (a number for Telegram). Several recipients: comma-separated. LEAVE THIS ARGUMENT OUT to use the agent's configured target — do not pass the word \"default\" or any placeholder."
+      }
+    },
+    "required": [
+      "text"
+    ]
+  }
+}

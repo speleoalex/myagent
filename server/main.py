@@ -1,4 +1,5 @@
 import asyncio
+import functools
 import hmac
 import logging
 import os
@@ -22,19 +23,37 @@ from app.config import (
     DEFAULT_TOOLS_DIR,
     WORKSPACE_DIR,
     SESSIONS_DIR,
+    MEMORY_DIR,
+    AUTONOMY_DIR,
     ensure_tools_dir,
     ensure_workspace,
     ensure_sessions,
+    ensure_memory,
+    ensure_autonomy,
 )
+from app.engine.autonomy import AutonomyService
 from app.engine.executor import Stores
 from app.engine.live import LiveRunManager
 from app.mcp.manager import McpManager
 from app.storage.store import JsonStore
 from app.storage.sessions import SessionStore
 from app.storage.channel_sessions import NamedSessionStore
+from app.storage.memory import MemoryStore
+from app.storage.events import EventStore
 from app.tools.registry import ToolRegistry
-from app.tools.internal import call_agent_handler
-from app.routers import agents, tools, llm_models, chat, mcp, system, sessions
+from app.tools.internal import (
+    autonomy_control_handler,
+    call_agent_handler,
+    notify_user_handler,
+    schedule_task_handler,
+)
+from app.tools.memory_tools import (
+    memory_search_handler,
+    memory_read_handler,
+    memory_note_handler,
+)
+from app.routers import (agents, tools, llm_models, chat, mcp, system, sessions,
+                         autonomy, connectors)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -49,12 +68,18 @@ MCP_SHUTDOWN_TIMEOUT = float(os.environ.get("MYAGENT_MCP_SHUTDOWN_TIMEOUT", "10"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Shutdown hook: stop MCP servers (stdio ones are child processes).
-
-    Everything else is still wired at import time below; app.state is read here
-    at call time, so startup ordering is unaffected.
+    """Startup: launch the autonomy scheduler (its loop must live inside the
+    running event loop). Shutdown: stop in-flight wakes, then the MCP servers
+    (stdio ones are child processes). Everything else is still wired at import
+    time below; app.state is read here at call time, so startup ordering is
+    unaffected.
     """
+    app.state.autonomy.start()
     yield
+    try:
+        await app.state.autonomy.aclose()
+    except Exception as e:
+        log.warning("Autonomy shutdown did not complete cleanly: %s", e)
     manager = getattr(app.state, "mcp", None)
     if manager is not None:
         try:
@@ -86,25 +111,33 @@ if CONFIG_SEEDED:
     log.info("Initialized config directory %s from defaults (%s)", CONFIG_DIR, DEFAULT_CONFIG_DIR)
 else:
     log.info("Config directory: %s", CONFIG_DIR)
+# Per-agent deep memory (summary tree + archived chunks). Opt-in per agent
+# via Agent.memory_enabled — nothing is written for agents that don't enable it.
+ensure_memory()
+log.info("Deep memory directory: %s", MEMORY_DIR)
+memory_store = MemoryStore(MEMORY_DIR)
+
 stores = Stores(
     agents=JsonStore(CONFIG_DIR / "agents"),
     models=JsonStore(CONFIG_DIR / "models"),
+    memory=memory_store,
 )
 
 # Working directory for agent file operations (created under the user's home)
 ensure_workspace()
 log.info("Agent working directory: %s", WORKSPACE_DIR)
 
-# Initialize tool registry (folder-based). Tools are runtime data: they live
-# under the user's home (seeded from the bundled tools/ on first run) so that
-# user/AI-created tools survive redeploys.
+# Initialize tool registry: the bundled catalog (read-only, always present)
+# overlaid by the user dir, which holds custom tools and copy-on-write
+# overrides of edited native tools — those survive redeploys.
 ensure_tools_dir()
-if config.TOOLS_SEEDED:
-    log.info("Initialized tools directory %s from defaults (%s)", TOOLS_DIR, DEFAULT_TOOLS_DIR)
-else:
-    log.info("Tools directory: %s", TOOLS_DIR)
-tool_registry = ToolRegistry(TOOLS_DIR, workdir=WORKSPACE_DIR, app_dir=APP_DIR)
+log.info("Tools: user dir %s over bundled catalog %s", TOOLS_DIR, DEFAULT_TOOLS_DIR)
+tool_registry = ToolRegistry(TOOLS_DIR, workdir=WORKSPACE_DIR, app_dir=APP_DIR,
+                             bundled_dir=DEFAULT_TOOLS_DIR)
 tool_registry.register_internal("call_agent", call_agent_handler)
+tool_registry.register_internal("memory_search", memory_search_handler)
+tool_registry.register_internal("memory_read", memory_read_handler)
+tool_registry.register_internal("memory_note", memory_note_handler)
 
 # External MCP servers: their tools join the registry as a second source. No
 # connection is opened here — servers are started lazily, only for the agents
@@ -129,6 +162,34 @@ named_sessions = NamedSessionStore(SESSIONS_DIR)
 # Manages background (client-decoupled) chat generations for resume/stop
 live_runs = LiveRunManager()
 
+# Autonomy: persistent per-agent event queues + the scheduler that wakes live
+# agents (heartbeat + events). Constructed here, started in the lifespan.
+ensure_autonomy()
+event_store = EventStore(AUTONOMY_DIR)
+autonomy_service = AutonomyService(
+    stores, tool_registry, named_sessions, session_store,
+    live_runs, event_store, AUTONOMY_DIR,
+)
+# notify_user is registered here, not with the others above: besides sending, it
+# appends the message to the target chat's OWN conversation, so it needs the named
+# session store (which only exists further down). Without that append the user sees
+# the notification in Telegram but the agent does not — ask it to repeat and it
+# repeats the turn BEFORE the notification.
+tool_registry.register_internal(
+    "notify_user", functools.partial(notify_user_handler, _named=named_sessions)
+)
+# schedule_task needs the event store: bound here (underscore name so a model
+# hallucinating an "_events" argument can't collide silently — it just errors).
+tool_registry.register_internal(
+    "schedule_task", functools.partial(schedule_task_handler, _events=event_store)
+)
+# autonomy_control lets an agent switch ITS OWN live mode on/off from a chat
+# ("start yourself" / "stop yourself" / "are you active?").
+tool_registry.register_internal(
+    "autonomy_control",
+    functools.partial(autonomy_control_handler, _autonomy=autonomy_service),
+)
+
 # Store in app state
 app.state.stores = stores
 app.state.tool_registry = tool_registry
@@ -137,6 +198,9 @@ app.state.mcp_store = mcp_store
 app.state.sessions = session_store
 app.state.named_sessions = named_sessions
 app.state.live = live_runs
+app.state.memory = memory_store
+app.state.events = event_store
+app.state.autonomy = autonomy_service
 
 # Include API routers
 app.include_router(agents.router, prefix="/api/agents", tags=["agents"])
@@ -146,6 +210,8 @@ app.include_router(chat.router, prefix="/api/chat", tags=["chat"])
 app.include_router(mcp.router, prefix="/api/mcp", tags=["mcp"])
 app.include_router(sessions.router, prefix="/api/sessions", tags=["sessions"])
 app.include_router(system.router, prefix="/api/system", tags=["system"])
+app.include_router(autonomy.router, prefix="/api/autonomy", tags=["autonomy"])
+app.include_router(connectors.router, prefix="/api/connectors", tags=["connectors"])
 
 # Serve the frontend (static UI lives in <root>/ui, separate from the server).
 STATIC_DIR = PROJECT_ROOT / "ui"

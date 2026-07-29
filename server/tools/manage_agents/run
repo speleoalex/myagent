@@ -32,6 +32,10 @@ _AGENT_DEFAULTS = {
     "temperature": None,
     "response_temperature": None,
     "enabled": True,
+    "memory_enabled": False,
+    "memory_threshold": 4000,
+    "live": False,
+    "autonomous": None,
 }
 
 
@@ -72,23 +76,24 @@ def fail(msg: str) -> None:
 
 
 def do_list() -> None:
+    # Plain text, one line per agent: the reader is a model, and a pretty
+    # JSON dump costs tokens without adding information.
     d = agents_dir()
-    agents = []
+    lines = []
     if d.is_dir():
         for f in sorted(d.glob("*.json")):
             try:
                 a = json.loads(f.read_text())
             except (json.JSONDecodeError, OSError):
                 continue
-            agents.append({
-                "id": a.get("id", f.stem),
-                "name": a.get("name", ""),
-                "description": a.get("description", ""),
-                "model_id": a.get("model_id", ""),
-                "tools": a.get("tools", []),
-                "enabled": a.get("enabled", True),
-            })
-    print(json.dumps({"count": len(agents), "agents": agents}, ensure_ascii=False, indent=2))
+            tools = ", ".join(a.get("tools") or []) or "none"
+            flags = "" if a.get("enabled", True) else " (DISABLED)"
+            desc = " ".join((a.get("description") or "").split())
+            lines.append(f"- {a.get('id', f.stem)} — {a.get('name', '')}"
+                         f" [model: {a.get('model_id', '')}] tools: {tools}{flags}"
+                         + (f"\n  {desc}" if desc else ""))
+    print(f"OK: {len(lines)} agent(s)")
+    print("\n".join(lines))
 
 
 def read_agent(path: Path) -> dict | None:
@@ -152,9 +157,14 @@ def do_save(args: dict) -> None:
         agent["name"] = name
     elif not agent.get("name"):
         agent["name"] = agent_id
-    for key in ("system_prompt", "description", "model_id", "enabled"):
+    for key in ("system_prompt", "description", "model_id", "enabled", "memory_enabled", "live"):
         if key in args and args[key] is not None:
             agent[key] = args[key]
+    if "autonomous" in args:
+        v = args["autonomous"]
+        if v is not None and not isinstance(v, dict):
+            fail("'autonomous' must be an object (or null for defaults).")
+        agent["autonomous"] = v
     if "tools" in args and args["tools"] is not None:
         agent["tools"] = list(args["tools"])
     # Tuning fields. temperature/response_temperature accept a number or null
@@ -165,7 +175,7 @@ def do_save(args: dict) -> None:
             if v is not None and (isinstance(v, bool) or not isinstance(v, (int, float))):
                 fail(f"'{key}' must be a number or null.")
             agent[key] = v
-    for key in ("max_iterations", "max_tool_calls"):
+    for key in ("max_iterations", "max_tool_calls", "memory_threshold"):
         if key in args and args[key] is not None:
             v = args[key]
             if isinstance(v, bool) or not isinstance(v, int) or v < 1:
@@ -180,7 +190,12 @@ def do_save(args: dict) -> None:
 
     verb = "Updated" if existed else "Created"
     print(f"OK: {verb} agent '{agent['name']}' (id: {agent_id})")
-    print(json.dumps(agent, ensure_ascii=False, indent=2))
+    # Essentials only — echoing the whole config (system_prompt included)
+    # back at the model just burns tokens.
+    print(f"model: {agent.get('model_id')}; tools: "
+          f"{', '.join(agent.get('tools') or []) or 'none'}; "
+          f"enabled: {agent.get('enabled', True)}; "
+          f"prompt: {len(agent.get('system_prompt') or '')} chars")
 
 
 def main() -> None:

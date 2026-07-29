@@ -21,10 +21,14 @@ class MyAgentClient:
 
     async def chat(self, agent_id: str, message: str, session_id: str,
                    attachments: list[dict] | None = None,
-                   timeout: float | None = None) -> str:
+                   timeout: float | None = None,
+                   source: str | None = None) -> str:
         """Run one agent turn against a channel-scoped session and return the
         assistant reply text. ``attachments`` is a list of Attachment dicts
         ({name, kind: 'image'|'text', data, mime?}) forwarded to the agent.
+        ``source`` labels the session with the connector type (e.g. "telegram")
+        so myagent's history can show where the chat came from; older myagent
+        servers simply ignore the extra field.
         Raises httpx.HTTPStatusError on API errors."""
         url = f"{self.base_url}/api/chat"
         payload = {
@@ -32,6 +36,8 @@ class MyAgentClient:
             "message": message,
             "session_id": session_id,
         }
+        if source:
+            payload["source"] = source
         if attachments:
             payload["attachments"] = attachments
         async with httpx.AsyncClient(timeout=timeout or config.CHAT_TIMEOUT) as client:

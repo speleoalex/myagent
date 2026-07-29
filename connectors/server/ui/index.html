@@ -90,6 +90,12 @@
     .toast.show { display: block; }
     .toast.ok { border-color: var(--ok); } .toast.err { border-color: var(--err); }
     .hidden { display: none !important; }
+    .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+    .chip { font-size: 12px; padding: 4px 10px; border-radius: 999px;
+      border: 1px solid var(--border); background: var(--panel2); cursor: pointer;
+      user-select: none; }
+    .chip:hover { border-color: var(--accent); }
+    .chip.on { background: var(--accent); border-color: var(--accent); color: #fff; }
   </style>
 </head>
 <body>
@@ -111,6 +117,13 @@
       <button class="primary" id="btn-new" data-i18n="list.new">+ New bot</button>
     </div>
     <div class="list" id="list"></div>
+
+    <div class="toolbar">
+      <h2 data-i18n="contacts.heading">Address book</h2>
+      <div class="spacer"></div>
+      <button class="primary" id="btn-new-contact" data-i18n="contacts.new">+ New contact</button>
+    </div>
+    <div class="list" id="contacts"></div>
   </main>
 
   <div class="overlay" id="overlay">
@@ -163,6 +176,7 @@
           <label data-i18n="field.allowed">Authorized user ids (comma-separated)</label>
           <input id="f-allowed" data-i18n-ph="field.allowed.ph">
           <div class="field-note" data-i18n="note.allowed">Ask a user to message the bot and read their id in the logs.</div>
+          <div class="chips" id="allowed-contacts"></div>
         </div>
         <div id="wrap-password" class="hidden">
           <label data-i18n="field.password">Activation password</label>
@@ -188,6 +202,45 @@
         <div class="spacer" style="flex:1"></div>
         <button id="btn-cancel" data-i18n="btn.cancel">Cancel</button>
         <button class="primary" id="btn-save" data-i18n="btn.save">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="overlay" id="overlay-contact">
+    <div class="modal">
+      <div class="head"><h3 id="contact-modal-title" data-i18n="contacts.modal.newTitle">New contact</h3></div>
+      <div class="body">
+        <div class="row">
+          <div>
+            <label data-i18n="contacts.field.name">Name</label>
+            <input id="c-name" data-i18n-ph="contacts.field.name.ph">
+          </div>
+          <div>
+            <label data-i18n="contacts.field.id">ID (unique, auto from name if empty)</label>
+            <input id="c-id" data-i18n-ph="contacts.field.id.ph">
+          </div>
+        </div>
+        <div class="row">
+          <div>
+            <label data-i18n="contacts.field.userId">User id (numeric)</label>
+            <input id="c-userid" inputmode="numeric" data-i18n-ph="contacts.field.userId.ph">
+          </div>
+          <div>
+            <label data-i18n="contacts.field.username">@username (opt.)</label>
+            <input id="c-username" data-i18n-ph="contacts.field.username.ph">
+          </div>
+        </div>
+        <div>
+          <label data-i18n="contacts.field.notes">Notes (opt.)</label>
+          <textarea id="c-notes"></textarea>
+        </div>
+        <div class="field-note" data-i18n="contacts.note">The numeric id (from @userinfobot) is permanent and more secure; a @username can change.</div>
+      </div>
+      <div class="foot">
+        <button class="danger" id="btn-contact-delete" data-i18n="btn.delete">Delete</button>
+        <div class="spacer" style="flex:1"></div>
+        <button id="btn-contact-cancel" data-i18n="btn.cancel">Cancel</button>
+        <button class="primary" id="btn-contact-save" data-i18n="btn.save">Save</button>
       </div>
     </div>
   </div>

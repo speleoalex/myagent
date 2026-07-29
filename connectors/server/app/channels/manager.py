@@ -92,6 +92,12 @@ class ConnectorManager:
             except (asyncio.CancelledError, Exception):
                 pass
 
+    def get_connector(self, binding_id: str) -> BaseConnector | None:
+        """The running connector for a binding (None if it isn't running) —
+        used by the /send endpoint for unsolicited outbound messages."""
+        runner = self.runners.get(binding_id)
+        return runner.connector if runner else None
+
     # ----------------------------------------------------------------- status
     def status(self, binding_id: str) -> dict:
         runner = self.runners.get(binding_id)

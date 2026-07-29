@@ -65,3 +65,25 @@ class Binding(BaseModel):
 
     def effective_prefix(self) -> str:
         return self.session_prefix or self.id
+
+
+class Contact(BaseModel):
+    """Address-book entry: a person, with the messaging identifiers needed to
+    authorize them on a binding (the authorized-users field picks from here)
+    or to notify them. No secrets inside.
+    """
+    id: str
+    name: str = ""
+    user_id: int | None = None      # numeric messaging user id (permanent)
+    username: str = ""              # stored normalized: no leading '@', lowercased
+    notes: str = ""
+
+    @field_validator("id")
+    @classmethod
+    def validate_id(cls, v: str) -> str:
+        return _check_id(v)
+
+    @field_validator("username")
+    @classmethod
+    def normalize_username(cls, v: str) -> str:
+        return v.lstrip("@").lower().strip()

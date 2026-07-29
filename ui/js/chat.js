@@ -1,6 +1,7 @@
 const ChatPage = {
     conversation: [],
     currentAgentId: null,
+    _agentFromUrl: false,
     sending: false,
     abortController: null,
     attachments: [],
@@ -33,7 +34,13 @@ const ChatPage = {
             return;
         }
 
-        if (!this.currentAgentId) this.currentAgentId = agents[0].id;
+        // An agent id in the URL (the "Chat" button on an agent card) is an
+        // explicit pick, so loadCurrent() below must not switch back to the
+        // agent the current session belongs to. One-shot: from then on the
+        // session wins again, e.g. resuming an archived chat restores its agent.
+        // An unknown or non-selectable id falls back to the first agent.
+        this._agentFromUrl = agents.some(a => a.id === this.currentAgentId);
+        if (!this._agentFromUrl) this.currentAgentId = agents[0].id;
 
         App.container.innerHTML = `
             <div class="d-flex flex-column mx-auto w-100 chat-wrap">
@@ -143,8 +150,14 @@ const ChatPage = {
         const box = document.getElementById('history-list');
         if (!box) return;
         const q = (query || '').trim().toLowerCase();
+        // Provenance label shown on the badge of connector chats: the source
+        // ("telegram") or a localized generic fallback when only the channel
+        // key is known. The filter matches it too, so typing what the badge
+        // displays keeps the row visible.
+        const sourceLabel = (s) => s.source || (s.channel ? i18n('chat.channelSource') : '');
         const items = (this._history || []).filter(s =>
-            !q || `${s.title || ''} ${this.agentName(s.agent_id)}`.toLowerCase().includes(q));
+            !q || `${s.title || ''} ${this.agentName(s.agent_id)} ${sourceLabel(s)} ${s.channel || ''}`
+                .toLowerCase().includes(q));
 
         if (!items.length) {
             box.innerHTML = `<div class="text-secondary text-center py-4">${
@@ -160,13 +173,21 @@ const ChatPage = {
                 lastGroup = group;
             }
             const active = s.id === this._archivedId ? ' active' : '';
+            // Chats archived from an external connector carry their provenance:
+            // source = connector type ("telegram"), channel = the external chat key.
+            const src = sourceLabel(s);
+            const srcIcon = s.source === 'telegram' ? 'bi-telegram'
+                : s.source === 'autonomous' ? 'bi-robot' : 'bi-broadcast-pin';
+            const srcBadge = src ? `
+                            · <span class="hi-source" title="${App.escAttr(s.channel || '')}">
+                                <i class="bi ${srcIcon}"></i> ${App.esc(src)}</span>` : '';
             html += `
                 <div class="history-item${active}" data-id="${App.esc(s.id)}" role="button" tabindex="0">
                     <div class="hi-main">
                         <div class="hi-title">${App.esc(s.title || i18n('chat.untitled'))}</div>
                         <div class="hi-meta">
                             <i class="bi bi-cpu"></i> ${App.esc(this.agentName(s.agent_id))}
-                            · ${i18n('chat.messagesCount', { n: s.message_count || 0 })}
+                            · ${i18n('chat.messagesCount', { n: s.message_count || 0 })}${srcBadge}
                         </div>
                     </div>
                     <div class="hi-when">${App.esc(this.fmtTime(s.updated_at))}</div>
@@ -201,7 +222,9 @@ const ChatPage = {
         this.setInputEnabled(true);
         let session = null;
         try { session = await App.api('GET', '/sessions/current'); } catch (e) { /* ignore */ }
-        if (session && session.agent_id && this.agents.some(a => a.id === session.agent_id)) {
+        const urlPick = this._agentFromUrl;
+        this._agentFromUrl = false;
+        if (!urlPick && session && session.agent_id && this.agents.some(a => a.id === session.agent_id)) {
             this.currentAgentId = session.agent_id;
             const as = document.getElementById('agent-select'); if (as) as.value = session.agent_id;
         }
@@ -259,6 +282,7 @@ const ChatPage = {
         let pendingTools = [];
         const flushAssistant = (text, ts) => {
             const msgDiv = this.createMessageDiv('assistant');
+            msgDiv._md = text || '';  // raw markdown, for the copy / source view
             if (pendingTools.length) {
                 const tc = document.createElement('div');
                 tc.className = 'tool-calls';
@@ -285,6 +309,7 @@ const ChatPage = {
                 this.appendMessage('error', m.text || '', m.ts);
             }
         }
+        this._decorateMessages();
         if (box) box.scrollTop = box.scrollHeight;
     },
 
@@ -443,7 +468,17 @@ const ChatPage = {
         input.value = '';
         this.attachments = [];
         this.renderAttachChips();
+        await this._send(message, attachments);
+    },
 
+    // Post one turn and stream the answer into a fresh bubble. Shared by the
+    // composer, Regenerate and Edit-prompt — the latter two supply the message
+    // themselves (after rewinding the chat), so everything downstream (live run,
+    // persistence, title) behaves exactly like a normal send.
+    async _send(message, attachments) {
+        if (this.sending || this.viewingArchived) return;
+        attachments = attachments || [];
+        if (!message && !attachments.length) return;  // nothing to ask
         this.appendUserMessage(message, attachments);
         this.setSending(true);
         const ui = this._newAssistantBubble();
@@ -453,7 +488,11 @@ const ChatPage = {
             const resp = await fetch('/api/chat/stream', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', ...App.authHeaders() },
-                body: JSON.stringify({ agent_id: this.currentAgentId, message, attachments }),
+                body: JSON.stringify({
+                    agent_id: this.currentAgentId,
+                    message,
+                    attachments: attachments.map(a => this._attachForSend(a)),
+                }),
                 signal: this.abortController.signal,
             });
             if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`);
@@ -541,11 +580,13 @@ const ChatPage = {
                     case 'token':
                         clearThinking();
                         streamedText += event.data;
+                        msgDiv._md = streamedText;
                         contentDiv.innerHTML = this.renderMarkdown(streamedText);
                         scroll();
                         break;
                     case 'clear_tokens':
                         streamedText = '';
+                        msgDiv._md = '';
                         contentDiv.innerHTML = '';
                         break;
                     case 'tool_start':
@@ -560,6 +601,7 @@ const ChatPage = {
                         clearThinking();
                         if (errored) break;
                         if (!streamedText && event.data && event.data.reply) {
+                            msgDiv._md = event.data.reply;
                             contentDiv.innerHTML = this.renderMarkdown(event.data.reply);
                         }
                         const trace = event.data && event.data.trace;
@@ -606,6 +648,7 @@ const ChatPage = {
         if (!document.getElementById('chat-send')) return;
         this.setSending(false);
         this.abortController = null;
+        this._decorateMessages();  // the finished bubble is now the last one
     },
 
     // Abort only the CLIENT-side consumption of the stream; the server-side
@@ -619,6 +662,11 @@ const ChatPage = {
 
     setSending(on) {
         this.sending = on;
+        // Editing/regenerating mid-generation would race the live run (the
+        // rewind endpoint refuses it anyway): take the actions away while it
+        // streams — _finalizeStream() puts them back.
+        const box = document.getElementById('chat-messages');
+        if (box && on) box.querySelectorAll('.msg-actions').forEach(el => el.remove());
         const btn = document.getElementById('chat-send');
         if (!btn) return;
         const spinner = btn.querySelector('.spinner-chat');
@@ -679,6 +727,10 @@ const ChatPage = {
 
     appendUserMessage(text, attachments, ts) {
         const div = this.createMessageDiv('user');
+        // Kept for the inline prompt editor, which re-sends this turn as-is
+        // except for the text the user rewrites.
+        div._text = text || '';
+        div._attachments = (attachments || []).map(a => this._attachForSend(a));
         if (attachments && attachments.length) {
             const wrap = document.createElement('div');
             wrap.className = 'd-flex flex-wrap gap-2 mb-1';
@@ -705,6 +757,233 @@ const ChatPage = {
         div.appendChild(this._timeEl(ts));
         const c = document.getElementById('chat-messages');
         c.scrollTop = c.scrollHeight;
+    },
+
+    // --- Per-message actions (copy / markdown source / edit / regenerate) ----
+
+    // (Re)build the action bar of every message. Called after any render and at
+    // the end of a stream, because two things change as the chat grows: which
+    // assistant message is the last one (only that one can be regenerated) and
+    // which user turn each bubble maps to.
+    _decorateMessages() {
+        const box = document.getElementById('chat-messages');
+        if (!box) return;
+        const users = box.querySelectorAll(':scope > .msg-user');
+        // The nth user bubble is the nth user message in the stored session, so
+        // the rewind endpoint can be addressed by ordinal — no message ids needed.
+        users.forEach((div, i) => { div._turn = i; });
+        const assistants = box.querySelectorAll(':scope > .msg-assistant');
+        const last = assistants[assistants.length - 1] || null;
+        users.forEach(div => this._ensureActions(div, 'user'));
+        assistants.forEach(div => this._ensureActions(div, 'assistant', div === last));
+    },
+
+    _ensureActions(div, role, isLast) {
+        const old = div.querySelector(':scope > .msg-actions');
+        if (old) old.remove();
+        if (div._editing) return;  // the editor has its own buttons
+        const bar = document.createElement('div');
+        bar.className = 'msg-actions';
+        const add = (icon, title, fn) => {
+            const b = document.createElement('button');
+            b.type = 'button';
+            b.className = 'btn msg-act';
+            b.title = title;
+            b.innerHTML = `<i class="bi bi-${icon}"></i>`;
+            b.onclick = (e) => fn(e.currentTarget);
+            bar.appendChild(b);
+        };
+
+        if (role === 'user') {
+            if (this.viewingArchived) return;  // archived chats are read-only
+            add('pencil', i18n('chat.editPrompt'), () => this.startEdit(div));
+        } else {
+            add('clipboard', i18n('chat.copyMarkdown'), (btn) => this.copyMarkdown(div, btn));
+            // The bubble may already be showing its source: keep the toggle's
+            // icon in sync, since the bar is rebuilt on every render.
+            const src = div.querySelector(':scope > .msg-content')?.dataset.source === '1';
+            add(src ? 'eye' : 'markdown',
+                i18n(src ? 'chat.viewRendered' : 'chat.viewMarkdown'),
+                (btn) => this.toggleSource(div, btn));
+            if (isLast && !this.viewingArchived) {
+                add('arrow-clockwise', i18n('chat.regenerate'), () => this.regenerate());
+            }
+        }
+        if (bar.children.length) div.appendChild(bar);
+    },
+
+    // The message's markdown source. Falls back to the rendered text for
+    // bubbles that predate _md (or were built by another path).
+    _markdownOf(div) {
+        if (typeof div._md === 'string') return div._md;
+        const c = div.querySelector(':scope > .msg-content');
+        return c ? c.innerText : '';
+    },
+
+    async copyMarkdown(div, btn) {
+        const ok = await this._writeClipboard(this._markdownOf(div));
+        if (!ok) {
+            App.toast(i18n('chat.copyFailed'), 'danger');
+            return;
+        }
+        const icon = btn.querySelector('i');
+        const title = btn.title;
+        if (icon) icon.className = 'bi bi-check-lg';
+        btn.title = i18n('chat.copied');
+        setTimeout(() => {
+            if (icon) icon.className = 'bi bi-clipboard';
+            btn.title = title;
+        }, 1500);
+    },
+
+    async _writeClipboard(text) {
+        try {
+            if (navigator.clipboard && window.isSecureContext) {
+                await navigator.clipboard.writeText(text);
+                return true;
+            }
+        } catch (e) { /* fall through to the legacy path */ }
+        // Opened over plain http on the LAN (only localhost is a secure
+        // context): the async clipboard is unavailable, so select and copy.
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', '');
+        ta.style.cssText = 'position:fixed;top:0;left:-9999px';
+        document.body.appendChild(ta);
+        ta.select();
+        let ok = false;
+        try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+        ta.remove();
+        return ok;
+    },
+
+    // Swap an assistant bubble between the rendered answer and its raw markdown
+    // source (readable and selectable as plain text).
+    toggleSource(div, btn) {
+        const c = div.querySelector(':scope > .msg-content');
+        if (!c) return;
+        const icon = btn.querySelector('i');
+        if (c.dataset.source === '1') {
+            delete c.dataset.source;
+            c.innerHTML = this.renderMarkdown(this._markdownOf(div));
+            if (icon) icon.className = 'bi bi-markdown';
+            btn.title = i18n('chat.viewMarkdown');
+        } else {
+            c.dataset.source = '1';
+            const pre = document.createElement('pre');
+            pre.className = 'md-source';
+            pre.textContent = this._markdownOf(div);
+            c.innerHTML = '';
+            c.appendChild(pre);
+            if (icon) icon.className = 'bi bi-eye';
+            btn.title = i18n('chat.viewRendered');
+        }
+    },
+
+    // --- Regenerate / edit prompt -------------------------------------------
+    // Both work the same way: rewind the stored chat to a user turn (dropping
+    // that turn and everything after it), then send a message again through the
+    // normal path. The server only rewinds — it never re-runs the agent itself.
+
+    async _rewind(userTurn) {
+        try {
+            return await App.api('POST', '/sessions/current/rewind', { user_turn: userTurn });
+        } catch (e) {
+            App.toast(i18n('chat.errorPrefix', { msg: e.message }), 'danger');
+            return null;
+        }
+    },
+
+    // Only the fields the API accepts: attachments read back from a session also
+    // carry the workspace `path` the executor stamped on them when it wrote the
+    // file, and re-sending re-materializes it anyway.
+    _attachForSend(a) {
+        return { name: a.name, kind: a.kind, data: a.data, mime: a.mime || null };
+    },
+
+    async regenerate() {
+        if (this.sending || this.viewingArchived) return;
+        const res = await this._rewind(-1);  // -1 = the last user turn
+        if (!res) return;
+        this.renderSessionMessages(res.session);
+        await this._send(res.message.text, (res.message.attachments || []).map(a => this._attachForSend(a)));
+    },
+
+    // Turn a user bubble into an inline editor. Nothing is dropped until the
+    // user confirms — then the chat is rewound to this turn and the edited text
+    // is sent, so the answer (and anything that followed) is produced again.
+    startEdit(div) {
+        if (this.sending || this.viewingArchived || div._editing) return;
+        div._editing = true;
+        const original = div.innerHTML;
+        const restore = () => {
+            div._editing = false;
+            div.classList.remove('editing');
+            div.innerHTML = original;
+            this._decorateMessages();
+        };
+
+        div.classList.add('editing');  // widen the bubble: it's a form now
+        div.innerHTML = '';
+        const ta = document.createElement('textarea');
+        ta.className = 'form-control form-control-sm msg-edit';
+        ta.value = div._text || '';
+        ta.rows = Math.min(12, Math.max(2, (div._text || '').split('\n').length));
+        div.appendChild(ta);
+
+        const n = (div._attachments || []).length;
+        if (n) {
+            const note = document.createElement('div');
+            note.className = 'msg-edit-note';
+            note.textContent = i18n('chat.editAttachments', { n });
+            div.appendChild(note);
+        }
+        if (div.nextElementSibling) {
+            const warn = document.createElement('div');
+            warn.className = 'msg-edit-note';
+            warn.textContent = i18n('chat.editWarning');
+            div.appendChild(warn);
+        }
+
+        const bar = document.createElement('div');
+        bar.className = 'msg-actions';
+        const send = document.createElement('button');
+        send.type = 'button';
+        send.className = 'btn btn-sm btn-light';
+        send.textContent = i18n('chat.editSend');
+        send.onclick = () => this._submitEdit(div, ta.value);
+        const cancel = document.createElement('button');
+        cancel.type = 'button';
+        cancel.className = 'btn btn-sm btn-outline-light';
+        cancel.textContent = i18n('common.cancel');
+        cancel.onclick = restore;
+        bar.append(send, cancel);
+        div.appendChild(bar);
+
+        ta.onkeydown = (e) => {
+            const isTouch = window.matchMedia('(pointer: coarse)').matches;
+            if (e.key === 'Enter' && !e.shiftKey && !isTouch) {
+                e.preventDefault();
+                this._submitEdit(div, ta.value);
+            } else if (e.key === 'Escape') {
+                e.preventDefault();
+                restore();
+            }
+        };
+        ta.focus();
+        ta.setSelectionRange(ta.value.length, ta.value.length);
+    },
+
+    async _submitEdit(div, text) {
+        const turn = div._turn;
+        const message = (text || '').trim();
+        if (this.sending || typeof turn !== 'number') return;
+        if (!message && !(div._attachments || []).length) return;
+        const res = await this._rewind(turn);
+        if (!res) return;
+        div._editing = false;
+        this.renderSessionMessages(res.session);
+        await this._send(message, (res.message.attachments || []).map(a => this._attachForSend(a)));
     },
 
     // --- Inline expandable tool calls (rendered directly in the chat) --------
