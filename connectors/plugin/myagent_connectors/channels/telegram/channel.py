@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import os
 from datetime import datetime
 
 import httpx
@@ -30,6 +31,9 @@ API = "https://api.telegram.org/bot{token}/{method}"
 FILE_API = "https://api.telegram.org/file/bot{token}/{path}"
 MAX_MSG = 4096              # Telegram hard limit per message
 MAX_FILE = 15 * 1024 * 1024  # 15 MB (Telegram Bot API download cap is 20 MB)
+# Long-poll seconds: getUpdates blocks up to this long. A transport knob, so it
+# lives with the transport and not in the plugin's shared config.
+POLL_TIMEOUT = int(os.environ.get("MYAGENT_TELEGRAM_POLL_TIMEOUT") or 30)
 
 # Commands advertised via setMyCommands — they populate the client's "Menu"
 # button and the "/" autocomplete list. These mirror the built-in commands
@@ -83,6 +87,8 @@ class TelegramConnector(BaseConnector):
         # sticky client-side, so one send per chat keeps the buttons visible
         # without re-attaching (and re-expanding) them on every reply.
         self._menu_shown: set = set()
+        # "@botname" once known; the status line shows it while healthy.
+        self._account = ""
 
     # ------------------------------------------------------------- API helper
     async def _call(self, method: str, timeout: float = 15.0, **params):
@@ -94,8 +100,14 @@ class TelegramConnector(BaseConnector):
             raise RuntimeError(f"Telegram {method} failed: {data.get('description')}")
         return data.get("result")
 
+    async def verify(self) -> dict:
+        """The shared 'test these credentials' hook: getMe, projected for the UI."""
+        me = await self.get_me()
+        return {"bot": me.get("username"), "name": me.get("first_name")}
+
     async def get_me(self) -> dict:
-        """Validate the token and return the bot account (used by 'test')."""
+        """Validate the token and return the bot account. Used by verify() and by
+        start(), which also needs the @username for the status line."""
         async with httpx.AsyncClient() as c:
             url = API.format(token=self.binding.token, method="getMe")
             data = (await c.post(url, timeout=10.0)).json()
@@ -104,10 +116,11 @@ class TelegramConnector(BaseConnector):
         return data["result"]
 
     # -------------------------------------------------------------- transport
-    async def send(self, chat_id, text: str) -> None:
+    async def send(self, chat_id, text: str) -> bool:
         # Split long replies to respect Telegram's per-message limit.
         n = len(text) or 1
         show_menu = chat_id not in self._menu_shown
+        ok = True
         for i in range(0, n, MAX_MSG):
             chunk = text[i:i + MAX_MSG] or " "
             params = {"chat_id": chat_id, "text": chunk}
@@ -118,9 +131,13 @@ class TelegramConnector(BaseConnector):
             try:
                 await self._call("sendMessage", **params)
             except Exception as e:
-                log.warning("sendMessage failed (%s): %s", self.binding.id, e)
+                # Redacted: the failure text can quote a URL holding the token.
+                log.warning("sendMessage failed (%s): %s", self.binding.id,
+                            redact(str(e), self.binding.token))
+                ok = False
                 break
         self._menu_shown.add(chat_id)
+        return ok
 
     async def _typing_loop(self, chat_id) -> None:
         # Telegram's "typing…" lasts ~5s; refresh it until the reply is ready
@@ -141,7 +158,11 @@ class TelegramConnector(BaseConnector):
         self._http = httpx.AsyncClient()
         try:
             me = await self.get_me()
-            self.status.detail = "@" + me.get("username", "?")
+            # Kept so a recovery can restore it: on the way out of an error the
+            # status would otherwise keep showing the stale failure message while
+            # reporting "running".
+            self._account = "@" + me.get("username", "?")
+            self.status.detail = self._account
         except Exception as e:
             self.status.state = "error"
             self.status.detail = redact(str(e), self.binding.token)
@@ -181,6 +202,7 @@ class TelegramConnector(BaseConnector):
                 last_logged = ""
                 if self.status.state == "error":
                     self.status.state = "running"
+                    self.status.detail = self._account
                 for upd in updates or []:
                     self._offset = max(self._offset, upd.get("update_id", 0) + 1)
                     await self._dispatch(upd)
@@ -217,10 +239,10 @@ class TelegramConnector(BaseConnector):
         # 'timeout' is a Telegram param (long-poll seconds); the httpx read
         # timeout must be a bit longer so the connection isn't cut mid-poll.
         url = API.format(token=self.binding.token, method="getUpdates")
-        params = {"offset": self._offset, "timeout": config.TELEGRAM_POLL_TIMEOUT,
+        params = {"offset": self._offset, "timeout": POLL_TIMEOUT,
                   "allowed_updates": ["message"]}
         resp = await self._http.post(
-            url, json=params, timeout=config.TELEGRAM_POLL_TIMEOUT + 15
+            url, json=params, timeout=POLL_TIMEOUT + 15
         )
         data = resp.json()
         if not data.get("ok"):

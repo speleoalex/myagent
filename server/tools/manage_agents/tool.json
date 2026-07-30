@@ -73,11 +73,11 @@
       },
       "live": {
         "type": "boolean",
-        "description": "Start/stop the agent as an autonomous agent (default false). A live agent wakes up periodically and on events, and restarts by itself after a server reboot."
+        "description": "Start/stop the agent as an autonomous agent (default false). A live agent runs its scheduled tasks on its own and restarts by itself after a server reboot. With no task scheduled it stays idle, so live alone does nothing."
       },
       "autonomous": {
         "type": "object",
-        "description": "Optional autonomy tuning: {interval_s, instructions, max_wakes_per_hour, max_consecutive_errors, wake_timeout_s, notify_binding_id, notify_chat_id}. null = defaults (30 min heartbeat)."
+        "description": "Optional autonomy safety rails: {max_wakes_per_hour, max_consecutive_errors, wake_timeout_s, notify_binding_id, notify_chat_id, history_messages}. null = defaults. WHEN the agent runs is not set here: that is its task list (manage_tasks / the Tasks page)."
       }
     },
     "required": [

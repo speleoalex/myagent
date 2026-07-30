@@ -1,12 +1,26 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 
 # Binding ids become filenames and are used to derive channel session keys, so
 # they share the core's single charset definition. This used to be a literal
 # copy marked "keep in sync" — the plugin runs in myagent's process now, so it
 # can just import it.
 from app.ids import check_id
+
+
+def _as_handle(value) -> str:
+    """Normalize one messaging identifier to a string.
+
+    Identifiers are strings, not integers, even when a channel's happen to look
+    numeric: a phone number is E.164 (``+39…``) and a Slack user id is
+    ``U024BE7LH``. They used to be typed ``int`` because Telegram was the only
+    channel — which made the shared access-control code unusable for any second
+    one. Ints are still accepted on read so existing files load untouched.
+    """
+    if value is None:
+        return ""
+    return str(value).strip()
 
 
 class Binding(BaseModel):
@@ -24,13 +38,23 @@ class Binding(BaseModel):
     token: str = ""                 # bot credentials (secret)
 
     # Access control
+    # Messaging user ids allowed in allowlist mode. Strings: see _as_handle.
+    allowed_ids: list[str] = []
     access_mode: str = "allowlist"  # "allowlist" | "password" | "open"
-    allowed_ids: list[int] = []     # messaging user ids (allowlist mode)
     # @usernames allowed (allowlist mode), stored normalized: no leading '@',
     # lowercased. Less secure than ids (a user can change/release a username),
     # but convenient.
     allowed_usernames: list[str] = []
     password: str = ""              # activation secret (password mode)
+
+    @field_validator("allowed_ids", mode="before")
+    @classmethod
+    def normalize_ids(cls, v):
+        """Coerce to strings, so a stored ``[471091560, …]`` (written when these
+        were ints) loads without rewriting the file."""
+        if not isinstance(v, (list, tuple)):
+            return v
+        return [h for h in (_as_handle(x) for x in v) if h]
 
     @field_validator("allowed_usernames")
     @classmethod
@@ -60,22 +84,53 @@ class Binding(BaseModel):
 
 
 class Contact(BaseModel):
-    """Address-book entry: a person, with the messaging identifiers needed to
-    authorize them on a binding (the authorized-users field picks from here)
-    or to notify them. No secrets inside.
+    """Address-book entry: a person and how to reach them on each channel.
+
+    This is what lets an agent be told *"message Alessandro on Telegram"*: the
+    name is the human key, ``handles`` maps a channel type to that person's
+    identifier there. One identifier was never enough — the same person has a
+    Telegram id AND a phone number — which is why the original ``user_id`` /
+    ``username`` pair is folded into ``handles`` on load.
     """
     id: str
     name: str = ""
-    user_id: int | None = None      # numeric messaging user id (permanent)
-    username: str = ""              # stored normalized: no leading '@', lowercased
+    # channel type -> identifier on that channel, e.g. {"telegram": "471091560"}
+    handles: dict[str, str] = {}
     notes: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_handles(cls, data):
+        """Back-compat: contacts used to carry a single Telegram identifier as
+        ``user_id`` (numeric) plus ``username``. Lift whichever is present into
+        ``handles["telegram"]`` — same approach as ModelConfig.migrate_num_ctx,
+        so no stored file has to be rewritten.
+        """
+        if not isinstance(data, dict):
+            return data
+        if "user_id" not in data and "username" not in data:
+            return data
+        handles = dict(data.get("handles") or {})
+        if not handles.get("telegram"):
+            # Prefer the numeric id: it is permanent, a username can be changed.
+            legacy = _as_handle(data.get("user_id")) or _as_handle(data.get("username"))
+            if legacy:
+                handles["telegram"] = legacy
+        return {k: v for k, v in data.items()
+                if k not in ("user_id", "username")} | {"handles": handles}
+
+    @field_validator("handles", mode="before")
+    @classmethod
+    def normalize_handles(cls, v):
+        if not isinstance(v, dict):
+            return v
+        return {str(k): h for k, h in ((k, _as_handle(x)) for k, x in v.items()) if h}
 
     @field_validator("id")
     @classmethod
     def validate_id(cls, v: str) -> str:
         return check_id(v)
 
-    @field_validator("username")
-    @classmethod
-    def normalize_username(cls, v: str) -> str:
-        return v.lstrip("@").lower().strip()
+    def handle_for(self, channel_type: str) -> str:
+        """This person's identifier on a channel, "" when they have none there."""
+        return self.handles.get(channel_type, "")

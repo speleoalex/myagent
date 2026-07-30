@@ -165,47 +165,12 @@ async def update_agent(agent_id: str, agent: Agent, request: Request):
     return agent.model_dump()
 
 
-class EventRequest(BaseModel):
-    """External event producer (webhooks, scripts, other services). Already
-    behind the global API-key middleware when MYAGENT_API_KEY is set."""
-    type: str = "message"          # message | schedule | reminder | webhook
-    payload: dict = {}
-    due_at: str = ""               # ISO timestamp; empty = due now
-    source: str = "api"
-    repeat_s: int = 0              # > 0 = recurring
-
-
-@router.post("/{agent_id}/events", status_code=201)
-async def queue_agent_event(agent_id: str, req: EventRequest, request: Request):
-    """Queue an event for an agent. A live agent is woken right away; a
-    non-live agent accumulates events until it is started."""
-    get_or_404(_store(request), agent_id, "Agent")
-    try:
-        event = request.app.state.events.append(
-            agent_id, type=req.type, payload=req.payload,
-            due_at=req.due_at, source=req.source or "api",
-            repeat_s=req.repeat_s,
-        )
-    except RuntimeError as e:
-        raise HTTPException(429, str(e))
-    return {"id": event["id"], "due_at": event["due_at"]}
-
-
-@router.get("/{agent_id}/events")
-async def list_agent_events(agent_id: str, request: Request):
-    """Pending events plus the recent audit trail (reacted + reaction)."""
-    get_or_404(_store(request), agent_id, "Agent")
-    events = request.app.state.events
-    return {"pending": events.pending(agent_id, include_future=True),
-            "archive": events.archive(agent_id)}
-
-
 @router.delete("/{agent_id}")
 async def delete_agent(agent_id: str, request: Request):
     store = _store(request)
     if not store.delete(agent_id):
         raise HTTPException(404, f"Agent not found: {agent_id}")
-    # Autonomy state (event queues, scheduler state) is operational data of
+    # Autonomy state (scheduler state, scheduled tasks) is operational data of
     # the deleted agent: remove it — drop_agent owns the on-disk layout. Deep
     # memory is deliberately KEPT: an agent recreated with the same id finds
     # its memory again.

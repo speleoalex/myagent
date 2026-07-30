@@ -103,6 +103,7 @@ const App = {
             case 'tools':   ToolsPage.render(params); break;
             case 'models':  ModelsPage.render(params); break;
             case 'chat':    ChatPage.render(params); break;
+            case 'tasks':   TasksPage.render(params); break;
             case 'settings': SettingsPage.render(params); break;
             case 'connectors': ConnectorsPage.render(params); break;
             default:        this.renderHome(); break;

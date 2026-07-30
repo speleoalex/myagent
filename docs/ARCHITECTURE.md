@@ -180,7 +180,8 @@ as one block: a master checkbox for the wildcard, or per-tool checkboxes.
 
 Internal tools (`"internal": true`) are async Python handlers registered via
 `registry.register_internal()`: `call_agent`, the memory tools
-(`memory_search`/`memory_read`/`memory_note`), `notify_user`, `schedule_task`
+(`memory_search`/`memory_read`/`memory_note`), `notify_user`, `manage_tasks`
+(the agent lists, schedules, edits and cancels its OWN tasks)
 and `autonomy_control` (an agent switches its OWN autonomous mode on/off from
 chat — "start yourself" / "stop yourself" / "are you active?" — by toggling
 the persisted `Agent.live` switch and cancelling any wake in flight).
@@ -302,48 +303,68 @@ memory (it remembers but can't explore or annotate).
 Any agent can be made autonomous with the ``live: true`` flag — THE single
 switch, off by default, persisted with the agent, so a started agent restarts
 by itself after a service or machine reboot. The optional ``autonomous`` block
-only customizes the defaults (30-min heartbeat, standing instructions, rate
-limits, notify target); ``live`` alone is a working configuration.
+only customizes the safety rails (rate limit, error tolerance, wake timeout,
+notify target); ``live`` alone is a working configuration.
 
+WHEN an agent acts, and to do what, is not a setting on the agent: it is its
+**task list**. There is no separate heartbeat — a routine is a task with a cron
+expression — so one list answers the whole question, and an agent with no task
+stays idle whether it is live or not.
+
+- **Tasks** (`server/app/models.py` ``Task``, `server/app/storage/tasks.py`) —
+  one JSON file per task in ``~/myagent/config/tasks/<id>.json``: an
+  ``agent_id``, a ``prompt`` (what to do, phrased as an order) and a schedule,
+  either a 5-field ``cron`` expression or a one-off ``at`` timestamp (neither =
+  due immediately, which is how an external poke queues work). Because a task
+  is an addressable entity, it can be listed, edited, disabled and cancelled —
+  from the UI, the API, or the agent's own ``manage_tasks`` tool.
+  ``next_at`` is the ONLY field the scheduler reads; ``TaskStore`` is the only
+  thing that computes it, on save and after each run.
+- **Cron** (`server/app/engine/cron.py`) — a ~35-line stdlib parser: ``*``,
+  ``n``, ``a-b``, ``a,b,c`` and ``/step`` on any of them; ``next_after``
+  iterates by day (not by minute), so cost is bounded by skipped days. Two
+  declared deviations from POSIX: day-of-month and day-of-week are ANDed, not
+  ORed, and there are no names or ``@daily`` macros. No dependency was added.
 - **Scheduler** (`server/app/engine/autonomy.py`, started in the FastAPI
   lifespan) — one supervisor loop (5s resolution) re-reads the agent store on
   every scan (toggling ``live`` from the UI takes effect within seconds, no
-  restart; ``live: false`` is the kill switch) and spawns one wake task per due
-  agent. Scheduling is fixed-delay-from-completion + jitter (no overlapping
-  ticks, no backlog); per-agent state (last/next wake, error streak, pause,
-  wake history) persists in ``~/myagent/autonomy/<id>/state.json`` — no wake
-  storm on restart.
-- **Events** (`server/app/storage/events.py`) — a persistent queue, one JSON
-  file per event in ``autonomy/<id>/events/{pending,archive}/``. Producers: the
-  agent itself (``schedule_task`` tool: reminders and recurring tasks) and
-  ``POST /api/agents/{id}/events`` (webhooks, scripts). Delivery is
-  once-on-success with a recorded outcome: after a clean wake each event is
-  archived with ``reacted: true`` and a ``reaction`` (``null`` = "seen, chose
-  not to act" — legitimate); on failure it stays pending and is re-delivered.
-  ``archive/`` is the audit trail.
+  restart; ``live: false`` is the kill switch) and spawns one wake per agent
+  with work due. Tasks due at the same moment share ONE wake, so a slow
+  local-model turn can never build a backlog. Rescheduling happens only after a
+  successful wake (``TaskStore.advance``): run-once-on-success, with a failed
+  run left due and retried. Per-agent runtime state (last wake, error streak,
+  pause, wake history) persists in ``~/myagent/autonomy/<id>/state.json`` — no
+  wake storm on restart.
 - **Wake turn** — a normal executor turn in the dedicated named session
   ``autonomous_<agent_id>`` (source ``autonomous``, visible in the UI session
   list), driven through the LiveRunManager and serialized on the same lock as
-  connector chats. The wake prompt lists due events and standing instructions;
-  a reply of exactly ``NOOP`` with zero tool calls skips persistence entirely
-  (heartbeats must not grow the session), while any tool call is always
-  recorded. Agents with ``memory_enabled`` get their root digest injected and
-  the session compacts like any other; agents without memory have the saved
-  conversation capped.
+  connector chats. The wake prompt lists the due tasks as orders, plus one line
+  naming what comes next so the agent can answer "what's scheduled?" without a
+  tool call. A reply of exactly ``NOOP`` with zero tool calls skips persistence
+  entirely (a 20-minute routine must not grow the session), while any tool call
+  is always recorded. Agents with ``memory_enabled`` get their root digest
+  injected and the session compacts like any other; agents without memory have
+  the saved conversation capped.
 - **Reaching the user** — the ``notify_user`` tool hands the text to a running
   connector, found through ``app.state.connectors`` (the connectors plugin), using
   the agent's configured default binding/chat. Best-effort, and a clear error when
   the plugin is not installed. The reply text of a wake is only logged.
-- **Safety rails** — per-hour rate limit, auto-pause after N consecutive
-  errors (cleared by re-saving the agent or ``POST /api/autonomy/{id}/resume``),
-  ``wake_timeout_s`` wall, plus the existing per-turn ``max_iterations`` /
-  ``max_tool_calls``.
+- **Safety rails** — per-hour rate limit (also the floor on how often a task
+  can really run), auto-pause after N consecutive errors (cleared by re-saving
+  the agent or ``POST /api/autonomy/{id}/resume``), ``wake_timeout_s`` wall,
+  plus the existing per-turn ``max_iterations`` / ``max_tool_calls``. A failed
+  wake records the outcome on its due tasks WITHOUT advancing ``next_at``: they
+  stay due and are retried, and the Tasks page shows the error instead of the
+  last success.
 
 Endpoints: `GET /api/autonomy/status`, `POST /api/autonomy/{id}/wake` (manual
 trigger, also the main testing lever), `POST /api/autonomy/{id}/stop`,
-`POST /api/autonomy/{id}/resume`; `POST/GET /api/agents/{id}/events`.
-`DELETE /api/agents/{id}` removes the agent's autonomy state (deep memory is
-deliberately kept).
+`POST /api/autonomy/{id}/resume`. Tasks are a resource of their own:
+`GET|POST /api/tasks`, `GET|PUT|DELETE /api/tasks/{id}`,
+`POST /api/tasks/{id}/run` (make it due now) and `GET /api/tasks/preview?cron=`
+(the next occurrences, so the form never has to reimplement cron in JS).
+`DELETE /api/agents/{id}` removes the agent's autonomy state and its tasks
+(deep memory is deliberately kept).
 
 `notify_user` both sends and appends the sent text to the target chat's own
 conversation, so an unsolicited message is part of the history the agent replays
@@ -380,12 +401,13 @@ Everything is plain JSON under `~/myagent/` (see `server/app/config.py`):
 | `~/myagent/config/models/` | `MYAGENT_CONFIG` | LLM configs; a remote `api_key` is stored 0600, masked in the API, and PUT treats mask/empty as "keep" |
 | `~/myagent/config/settings.json` | `MYAGENT_CONFIG` | default model, provider base URLs |
 | `~/myagent/config/mcp/` | `MYAGENT_CONFIG` | one JSON per MCP server (0600: `env`/`headers` may hold secrets) + `cache/` with the discovered tool catalogue |
+| `~/myagent/config/tasks/` | `MYAGENT_CONFIG` | one JSON per scheduled task (agent + prompt + cron/`at`) — user intent, hence config and not runtime state |
 | `~/myagent/tools/` | `MYAGENT_TOOLS` | tool folders |
 | `~/myagent/library/` | `MYAGENT_LIBRARY` | offline knowledge for `local_search` (ZIM archives, notes) — user-placed, never written by the app |
 | `~/myagent/workspace/` | `MYAGENT_WORKSPACE` | working dir for agents' file operations; relative paths in file/shell tools resolve here |
 | `~/myagent/sessions/` | `MYAGENT_SESSIONS` | `current.json`, `history/`, `channels/` (connector chats) |
 | `~/myagent/memory/` | `MYAGENT_MEMORY` | per-agent deep memory: `<agent_id>/tree.json` + `chunks/` |
-| `~/myagent/autonomy/` | `MYAGENT_AUTONOMY` | live agents' runtime state: `<agent_id>/state.json` + `events/{pending,archive}/` |
+| `~/myagent/autonomy/` | `MYAGENT_AUTONOMY` | live agents' runtime state: `<agent_id>/state.json` (the schedule itself lives in `config/tasks/`) |
 | `~/myagent/connectors/` | `MYAGENT_CONNECTORS_DIR` | connectors *plugin* state: bot bindings (0600), grants, contacts, kill switch |
 | `~/myagent/plugins/` | `MYAGENT_PLUGINS` | installed plugins (code, replaceable — state never lives here) |
 | `~/myagent/logs/` | `MYAGENT_DEBUG_FILE` | `debug.log` when `MYAGENT_DEBUG=1` |
@@ -433,7 +455,8 @@ under `ui/vendor/`.
 | Deep-memory store (tree + chunks) | `server/app/storage/memory.py` |
 | Memory compaction pipeline | `server/app/engine/memory_compactor.py` |
 | Autonomy scheduler + wake turns | `server/app/engine/autonomy.py` |
-| Per-agent event queues | `server/app/storage/events.py` |
+| Scheduled-task store (`next_at` is computed here) | `server/app/storage/tasks.py` |
+| Cron parser / next-occurrence solver | `server/app/engine/cron.py` |
 | One agent turn on a channel session | `server/app/engine/channel_turn.py` |
 | Plugin discovery + lifecycle | `server/app/plugins.py` |
 | Connectors plugin (messaging bots) | `connectors/plugin/` (see `docs/PLUGINS.md`) |

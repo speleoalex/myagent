@@ -14,9 +14,23 @@ from myagent_connectors.services import services
 router = APIRouter()
 
 
+def _public(data: dict) -> dict:
+    """A contact as the API describes it: validated through the model.
+
+    Same reason as the bindings router — stored files written before per-channel
+    handles existed carry ``user_id``/``username``, and the model folds them into
+    ``handles`` on load. Returning the raw dict would leave the frontend (and the
+    agent) reading fields the schema no longer has. A file that cannot be
+    validated is passed through untouched rather than breaking the list."""
+    try:
+        return Contact(**data).model_dump()
+    except Exception:
+        return data
+
+
 @router.get("")
 async def list_contacts(request: Request):
-    out = services(request).contacts.list_all()
+    out = [_public(c) for c in services(request).contacts.list_all()]
     out.sort(key=lambda c: (c.get("name") or c.get("id") or "").lower())
     return out
 
@@ -26,7 +40,7 @@ async def get_contact(contact_id: str, request: Request):
     data = services(request).contacts.get(contact_id)
     if data is None:
         raise HTTPException(404, "Contact not found")
-    return data
+    return _public(data)
 
 
 @router.post("")
@@ -35,7 +49,7 @@ async def create_contact(contact: Contact, request: Request):
     if store.get(contact.id) is not None:
         raise HTTPException(409, "A contact with this id already exists")
     store.save(contact.id, contact.model_dump())
-    return store.get(contact.id)
+    return _public(store.get(contact.id))
 
 
 @router.put("/{contact_id}")
@@ -46,7 +60,7 @@ async def update_contact(contact_id: str, contact: Contact, request: Request):
     if contact.id != contact_id:
         raise HTTPException(400, "id mismatch")
     store.save(contact_id, contact.model_dump())
-    return store.get(contact_id)
+    return _public(store.get(contact_id))
 
 
 @router.delete("/{contact_id}")

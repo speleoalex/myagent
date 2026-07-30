@@ -1,8 +1,8 @@
-# Extra dependency of the connectors plugin, installed into myagent's own
-# virtualenv by install.sh. Everything else the plugin needs (fastapi, pydantic,
-# httpx) is already in server/requirements.txt — it runs in that process.
+# Shared dependencies of the connectors plugin: none.
 #
-# Only used for Telegram voice notes, through the document_extract tool. It
-# pulls in ctranslate2/tokenizers/onnxruntime (~380 MB) and wants ffmpeg on the
-# PATH; skip it and the plugin still works, minus voice transcription.
-faster-whisper>=1.0.0
+# The shared code imports only the standard library plus fastapi and pydantic,
+# which myagent's own virtualenv already provides — it runs in that process.
+# A channel's dependencies live in its own folder
+# (myagent_connectors/channels/<type>/requirements.txt) and are installed by
+# connectors/install.sh, so a channel can be added or removed without touching
+# what the others need.

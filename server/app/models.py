@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
 
 from pydantic import BaseModel, field_validator, model_validator
 
@@ -143,14 +144,66 @@ class McpServer(BaseModel):
         return self
 
 
+class Task(BaseModel):
+    """One scheduled job: an agent, what it must do, and when.
+
+    THE unit of autonomous work — there is no separate heartbeat. A recurring
+    routine is a task with a ``cron`` expression, a reminder is a task with an
+    ``at`` timestamp; both are addressable by id, so they can be listed, edited
+    and cancelled from the UI, the API and the agent's own ``manage_tasks``
+    tool. ``next_at`` is the only thing the scheduler reads: recomputed on save
+    and after every successful run by ``TaskStore``, never by hand.
+    """
+
+    id: str
+    agent_id: str
+    prompt: str                     # what the agent is asked to do at wake time
+    cron: str = ""                  # 5-field expression; "" = one-shot
+    at: str = ""                    # ISO local timestamp; used only when cron == ""
+    enabled: bool = True
+    # ---- runtime, owned by TaskStore/AutonomyService
+    next_at: str = ""               # "" = nothing more to run (one-shot, done)
+    last_run: str = ""
+    last_result: str = ""           # acted | noop | error | timeout | stopped
+    last_reply: str = ""            # short summary of what the agent did
+    source: str = "user"            # user | agent | api
+    created_at: str = ""
+
+    @field_validator("id")
+    @classmethod
+    def validate_id(cls, v: str) -> str:
+        return _check_id(v)
+
+    @model_validator(mode="after")
+    def check_schedule(self) -> "Task":
+        # Imported here, not at module scope: models.py is imported by config.py
+        # and must stay free of engine dependencies.
+        from app.engine import cron as cron_parser
+
+        self.cron = (self.cron or "").strip()
+        self.at = (self.at or "").strip()
+        if not self.prompt.strip():
+            raise ValueError("prompt is required: a task must say what to do")
+        if self.cron:
+            cron_parser.parse(self.cron)   # raises ValueError with a readable message
+        elif self.at:
+            try:
+                datetime.fromisoformat(self.at)
+            except ValueError:
+                raise ValueError(
+                    f"'at' must be an ISO timestamp (e.g. 2026-07-30T18:15), got {self.at!r}")
+        # Neither one is legal and means "run once, as soon as possible": that
+        # is how an external poke (a webhook, a connector) queues work.
+        return self
+
+
 class AutonomousConfig(BaseModel):
     """Optional tuning for a live (autonomous) agent. All fields have sane
     defaults, so ``live: true`` alone is a working configuration — this block
     only customizes it. There is deliberately NO ``enabled`` here:
-    ``Agent.live`` is the single switch."""
+    ``Agent.live`` is the single switch, and WHEN the agent runs is not here
+    either: that is the task list (see Task)."""
 
-    interval_s: int = 1800          # heartbeat period; 0 = wake on events only
-    instructions: str = ""          # standing instructions injected at each wake
     max_wakes_per_hour: int = 12
     max_consecutive_errors: int = 5
     wake_timeout_s: int = 600
@@ -158,8 +211,8 @@ class AutonomousConfig(BaseModel):
     notify_chat_id: str = ""
     # How many messages of the PREVIOUS wakes a wake may see. Default 0: none.
     #
-    # Nothing like the interactive window (200 with memory on). A heartbeat is a
-    # self-similar task, so its own history is dozens of near-identical copies of
+    # Nothing like the interactive window (200 with memory on). A recurring task
+    # is self-similar, so its own history is dozens of near-identical copies of
     # the same wake prompt and the same reply — not continuity but a feedback
     # loop: the model reads its last output and reproduces it, which is how an
     # already-fixed misconfiguration keeps being reported as broken (observed,
@@ -192,11 +245,11 @@ class Agent(BaseModel):
     # Compaction threshold in estimated tokens of the CLEANED conversation:
     # above it, the oldest turns are archived to deep memory and summarized.
     memory_threshold: int = 4000
-    # THE autonomy switch (default off). True = the AutonomyService wakes this
-    # agent on a heartbeat and on queued events. Persisted with the agent, so a
-    # started agent restarts on its own after a service/machine reboot;
-    # live=false (or enabled=false) is the kill switch, effective within one
-    # scheduler scan.
+    # THE autonomy switch (default off). True = the AutonomyService runs this
+    # agent's due tasks (see Task). Persisted with the agent, so a started agent
+    # restarts on its own after a service/machine reboot; live=false (or
+    # enabled=false) is the kill switch, effective within one scheduler scan.
+    # An agent with no task never wakes, live or not.
     live: bool = False
     # Optional autonomy knobs; None = all defaults (live alone is enough).
     autonomous: AutonomousConfig | None = None

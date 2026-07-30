@@ -36,10 +36,15 @@ by THIS agent, for THESE users only."* Configure them at
 - **Built-in commands**: `/start`, `/help`, `/reset`.
 - **Attachments** — photos, text files, PDFs and audio are forwarded to the
   agent; **voice notes are transcribed** to text first (see below).
-- **Address book** — save people once (name + numeric id and/or @username); the
-  binding form offers them as one-click chips, so allowlists are built by name
-  instead of pasting ids. The text field stays authoritative, so you can also
-  authorize someone who is not in the address book.
+- **Address book** — save people once, with one handle per channel (a Telegram
+  id, a phone number, …). The bot form offers them as one-click chips, so
+  allowlists are built by name instead of pasting ids; the text field stays
+  authoritative, so you can also authorize someone who is not in the book.
+- **Agents can address people by name** — because the address book is readable by
+  the `notify_user` tool, *"send a message to Alessandro on Telegram"* works: the
+  name is resolved to that person's handle on that channel. Ambiguous or unknown
+  names come back as an error **listing the candidates**, so the agent can pick
+  one instead of inventing an id.
 - **Outbound push** — the `notify_user` tool lets an agent (typically an
   autonomous one) start a conversation. It both delivers the message and appends
   it to that chat's own history, so the agent remembers having said it.
@@ -109,7 +114,7 @@ with `~/myagent/config`.
 | Variable | Default | What |
 |---|---|---|
 | `MYAGENT_CONNECTORS_DIR` | `~/myagent/connectors` | state directory |
-| `MYAGENT_TELEGRAM_POLL_TIMEOUT` | `30` | long-poll seconds |
+| `MYAGENT_TELEGRAM_POLL_TIMEOUT` | `30` | long-poll seconds (Telegram channel) |
 | `MYAGENT_CHAT_TIMEOUT` | `180` | wall clock for one agent turn |
 | `MYAGENT_CONNECTORS_CONCURRENCY` | `2` | inbound turns running at once, all bots |
 | `MYAGENT_CONNECTORS_MAX_ERRORS` | `10` | consecutive failures before self-pausing |
@@ -137,11 +142,30 @@ server was (there, only the outbound send endpoint was authenticated).
 
 ## Adding another channel
 
-Implement a `BaseConnector` subclass in
-`plugin/myagent_connectors/channels/<name>.py` (transport only: receive, send)
-and register it in `channels/registry.py`. Access control, commands, session
-keys and the agent call are already shared. The plugin contract itself is
-documented in [../docs/PLUGINS.md](../docs/PLUGINS.md).
+A channel is a **folder**, discovered at startup — nothing in the shared code
+names a transport:
+
+```text
+plugin/myagent_connectors/channels/<type>/
+├── channel.json        # type, label, UI hint keys, shape of a person's handle
+├── channel.py          # a BaseConnector subclass: receive, send, verify
+└── requirements.txt     # optional, installed by install.sh
+```
+
+Everything above the transport is already shared: access control, `/help` and
+`/reset`, session keys, the agent call with its timeout and concurrency limit, the
+address book, the bot CRUD and the UI (the channel picker and its hints are fed by
+`channel.json`). Only three methods are yours: `start`, `stop`, `send` — plus
+`verify` if the channel can check its own credentials.
+
+Two conventions worth knowing. A folder whose name starts with `.`/`_` or ends in
+`.disabled` is skipped, so parking a channel is a `mv`. And a channel that fails
+to load — a missing dependency, a malformed manifest — is skipped with a warning
+and **reported** by `GET /api/connectors/status` with its error, instead of
+silently looking like it was never installed.
+
+The plugin contract itself is documented in
+[../docs/PLUGINS.md](../docs/PLUGINS.md).
 
 ## Security note
 

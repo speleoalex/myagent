@@ -15,8 +15,7 @@ from pydantic import BaseModel
 
 from app.routers.secrets import SECRET_MASK
 
-from myagent_connectors.channels.registry import available_types
-from myagent_connectors.channels.telegram import TelegramConnector
+from myagent_connectors.channels.registry import available_types, create_connector
 from myagent_connectors.models import Binding
 from myagent_connectors.services import services
 
@@ -24,9 +23,18 @@ router = APIRouter()
 
 
 def _masked(data: dict) -> dict:
-    # ALWAYS a copy, even with nothing to mask: callers annotate the result
-    # (e.g. add "status") and must never mutate the stored dict by accident.
-    data = dict(data)
+    """The public shape of a binding: validated through the model, secrets masked.
+
+    Going through ``Binding`` matters for more than tidiness — it is what makes a
+    response agree with the schema. Stored files written before identifiers became
+    strings hold ints, and returning them raw meant GET answered with ints while
+    PUT accepted strings. A file that no longer validates is still listed, as-is,
+    rather than making the whole list fail.
+    """
+    try:
+        data = Binding(**data).model_dump()
+    except Exception:
+        data = dict(data)
     if data.get("token"):
         data["token"] = SECRET_MASK
     # never leak the plaintext activation password either
@@ -120,36 +128,36 @@ class TestReq(BaseModel):
     token: str = ""
 
 
-def _probe(binding: Binding, request: Request) -> TelegramConnector:
-    if binding.type != "telegram":
-        raise HTTPException(400, f"Test not supported for type '{binding.type}'")
+async def _verify(binding: Binding, request: Request) -> dict:
+    """Build the binding's connector from the registry and ask it to check its
+    own credentials. No channel type is named here: an unknown type fails in
+    create_connector, and a channel without a verify() says so itself."""
     svc = services(request)
-    return TelegramConnector(binding, svc.core, svc.grants)
+    try:
+        connector = create_connector(binding, svc.core, svc.grants)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    try:
+        return {"ok": True, **(await connector.verify() or {})}
+    except NotImplementedError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(400, f"Invalid credentials: {e}")
 
 
 @router.post("/test")
 async def test_token(req: TestReq, request: Request):
-    """Validate a token before saving it (getMe for Telegram)."""
+    """Validate credentials before saving them."""
     if req.token in ("", SECRET_MASK):
         raise HTTPException(400, "Provide a token to test")
-    probe = _probe(Binding(id="probe", type=req.type, token=req.token), request)
-    try:
-        me = await probe.get_me()
-    except Exception as e:
-        raise HTTPException(400, f"Invalid token: {e}")
-    return {"ok": True, "bot": me.get("username"), "name": me.get("first_name")}
+    return await _verify(Binding(id="probe", type=req.type, token=req.token), request)
 
 
 @router.post("/{binding_id}/test")
 async def test_binding(binding_id: str, request: Request):
-    """Validate the STORED token: the UI only ever sees the mask, so it cannot
-    send the token back for a plain /test."""
+    """Validate the STORED credentials: the UI only ever sees the mask, so it
+    cannot send the token back for a plain /test."""
     data = services(request).bindings.get(binding_id)
     if data is None:
         raise HTTPException(404, "Binding not found")
-    probe = _probe(Binding(**data), request)
-    try:
-        me = await probe.get_me()
-    except Exception as e:
-        raise HTTPException(400, f"Invalid token: {e}")
-    return {"ok": True, "bot": me.get("username"), "name": me.get("first_name")}
+    return await _verify(Binding(**data), request)

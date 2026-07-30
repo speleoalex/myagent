@@ -1,21 +1,25 @@
-"""AutonomyService — wakes live agents on a heartbeat and on queued events.
+"""AutonomyService — runs the due tasks of live agents.
+
+There is exactly ONE thing that makes an agent run unattended: a due Task (see
+``app.models.Task`` and ``app.storage.tasks``). No separate heartbeat — a
+routine is just a task with a cron expression — so "when does this agent act,
+and to do what" is answerable by looking at one list.
 
 An agent with ``live: true`` (and ``enabled``) is autonomous: a single
 supervisor loop (5s resolution) scans the agent store fresh on every round —
 so toggling ``live`` from the UI takes effect within one scan, with no restart
-(``live: false`` IS the kill switch) — and spawns one wake task per due agent.
-Because ``live`` is persisted in the agent's JSON, a started agent restarts by
-itself after a service or machine reboot.
+(``live: false`` IS the kill switch) — and spawns one wake task per agent with
+work due. Because ``live`` is persisted in the agent's JSON, a started agent
+restarts by itself after a service or machine reboot.
 
 A wake is one normal executor turn against the dedicated named session
 ``autonomous_<agent_id>``, driven through the LiveRunManager (cancel/timeout/
 attach come for free) and recorded with the same helpers as connector chats.
-The wake prompt lists the due events and the standing instructions; a reply of
-exactly ``NOOP`` with zero tool calls skips session persistence entirely (a
-30-min heartbeat must not append ~50 junk turns/day), but the events are still
-marked ``reacted`` with ``reaction: null`` — "seen, chose not to act" is a
-legitimate outcome. Any tool call means the turn is persisted (actions must be
-auditable).
+The wake prompt lists the due tasks; a reply of exactly ``NOOP`` with zero tool
+calls skips session persistence entirely (a 20-min routine must not append ~70
+junk turns/day), but the tasks still count as run, with no ``last_reply`` —
+"seen, chose not to act" is a legitimate outcome. Any tool call means the turn
+is persisted (actions must be auditable).
 
 Single-wake guarantee, three layers: the ``_wakes`` task map, the
 ``live.is_active`` check before ``live.start`` (which silently overwrites!),
@@ -23,18 +27,18 @@ and the drive taking ``named_sessions.lock(sid)`` — the same lock
 ``_chat_named`` uses, so a user chatting in the autonomous session and a wake
 can never interleave.
 
-Scheduling is fixed-delay-from-completion (+ jitter): ``next_wake = wake end +
-interval_s + jitter`` — a slow local-model turn never causes overlapping ticks
-or a backlog. Per-agent state (last/next wake, error streak, pause, wake
-history) is persisted to ``<autonomy>/<agent_id>/state.json``, so a restart
-causes no wake storm.
+Rescheduling belongs to TaskStore.advance and happens only after a successful
+wake: a failed run is retried, bounded by ``max_wakes_per_hour`` and by the
+auto-pause after ``max_consecutive_errors``. Several tasks due at the same
+moment share ONE wake (and one rate-limit slot), which is also why a slow
+local-model turn can never build up a backlog of overlapping runs. Per-agent
+runtime state (last wake, error streak, pause, wake history) is persisted to
+``<autonomy>/<agent_id>/state.json``, so a restart causes no wake storm.
 """
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-import random
 import re
 import shutil
 from datetime import datetime, timedelta
@@ -78,8 +82,19 @@ def _short(text: str, limit: int = 200) -> str:
     return text if len(text) <= limit else text[:limit].rstrip() + "…"
 
 
-def build_wake_prompt(agent: Agent, cfg: AutonomousConfig, events: list[dict],
-                      granted_tools: set[str] | None = None) -> str:
+def _when(task: dict) -> str:
+    """How a task's schedule reads in the prompt: the cron expression is what
+    the model can act on (it may be asked to change it), the clock time alone
+    is not."""
+    if task.get("cron"):
+        return f"recurring, cron {task['cron']}"
+    return "one-off" + (f", due {(task.get('next_at') or '')[11:16]}"
+                        if task.get("next_at") else "")
+
+
+def build_wake_prompt(agent: Agent, cfg: AutonomousConfig, tasks: list[dict],
+                      granted_tools: set[str] | None = None,
+                      next_task: dict | None = None) -> str:
     # Group wildcards (<category>/*) in agent.tools hide the concrete ids, so
     # the caller passes the expanded set; fall back to the raw list when not.
     granted = granted_tools if granted_tools is not None else set(agent.tools)
@@ -87,53 +102,43 @@ def build_wake_prompt(agent: Agent, cfg: AutonomousConfig, events: list[dict],
         f"[AUTONOMOUS WAKE — {now_iso()}]",
         "You are running unattended; no user is reading this reply.",
     ]
-    # Events come BEFORE the standing instructions, and they are phrased as
-    # orders rather than as a bulletin. Measured failure: with the instructions
-    # first and the events as a bare bullet list, master ran the (imperative,
-    # specific) routine, ignored a scheduled reminder holding a message for the
-    # user, and replied NOOP — after which the event was archived as handled and
-    # was gone. A one-shot task loses a priority contest against a recurring one
-    # every time, so it must not be in the same list at all.
-    if events:
-        lines.append(f"\nTasks queued for you ({len(events)}) — handle every one "
+    # The due tasks are phrased as orders, not as a bulletin. Measured failure
+    # (when standing instructions were a separate concept, listed first): the
+    # model ran the imperative, specific routine, ignored a scheduled reminder
+    # holding a message for the user, and replied NOOP — after which the event
+    # was archived as handled and was gone. Everything is one list now, but the
+    # phrasing is what stopped that, so keep it.
+    if tasks:
+        lines.append(f"\nTasks due now ({len(tasks)}) — handle every one "
                      "of them in THIS wake:")
-        for i, e in enumerate(events, 1):
-            payload = e.get("payload") or {}
-            text = payload.get("text") if isinstance(payload, dict) else None
-            if not text:
-                text = json.dumps(payload, ensure_ascii=False)
-            due = (e.get("due_at") or "")[11:16]
-            src = e.get("source") or ""
-            tag = e.get("type", "event") + (f", due {due}" if due else "") \
-                + (f", from {src}" if src else "")
-            lines.append(f"{i}. [{tag}] {_short(text, 300)}")
-        # "Last chance" is literally true (consume() archives them after a
-        # successful turn) and it is what stops the model from deferring.
+        for i, t in enumerate(tasks, 1):
+            lines.append(f"{i}. [{_when(t)}] {_short(t.get('prompt') or '', 300)}")
+        # "Last chance" is literally true (a successful turn advances the task
+        # to its next occurrence) and it is what stops the model from deferring.
         lines.append(
-            "Each one was queued earlier, usually by you on the user's behalf. "
+            "Each one was scheduled earlier, usually by you on the user's behalf. "
             "If a task carries or asks for something the user should see, send it "
-            "with notify_user now: once this wake ends the task is archived and "
-            "you will never be shown it again.")
-        if "schedule_task" in granted:
+            "with notify_user now: once this wake ends the task moves on and you "
+            "will not be shown it again.")
+        if "manage_tasks" in granted:
             # Observed: given "handle it now", the model re-queued the very task
-            # it was handed (three wakes for one proverb) — schedule_task is an
+            # it was handed (three wakes for one proverb) — scheduling is an
             # available action and "later" is the cheapest plan. It is due; the
             # only correct time is now.
-            lines.append("Do NOT use schedule_task on a task already listed above: "
+            lines.append("Do NOT schedule a new task for anything listed above: "
                          "it is due now, so carry it out in this wake.")
-        lines.append("(After a failure, events may be delivered again.)")
+        lines.append("(After a failure, a task may be presented again.)")
     else:
-        lines.append("\nNo pending tasks — this is a periodic heartbeat.")
-    if cfg.instructions.strip():
-        scope = ", on top of the tasks above" if events else ""
-        lines += [f"\nStanding instructions (the routine for every wake{scope}):",
-                  cfg.instructions.strip()]
+        lines.append("\nNo task is due — this is a manual wake.")
+    if next_task:
+        lines.append(f"\nNext scheduled: {next_task.get('next_at') or '?'} — "
+                     f"{_short(next_task.get('prompt') or '', 120)}")
     if "notify_user" in granted:
         lines.append("\nTo contact the user, use the notify_user tool. "
                      "Your reply text is only logged.")
-    if "schedule_task" in granted:
-        lines.append("You can schedule future work for yourself with the "
-                     "schedule_task tool.")
+    if "manage_tasks" in granted:
+        lines.append("You can schedule future work for yourself, and review or "
+                     "cancel what is already scheduled, with the manage_tasks tool.")
     if "call_agent" in granted:
         # Load-bearing, not a courtesy: a router-style agent typically holds no
         # tool that can observe anything (master has none), so delegation is its
@@ -147,10 +152,10 @@ def build_wake_prompt(agent: Agent, cfg: AutonomousConfig, events: list[dict],
                      "the agents listed in your system prompt: there is no user "
                      "to ask, so gather the facts yourself before reporting. "
                      "Never state anything you have not verified this way.")
-    if events:
+    if tasks:
         # NOT the bare "reply NOOP" line here: offered as the closing option, it
         # reads as permission to skip the tasks above. Asking for a summary also
-        # makes the archived `reaction` say what happened to them.
+        # makes the task's recorded `last_reply` say what happened to them.
         lines.append("When every task above is handled, close with one short line "
                      "saying what you did (logged, not sent). Reply exactly NOOP "
                      "only if there was genuinely nothing to do for any of them.")
@@ -161,20 +166,20 @@ def build_wake_prompt(agent: Agent, cfg: AutonomousConfig, events: list[dict],
 
 class AutonomyService:
     def __init__(self, stores, tool_registry, named_sessions,
-                 live, events, base_dir: Path):
+                 live, tasks, base_dir: Path):
         self.stores = stores
         self.tool_registry = tool_registry
         # Rotation/archival of the autonomous sessions is the named store's own
         # policy (save_rotating), so no web SessionStore handle is needed here.
         self.named = named_sessions
         self.live = live
-        self.events = events
+        self.tasks = tasks
         self.base = Path(base_dir)
         self._loop_task: asyncio.Task | None = None
         self._wakes: dict[str, asyncio.Task] = {}
         self._kick = asyncio.Event()
         self._states: dict[str, dict] = {}  # agent_id -> persisted state (cached)
-        events.on_append = self.notify
+        tasks.on_change = self.notify
 
     # ------------------------------------------------------------- lifecycle
     def start(self) -> None:
@@ -200,7 +205,7 @@ class AutonomyService:
         self._wakes.clear()
 
     def notify(self, agent_id: str) -> None:
-        """An event was queued: wake the supervisor loop immediately."""
+        """A task changed: wake the supervisor loop immediately."""
         self._kick.set()
 
     # ------------------------------------------------------------ state file
@@ -250,8 +255,8 @@ class AutonomyService:
             except Exception:
                 continue
             aid = agent.id
-            task = self._wakes.get(aid)
-            if task is not None and not task.done():
+            running = self._wakes.get(aid)
+            if running is not None and not running.done():
                 continue  # one wake at a time (layer 1)
             cfg = agent.autonomous or AutonomousConfig()
             st = self._state(aid)
@@ -264,12 +269,10 @@ class AutonomyService:
                     self._save_state(aid, st)
                 else:
                     continue
-            due_heartbeat = cfg.interval_s > 0 and now >= (st.get("next_wake") or "")
-            due_events = self.events.pending_count(aid, now) > 0
-            if not (due_heartbeat or due_events):
+            if not self.tasks.due(aid, now):
                 continue
             if len(self._wakes_last_hour(st)) >= cfg.max_wakes_per_hour:
-                continue  # rate-limited: events wait, nothing is lost
+                continue  # rate-limited: tasks wait, nothing is lost
             self._wakes[aid] = asyncio.create_task(self._wake(agent, cfg))
 
     # ------------------------------------------------------------- one wake
@@ -285,17 +288,25 @@ class AutonomyService:
         result = {"reply": "", "tool_calls": 0, "error": None}
         timed_out = False
         stopped = False
-        wake_events: list[dict] = []
+        wake_tasks: list[dict] = []
         try:
             # Layer 2: live.start would silently overwrite an active run.
             if self.live.is_active(sid):
                 return
-            wake_events = self.events.pending(aid)
+            wake_tasks = self.tasks.due(aid, started)
+            due_ids = {t["id"] for t in wake_tasks}
+            # What comes AFTER this wake, so the agent can answer "what's next?"
+            # without a tool call. Skipping the ones running right now: they are
+            # in the list above and will have moved on by the time it matters.
+            upcoming = next((t for t in self.tasks.list_all(aid)
+                             if t.get("enabled", True) and t.get("next_at")
+                             and t["id"] not in due_ids), None)
             executor = await AgentExecutor.create_for_agent(
                 aid, self.tool_registry, self.stores)
             prompt = build_wake_prompt(
-                agent, cfg, wake_events,
-                set(self.tool_registry.expand_tool_ids(agent.tools)))
+                agent, cfg, wake_tasks,
+                set(self.tool_registry.expand_tool_ids(agent.tools)),
+                next_task=upcoming)
             drive = self._make_autonomous_drive(agent, executor, sid, prompt, result)
             run = self.live.start(sid, drive)
             try:
@@ -312,22 +323,28 @@ class AutonomyService:
             log.exception("wake of '%s' failed", aid)
             result["error"] = str(e) or type(e).__name__
         finally:
-            self._finish_wake(agent, cfg, wake_events, result, timed_out,
+            self._finish_wake(agent, cfg, wake_tasks, result, timed_out,
                               stopped, manual)
             self._wakes.pop(aid, None)
             self._kick.set()  # re-evaluate immediately (more due agents?)
 
     def _finish_wake(self, agent: Agent, cfg: AutonomousConfig,
-                     wake_events: list[dict], result: dict,
+                     wake_tasks: list[dict], result: dict,
                      timed_out: bool, stopped: bool, manual: bool) -> None:
         aid = agent.id
         st = self._state(aid)
         failed = timed_out or result["error"] is not None
         if failed:
-            # Events stay pending (reacted: false) for redelivery.
+            # The tasks keep their next_at, so they stay due and are retried —
+            # but they DO record the attempt, or the Tasks page would keep
+            # showing the last success while nothing is getting done.
+            reason = "wake timed out" if timed_out else result["error"]
+            for t in wake_tasks:
+                self.tasks.advance(t["id"], "timeout" if timed_out else "error",
+                                   _short(reason or "", 120), reschedule=False)
             st["consecutive_errors"] = st.get("consecutive_errors", 0) + 1
             st["last_result"] = "timeout" if timed_out else "error"
-            st["last_error"] = "wake timed out" if timed_out else result["error"]
+            st["last_error"] = reason
             if st["consecutive_errors"] >= cfg.max_consecutive_errors:
                 st["paused"] = True
                 st["paused_agent_mtime"] = self._agent_mtime(aid)
@@ -337,21 +354,17 @@ class AutonomyService:
             st["last_result"] = "stopped"  # user intervention: not an error
         else:
             noop = result["tool_calls"] == 0 and _NOOP_RE.match(result["reply"] or "")
-            reaction = None
+            reply = ""
             if not noop:
                 tools = f" [tools: {result['tool_calls']}]" if result["tool_calls"] else ""
-                reaction = _short(result["reply"]) + tools
-            if wake_events:
-                self.events.consume(aid, [e["id"] for e in wake_events], reaction)
+                reply = _short(result["reply"]) + tools
+            # Only now do the tasks move on: same run-once-on-success contract
+            # the event queue had. All tasks of one wake share one outcome.
+            for t in wake_tasks:
+                self.tasks.advance(t["id"], "noop" if noop else "acted", reply)
             st["consecutive_errors"] = 0
             st["last_result"] = "noop" if noop else "acted"
             st.pop("last_error", None)
-        if cfg.interval_s > 0:
-            jitter = random.uniform(0, min(30.0, cfg.interval_s * 0.1))
-            nxt = datetime.now() + timedelta(seconds=cfg.interval_s + jitter)
-            st["next_wake"] = nxt.isoformat(timespec="seconds")
-        else:
-            st["next_wake"] = ""  # events only
         self._save_state(aid, st)
         log.info("wake of '%s' finished: %s%s", aid, st["last_result"],
                  " (manual)" if manual else "")
@@ -438,9 +451,11 @@ class AutonomyService:
 
     # ------------------------------------------------------------ public API
     async def wake_now(self, agent_id: str) -> bool:
-        """Manual trigger (UI/tests): bypasses heartbeat schedule, rate limit
-        and pause — an explicit user action. Returns False when the agent is
-        unknown/disabled or a wake is already running."""
+        """Manual trigger (UI/tests): runs whatever is due right now, bypassing
+        the rate limit and the pause — an explicit user action. With nothing
+        due it is still a real turn (the prompt says so), which is what makes
+        it a usable smoke test. Returns False when the agent is unknown or
+        disabled, or when a wake is already running."""
         data = self.stores.agents.get(agent_id)
         if data is None or not data.get("enabled", True):
             return False
@@ -468,14 +483,16 @@ class AutonomyService:
         self._kick.set()
 
     def drop_agent(self, agent_id: str) -> None:
-        """Forget a deleted agent: cached runtime state AND its on-disk
-        directory (state.json + event queues). This module owns that layout —
-        callers (the delete endpoint) must not reach into it themselves."""
+        """Forget a deleted agent: cached runtime state, its on-disk directory
+        (state.json) and its tasks — nothing would ever run them again. This
+        module owns that layout: callers (the delete endpoint) must not reach
+        into it themselves."""
         self._states.pop(agent_id, None)
         self._wakes.pop(agent_id, None)
         agent_dir = self.base / agent_id
         if agent_dir.is_dir():
             shutil.rmtree(agent_dir, ignore_errors=True)
+        self.tasks.delete_for_agent(agent_id)
 
     def status(self) -> dict:
         """Per-agent runtime status for the UI/API."""
@@ -505,16 +522,22 @@ class AutonomyService:
                 state = "error"
             else:
                 state = "idle"
+            agent_tasks = self.tasks.list_all(aid)
             out[aid] = {
                 "state": state,
                 "live": live_flag,
                 "last_wake": st.get("last_wake", ""),
                 "last_result": st.get("last_result", ""),
                 "last_error": st.get("last_error", ""),
-                "next_wake": st.get("next_wake", "") if cfg.interval_s > 0 else "",
+                # Not a stored field any more: the next wake IS the soonest
+                # scheduled task, so there is nothing to keep in sync.
+                "next_wake": next((t["next_at"] for t in agent_tasks
+                                   if t.get("enabled", True) and t.get("next_at")), ""),
                 "consecutive_errors": st.get("consecutive_errors", 0),
                 "wakes_last_hour": len(self._wakes_last_hour(st)),
-                "pending_events": self.events.pending_count(aid, now),
+                "tasks": len(agent_tasks),
+                "due_tasks": sum(1 for t in agent_tasks if t.get("enabled", True)
+                                 and t.get("next_at") and t["next_at"] <= now),
                 "session_id": session_id_for(aid),
             }
         return out

@@ -12,7 +12,7 @@ import contextlib
 import logging
 import re
 
-from myagent_connectors.models import Binding
+from myagent_connectors.models import Binding, _as_handle
 from myagent_connectors.core import CoreClient
 from myagent_connectors.storage import GrantStore
 
@@ -99,12 +99,31 @@ class BaseConnector:
     async def stop(self) -> None:
         raise NotImplementedError
 
-    async def send(self, chat_id, text: str) -> None:
+    async def send(self, chat_id, text: str) -> bool:
+        """Deliver text to a chat. Returns whether it went out.
+
+        Best-effort by contract — the inbound path must not turn a failed reply
+        into an exception, or one user who blocked the bot would drive the poll
+        loop into auto-pause. But the RESULT matters to notify_user, which tells
+        an agent (and through it the user) that a message was sent: without a
+        return value it reported success on a dead token."""
         raise NotImplementedError
 
+    async def verify(self) -> dict:
+        """Check the binding's credentials and describe the account they open.
+
+        Returns a small dict for the UI (Telegram: ``{"bot": …, "name": …}``) or
+        raises with a readable reason. Lives here so the router can offer "test
+        this token" without importing a channel class and refusing every other
+        type — the registry promises that adding a channel needs no changes
+        elsewhere, and this is what makes that true."""
+        raise NotImplementedError(
+            f"the '{self.type}' channel does not support testing credentials"
+        )
+
     # ------------------------------------------------------- access control
-    def _in_allowlist(self, user_id: int, username: str | None) -> bool:
-        """A user is allowed if their numeric id OR their @username is listed."""
+    def _in_allowlist(self, user_id: str, username: str | None) -> bool:
+        """A user is allowed if their id OR their @username is listed."""
         if user_id in self.binding.allowed_ids:
             return True
         if username:
@@ -113,10 +132,14 @@ class BaseConnector:
                 return True
         return False
 
-    def quick_authorized(self, user_id: int, username: str | None) -> bool:
+    def quick_authorized(self, user_id, username: str | None) -> bool:
         """Read-only authorization check (no password consumption). Used by the
         transport to decide whether to bother downloading a file before the full
-        pipeline runs."""
+        pipeline runs.
+
+        Normalizes like process_message: this is the other entry point a
+        transport calls directly, and it is called with the API's native id."""
+        user_id = _as_handle(user_id)
         mode = self.binding.access_mode
         if mode == "open":
             return True
@@ -126,7 +149,7 @@ class BaseConnector:
             return user_id in self.grants.get(self.binding.id)
         return False
 
-    def _authorized(self, user_id: int, username: str | None,
+    def _authorized(self, user_id: str, username: str | None,
                     text: str) -> tuple[bool, str | None]:
         """Return (allowed, reply_if_denied_or_note). For password mode this may
         consume a ``/start <password>`` and grant access."""
@@ -170,15 +193,20 @@ class BaseConnector:
         return None
 
     # ------------------------------------------------------------- main flow
-    async def process_message(self, chat_id, user_id: int, text: str,
+    async def process_message(self, chat_id, user_id, text: str,
                               username: str | None = None,
                               attachments: list[dict] | None = None) -> None:
         """Full inbound pipeline: access → commands → agent → reply.
 
         ``attachments`` is a list of Attachment dicts (image/text) the transport
-        already downloaded and prepared for the agent."""
+        already downloaded and prepared for the agent.
+
+        ``user_id`` is normalized to a string HERE, at the one entry point, so a
+        transport may hand over whatever its API gives it (Telegram: an int) and
+        everything downstream compares identifiers of one type."""
         text = text or ""
         attachments = attachments or None
+        user_id = _as_handle(user_id)
 
         # Log every sender so the admin can discover ids/usernames to authorize
         # (visible via `journalctl -u myagent`).

@@ -75,13 +75,23 @@ mkdir -p "$TARGET_DIR"
 rsync -a --delete --exclude __pycache__ --exclude '*.pyc' \
     "$SOURCE_DIR/plugin/" "$TARGET_DIR/"
 
-# Voice notes only. Never --upgrade: the core's own dependencies must not move
-# underneath a working install just because a plugin was added.
-echo "Installing the voice-transcription dependency (~380 MB, first time only)…"
-if ! "$INSTALL_DIR/server/.venv/bin/pip" install -q -r "$SOURCE_DIR/plugin/requirements.txt"; then
-    echo "WARNING: faster-whisper could not be installed — everything works" >&2
-    echo "         except Telegram voice notes." >&2
-fi
+# The plugin's shared requirements, then each channel's own. Never --upgrade: the
+# core's dependencies must not move underneath a working install just because a
+# plugin was added. A channel whose deps fail to install is still copied — it
+# reports itself as failed at startup instead of breaking the others.
+PIP="$INSTALL_DIR/server/.venv/bin/pip"
+for req in "$SOURCE_DIR/plugin/requirements.txt" \
+           "$SOURCE_DIR"/plugin/myagent_connectors/channels/*/requirements.txt; do
+    [ -f "$req" ] || continue
+    # Skip files that are only comments (the shared one currently is).
+    grep -qvE '^\s*(#|$)' "$req" || continue
+    name=$(basename "$(dirname "$req")")
+    echo "Installing dependencies for '$name' (first time: this can be ~380 MB)…"
+    if ! "$PIP" install -q -r "$req"; then
+        echo "WARNING: dependencies for '$name' could not be installed." >&2
+        echo "         Everything else works; that channel degrades." >&2
+    fi
+done
 
 # Prove the core still imports: a half-finished pip run must not leave a server
 # that cannot start.

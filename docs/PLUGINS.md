@@ -76,6 +76,13 @@ unnecessary. What the connectors plugin uses:
 | `app.engine.executor.AgentExecutor` | build an executor for an agent |
 | `app.models.ChatRequest` | the validated turn request |
 
+A plugin can also be *read* by a core tool through its `app.state` key, which is
+how `notify_user` turns *"message Alessandro on Telegram"* into a chat id: the
+connectors plugin exposes `resolve_recipients(name, channel)` and the tool calls
+it when given a name instead of an id. Keep such a seam a plain method returning
+`(results, error)` — an error the caller can read and correct beats an exception,
+because the caller here is a language model.
+
 These are internal APIs, not a frozen surface: a plugin that imports them is
 choosing to follow the core. Keep the list short and stated, so a core
 refactoring knows what it can break.

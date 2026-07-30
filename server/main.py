@@ -39,13 +39,13 @@ from app.storage.store import JsonStore
 from app.storage.sessions import SessionStore
 from app.storage.channel_sessions import NamedSessionStore
 from app.storage.memory import MemoryStore
-from app.storage.events import EventStore
+from app.storage.tasks import TaskStore
 from app.tools.registry import ToolRegistry
 from app.tools.internal import (
     autonomy_control_handler,
     call_agent_handler,
+    manage_tasks_handler,
     notify_user_handler,
-    schedule_task_handler,
 )
 from app.tools.memory_tools import (
     memory_search_handler,
@@ -54,7 +54,7 @@ from app.tools.memory_tools import (
 )
 from app.plugins import load_plugins, start_plugins, stop_plugins
 from app.routers import (agents, tools, llm_models, chat, mcp, system, sessions,
-                         autonomy, plugins)
+                         autonomy, plugins, tasks)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -170,13 +170,15 @@ named_sessions = NamedSessionStore(SESSIONS_DIR, archive=session_store)
 # Manages background (client-decoupled) chat generations for resume/stop
 live_runs = LiveRunManager()
 
-# Autonomy: persistent per-agent event queues + the scheduler that wakes live
-# agents (heartbeat + events). Constructed here, started in the lifespan.
+# Autonomy: the scheduled-task list + the scheduler that runs the due tasks of
+# live agents. Tasks live in CONFIG_DIR (user intent, backed up with the rest);
+# AUTONOMY_DIR holds only the scheduler's runtime state. Constructed here,
+# started in the lifespan.
 ensure_autonomy()
-event_store = EventStore(AUTONOMY_DIR)
+task_store = TaskStore(CONFIG_DIR / "tasks")
 autonomy_service = AutonomyService(
     stores, tool_registry, named_sessions,
-    live_runs, event_store, AUTONOMY_DIR,
+    live_runs, task_store, AUTONOMY_DIR,
 )
 # notify_user is registered here, not with the others above: besides sending, it
 # appends the message to the target chat's OWN conversation, so it needs the named
@@ -190,10 +192,10 @@ tool_registry.register_internal(
     "notify_user",
     functools.partial(notify_user_handler, _named=named_sessions, _state=app.state),
 )
-# schedule_task needs the event store: bound here (underscore name so a model
-# hallucinating an "_events" argument can't collide silently — it just errors).
+# manage_tasks needs the task store: bound here (underscore name so a model
+# hallucinating a "_tasks" argument can't collide silently — it just errors).
 tool_registry.register_internal(
-    "schedule_task", functools.partial(schedule_task_handler, _events=event_store)
+    "manage_tasks", functools.partial(manage_tasks_handler, _tasks=task_store)
 )
 # autonomy_control lets an agent switch ITS OWN live mode on/off from a chat
 # ("start yourself" / "stop yourself" / "are you active?").
@@ -210,7 +212,7 @@ app.state.sessions = session_store
 app.state.named_sessions = named_sessions
 app.state.live = live_runs
 app.state.memory = memory_store
-app.state.events = event_store
+app.state.tasks = task_store
 app.state.autonomy = autonomy_service
 
 # Include API routers
@@ -222,6 +224,7 @@ app.include_router(mcp.router, prefix="/api/mcp", tags=["mcp"])
 app.include_router(sessions.router, prefix="/api/sessions", tags=["sessions"])
 app.include_router(system.router, prefix="/api/system", tags=["system"])
 app.include_router(autonomy.router, prefix="/api/autonomy", tags=["autonomy"])
+app.include_router(tasks.router, prefix="/api/tasks", tags=["tasks"])
 app.include_router(plugins.router, prefix="/api/plugins", tags=["plugins"])
 
 # Optional plugins installed under ~/myagent/plugins (see docs/PLUGINS.md).

@@ -1,0 +1,38 @@
+{
+  "name": "Manage Tasks",
+  "description": "Your own scheduled tasks: what you will do unattended, and when. 'list' answers \"what is my next task / what am I supposed to do?\". 'add' schedules new work — use in_s for a delay ('in one hour' = in_s 3600), cron for anything recurring ('every 20 minutes' = */20 * * * *, 'every Monday at 9' = 0 9 * * 1, 'weekdays at 7:30' = 30 7 * * 1-5). 'update' changes the schedule or the text of an existing task, 'delete' cancels one. Tasks only run while your autonomous mode is on.",
+  "internal": true,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "action": {
+        "type": "string",
+        "enum": ["list", "add", "update", "delete"],
+        "description": "list = show your scheduled tasks; add = create one; update = change one; delete = cancel one"
+      },
+      "prompt": {
+        "type": "string",
+        "description": "What to do when the task runs, written so your future self understands it without any other context. Required for 'add'."
+      },
+      "cron": {
+        "type": "string",
+        "description": "Recurring schedule, 5 cron fields 'minute hour day month weekday' (weekday 0=Sunday). Examples: '*/20 * * * *' every 20 minutes, '0 9 * * 1' Mondays at 09:00, '30 7 * * 1-5' weekdays at 07:30, '0 8 1 * *' the 1st of each month at 08:00."
+      },
+      "in_s": {
+        "type": "integer",
+        "description": "One-off: run once after this many seconds from now (3600 = in one hour). Prefer this over 'at' for relative times."
+      },
+      "at": {
+        "type": "string",
+        "description": "One-off: run once at this ISO timestamp (e.g. '2026-07-30T18:15'). Only for a wall-clock time the user actually named; it must be in the future, and you do not reliably know the current time — prefer in_s."
+      },
+      "task_id": {
+        "type": "string",
+        "description": "Which task to update or delete, as shown by 'list'."
+      }
+    },
+    "required": [
+      "action"
+    ]
+  }
+}

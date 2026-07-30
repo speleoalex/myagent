@@ -24,9 +24,9 @@ CONTACTS_DIR = STATE_DIR / "contacts"  # address book (name + messaging ids)
 # a directory: it is a single small document.
 STATE_FILE = STATE_DIR / "state.json"
 
-# --- connector tuning -------------------------------------------------------
-# Telegram long-poll timeout (seconds). getUpdates blocks up to this long.
-TELEGRAM_POLL_TIMEOUT = int(os.environ.get("MYAGENT_TELEGRAM_POLL_TIMEOUT") or 30)
+# --- shared tuning ----------------------------------------------------------
+# Only knobs that belong to EVERY channel live here; a transport's own settings
+# (e.g. a long-poll timeout) belong to its channel module.
 # How long one agent turn may take before the connector gives up on it. As a
 # separate server this came for free from the HTTP request timeout; in-process
 # there is no socket to time out, and without a wall a wedged turn would leave

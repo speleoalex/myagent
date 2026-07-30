@@ -1,0 +1,15 @@
+{
+  "type": "telegram",
+  "label": "Telegram",
+  "module": "channel.py",
+  "class": "TelegramConnector",
+  "hints": {
+    "token": "connectors.telegram.tokenHint",
+    "allowed": "connectors.telegram.allowedHint",
+    "empty": "connectors.telegram.emptyHint"
+  },
+  "handle": {
+    "label": "Telegram id or @username",
+    "example": "471091560"
+  }
+}

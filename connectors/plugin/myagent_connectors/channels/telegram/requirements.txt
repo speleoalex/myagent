@@ -1,0 +1,5 @@
+# Telegram voice notes: transcription runs through the document_extract tool,
+# which needs this in myagent's virtualenv (plus ffmpeg on the PATH). Skip it and
+# the channel still works — voice messages answer "transcription unavailable".
+# ~380 MB with ctranslate2/onnxruntime.
+faster-whisper>=1.0.0

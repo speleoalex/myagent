@@ -8,6 +8,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
 
+from myagent_connectors.channels.registry import all_channels
 from myagent_connectors.services import services
 
 router = APIRouter()
@@ -19,7 +20,10 @@ class EnabledReq(BaseModel):
 
 @router.get("/status")
 async def get_status(request: Request):
-    return services(request).manager.summary()
+    """Plugin state plus every discovered channel — broken ones included, with
+    their error, so "installed but not loading" is visible instead of looking
+    like "not installed"."""
+    return {**services(request).manager.summary(), "channels": all_channels()}
 
 
 @router.post("/stop")

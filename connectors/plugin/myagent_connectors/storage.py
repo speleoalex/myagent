@@ -27,14 +27,20 @@ class GrantStore:
     def __init__(self, base_dir: Path):
         self._store = JsonStore(Path(base_dir))
 
-    def get(self, binding_id: str) -> set[int]:
+    def get(self, binding_id: str) -> set[str]:
+        """Ids as STRINGS, matching the rest of the access-control path. Older
+        files hold ints (grants predate multi-channel support), so they are
+        coerced on read rather than migrated."""
         data = self._store.get(binding_id) or {}
-        try:
-            return {int(u) for u in data.get("user_ids", [])}
-        except (TypeError, ValueError):
+        raw = data.get("user_ids", [])
+        if not isinstance(raw, (list, tuple)):
             return set()
+        return {str(u).strip() for u in raw if str(u).strip()}
 
-    def add(self, binding_id: str, user_id: int) -> None:
+    def add(self, binding_id: str, user_id) -> None:
+        user_id = str(user_id).strip()
+        if not user_id:
+            return
         ids = self.get(binding_id)
         if user_id in ids:
             return

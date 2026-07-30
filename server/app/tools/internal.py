@@ -9,8 +9,9 @@ from datetime import datetime, timedelta
 
 # Module-level on purpose (no import cycle: executor -> registry, and neither
 # imports this module; main.py wires the handlers after both are loaded).
+from app.engine import cron as cron_parser
 from app.engine.executor import AgentExecutor
-from app.models import AutonomousConfig
+from app.models import Task
 from app.storage.sessions import now_iso
 
 log = logging.getLogger(__name__)
@@ -165,26 +166,65 @@ def _connector_for(state, binding_id: str):
     return connector, ""
 
 
+def _resolve_by_name(state, to: str, channel: str):
+    """Ask the connectors plugin to turn a person's name into (binding, chat_id).
+
+    Returns ``(binding_id, [chat_id], error)``. The plugin owns the address book
+    and the channel labels, so the resolution lives there; this only bridges it
+    to the tool's arguments.
+    """
+    services = getattr(state, "connectors", None) if state is not None else None
+    if services is None:
+        return "", [], ("ERROR: the connectors plugin is not installed on this "
+                        "server, so there is no messaging channel to notify.")
+    resolver = getattr(services, "resolve_recipients", None)
+    if resolver is None:
+        return "", [], ("ERROR: this connectors plugin cannot look recipients up "
+                        "by name; pass binding_id and chat_id.")
+    found, error = resolver(to, channel)
+    if error or not found:
+        return "", [], f"ERROR: {error or 'no recipient resolved'}"
+    return found[0].binding_id, [r.chat_id for r in found], ""
+
+
 async def notify_user_handler(
     text: str = "", binding_id: str = "", chat_id: str = "",
+    to: str = "", channel: str = "",
     executor=None, _named=None, _state=None, **kwargs,
 ) -> str:
-    """Push a message to the user through a messaging channel (Telegram).
+    """Push a message to a person through a messaging channel.
 
-    The default target comes from the agent's ``autonomous.notify_binding_id``
-    / ``notify_chat_id``; explicit arguments override it. The connector is
-    reached in-process — ``_state`` is the app state, read at call time, so the
-    plugin can be registered after this handler is bound."""
+    Two ways to say where it goes, in this order of precedence:
+
+    1. ``binding_id`` + ``chat_id`` — explicit, and what an autonomous agent's
+       configured default uses.
+    2. ``to`` (+ optional ``channel``) — a name from the address book, resolved
+       by the connectors plugin. This is what makes *"message Alessandro on
+       Telegram"* work without the model knowing any numeric id.
+
+    The connector is reached in-process; ``_state`` is the app state, read at
+    call time, so the plugin can be registered after this handler is bound."""
     if not (text or "").strip():
         return "ERROR: 'text' is required"
     cfg = getattr(getattr(executor, "agent", None), "autonomous", None)
     binding_id = _or_configured(binding_id, cfg and cfg.notify_binding_id)
     chat_id = _or_configured(chat_id, cfg and cfg.notify_chat_id)
     recipients = _split_chat_ids(chat_id)
+    to = _or_configured(to, "")
+    channel = _or_configured(channel, "")
+
+    # A name is used only when no explicit chat id was given (or configured):
+    # an agent's configured target must keep winning, and a model that passes
+    # both is telling us the id it already knows.
+    if to and not recipients:
+        binding_id, recipients, error = _resolve_by_name(_state, to, channel)
+        if error:
+            return error
     if not binding_id or not recipients:
-        return ("ERROR: no notification target. Pass binding_id and chat_id, "
-                "or set notify_binding_id / notify_chat_id in the agent's "
-                "autonomous configuration.")
+        return ("ERROR: no notification target. Pass 'to' with a contact name "
+                "(optionally 'channel'), or binding_id and chat_id, or set "
+                "notify_binding_id / notify_chat_id in the agent's autonomous "
+                "configuration.")
 
     connector, error = _connector_for(_state, binding_id)
     if connector is None:
@@ -197,12 +237,18 @@ async def notify_user_handler(
     sent, failed = [], []
     for one in recipients:
         try:
-            await connector.send(one, text)
+            # A connector's send() is best-effort for inbound replies, so it
+            # REPORTS failure instead of raising. Ignoring that return told the
+            # agent "message sent" over a dead token.
+            delivered = await connector.send(one, text)
         except Exception as e:
             # Detail to the log, not to the model: a transport error can quote a
             # URL that embeds the bot token.
             log.warning("notify_user: send to %s failed: %s", one, e)
             failed.append(f"{one} ({type(e).__name__})")
+            continue
+        if delivered is False:
+            failed.append(f"{one} (the channel rejected it — see the server log)")
             continue
         # The session key is asked of the connector: it derives from the
         # binding's session_prefix, and that connector is the only thing that
@@ -291,7 +337,8 @@ async def autonomy_control_handler(
                          + (f" ({st['last_error']})" if st.get("last_error") else ""))
         if st.get("next_wake"):
             lines.append(f"Next scheduled wake: {st['next_wake']}")
-        lines.append(f"Pending events: {st.get('pending_events', 0)}; "
+        lines.append(f"Scheduled tasks: {st.get('tasks', 0)} "
+                     f"({st.get('due_tasks', 0)} due now); "
                      f"wakes in the last hour: {st.get('wakes_last_hour', 0)}")
         return "\n".join(lines)
 
@@ -304,10 +351,14 @@ async def autonomy_control_handler(
         store.save(aid, data)
         # Clears any error-pause and kicks the scheduler for immediate pickup.
         await _autonomy.resume(aid)
-        cfg = data.get("autonomous") or {}
-        # The real default lives on the model — never restate the number here.
-        interval = cfg.get("interval_s", AutonomousConfig().interval_s)
-        how = f"heartbeat every {interval}s" if interval > 0 else "wakes on events only"
+        # WHEN it will run is the task list, not a setting here: an agent with
+        # no task is live and idle forever, which is worth saying out loud
+        # rather than letting the user wait for a wake that cannot come.
+        st = _autonomy.status().get(aid) or {}
+        n = st.get("tasks", 0)
+        how = (f"{n} scheduled task(s), next at {st['next_wake']}"
+               if n and st.get("next_wake") else
+               "no scheduled task yet — nothing will happen until one is added")
         if already:
             return f"Autonomous mode was already ON ({how})."
         return (f"Autonomous mode is now ON ({how}). The scheduler picks it up "
@@ -325,66 +376,171 @@ async def autonomy_control_handler(
     return msg
 
 
-async def schedule_task_handler(
-    message: str = "", in_s=None, at: str = "", repeat_s=0,
-    executor=None, _events=None, **kwargs,
+_CRON_HINT = ("Examples: '*/20 * * * *' = every 20 minutes, '0 9 * * 1' = "
+              "Mondays at 09:00, '30 7 * * 1-5' = weekdays at 07:30.")
+
+# Every rejection of an add/update opens with this. Measured twice with a small
+# local model: handed a plain "ERROR: ...", it abandoned the call and told the
+# user the task was scheduled — the one outcome worse than failing, because the
+# user then waits for something that will never happen. The error has to say
+# that NOTHING exists yet and that the fix is to call again now.
+_NOT_SCHEDULED = "ERROR: nothing was scheduled (no task exists yet)."
+_RETRY_NOW = ("Call manage_tasks again with the correction in THIS turn — do not "
+              "tell the user it is scheduled until a call succeeds and returns a "
+              "task id.")
+
+
+def _when_summary(data: dict) -> str:
+    """The human half of a confirmation: an ISO timestamp alone reads as
+    correct even when it is a day off."""
+    nxt = data.get("next_at")
+    if not nxt:
+        return "no future run scheduled"
+    try:
+        dt = datetime.fromisoformat(nxt)
+    except ValueError:
+        return nxt
+    delta = dt - datetime.now()
+    mins = int(delta.total_seconds() // 60)
+    if mins < 60:
+        rel = f"in {max(0, mins)} min"
+    elif mins < 60 * 24:
+        rel = f"in {mins // 60}h{mins % 60:02d}"
+    else:
+        rel = f"in {delta.days} days"
+    return f"{dt.strftime('%a %d %b %H:%M')} ({rel})"
+
+
+def _task_line(t: dict) -> str:
+    when = f"cron {t['cron']}" if t.get("cron") else "once"
+    # Spelled out, not raw ISO: handed "2026-08-03" the model narrated it to the
+    # user as "Saturday 3 August" (it is a Monday). It cannot do calendar
+    # arithmetic, so it must not be asked to.
+    nxt = (_when_summary(t) if t.get("next_at")
+           else ("done" if not t.get("enabled", True) else "not scheduled"))
+    line = f"- {t['id']} | next: {nxt} | {when} | {t.get('prompt', '')}"
+    if t.get("last_run"):
+        line += (f"\n    last run {t['last_run']}: {t.get('last_result') or '?'}"
+                 + (f" — {t['last_reply']}" if t.get("last_reply") else ""))
+    return line
+
+
+async def manage_tasks_handler(
+    action: str = "", prompt: str = "", cron: str = "", in_s=None, at: str = "",
+    task_id: str = "", executor=None, _tasks=None, **kwargs,
 ) -> str:
-    """Queue a future event for the CALLING agent itself (self-scheduling:
-    reminders and recurring tasks). The event's text comes back in a future
-    wake prompt. ``_events`` is bound at registration time (functools.partial),
-    never by the model."""
-    if _events is None:
-        return "ERROR: event queue not available"
+    """List/add/update/delete the CALLING agent's own scheduled tasks.
+
+    Scoped to the caller by construction (``executor.agent.id``): an agent can
+    neither see nor touch another's schedule. ``_tasks`` is bound at
+    registration time (functools.partial), never by the model."""
+    if _tasks is None:
+        return "ERROR: task store not available"
     agent = getattr(executor, "agent", None)
     if agent is None:
         return "ERROR: No executor context available"
-    if not (message or "").strip():
-        return "ERROR: 'message' is required"
+    act = (action or "").strip().lower()
+    if act not in ("list", "add", "update", "delete"):
+        return f"ERROR: invalid action {action!r} (use list, add, update or delete)"
+    aid = agent.id
+    # From the STORE, not from executor.agent: that object was loaded when the
+    # turn started, and autonomy_control may have switched live ON earlier in
+    # this same turn — reading the stale copy made one reply say "scheduled for
+    # Monday" and "your autonomous mode is OFF" in consecutive sentences.
+    stored_agent = executor.stores.agents.get(aid) or {}
+    is_live = bool(stored_agent.get("enabled", True) and stored_agent.get("live"))
 
-    due = ""
-    now = datetime.now()
-    if (at or "").strip():
+    if act == "list":
+        rows = _tasks.list_all(aid)
+        if not rows:
+            return ("You have no scheduled tasks. Use action 'add' with a prompt "
+                    "and either in_s (one-off) or cron (recurring) to create one.")
+        head = f"Your scheduled tasks ({len(rows)}):"
+        if not is_live:
+            head += (" NOTE: your autonomous mode is OFF, so none of them will "
+                     "run until it is started.")
+        return head + "\n" + "\n".join(_task_line(t) for t in rows)
+
+    # -- the task being changed must exist and be the caller's own
+    current = None
+    if act in ("update", "delete"):
+        if not (task_id or "").strip():
+            return f"ERROR: 'task_id' is required for {act} (use action 'list' to see the ids)"
+        current = _tasks.get(task_id.strip())
+        if current is None or current.get("agent_id") != aid:
+            return f"ERROR: you have no task with id {task_id!r} (use action 'list')"
+
+    if act == "delete":
+        _tasks.delete(current["id"])
+        return f"Task {current['id']} cancelled ({current.get('prompt', '')})."
+
+    # -- add / update share the schedule parsing
+    schedule: dict = {}
+    if (cron or "").strip():
+        try:
+            cron_parser.parse(cron.strip())
+        except ValueError as e:
+            return (f"{_NOT_SCHEDULED} Invalid cron expression: {e}. "
+                    f"{_CRON_HINT} {_RETRY_NOW}")
+        schedule = {"cron": cron.strip(), "at": ""}
+    elif (at or "").strip():
         try:
             when = datetime.fromisoformat(at.strip())
         except ValueError:
-            return f"ERROR: 'at' must be an ISO timestamp (e.g. 2026-07-29T08:00), got: {at!r}"
+            return (f"{_NOT_SCHEDULED} 'at' must be an ISO timestamp "
+                    f"(e.g. 2026-07-30T18:15), got: {at!r}. {_RETRY_NOW}")
         # A past 'at' is almost always a hallucinated clock: the model has no
         # reliable "now" and reuses a time it saw earlier in the conversation
         # (observed: it echoed the 16:23 from its own previous reply at 16:42).
-        # Left alone the event is due on the spot, so it fires a wake
-        # immediately instead of when asked — while the reply the user reads
-        # still promises the later time. Refuse, and hand back the real clock so
-        # the retry can be right. The tolerance covers minute-rounding and skew.
+        # Left alone the task is due on the spot, so it fires immediately
+        # instead of when asked — while the reply the user reads still promises
+        # the later time. Refuse, and hand back the real clock so the retry can
+        # be right. The tolerance covers minute-rounding and skew.
+        now = datetime.now()
         if when < now - timedelta(seconds=90):
-            return (f"ERROR: 'at' is in the past ({when.isoformat(timespec='minutes')}); "
-                    f"it is now {now.isoformat(timespec='seconds')}. Pass a future "
-                    "timestamp, or use in_s for a delay relative to now.")
-        due = when.isoformat(timespec="seconds")
+            return (f"{_NOT_SCHEDULED} 'at' is in the past "
+                    f"({when.isoformat(timespec='minutes')}); it is now "
+                    f"{now.isoformat(timespec='seconds')}. Pass a future timestamp, "
+                    f"or use in_s for a delay relative to now. {_RETRY_NOW}")
+        schedule = {"at": when.isoformat(timespec="seconds"), "cron": ""}
     elif in_s is not None:
         try:
-            seconds = int(in_s)
+            seconds = max(0, int(in_s))
         except (TypeError, ValueError):
-            return f"ERROR: 'in_s' must be a number of seconds, got: {in_s!r}"
-        due = (now + timedelta(seconds=max(0, seconds))).isoformat(timespec="seconds")
-    try:
-        repeat = max(0, int(repeat_s or 0))
-    except (TypeError, ValueError):
-        return f"ERROR: 'repeat_s' must be a number of seconds, got: {repeat_s!r}"
+            return (f"{_NOT_SCHEDULED} 'in_s' must be a number of seconds, "
+                    f"got: {in_s!r}. {_RETRY_NOW}")
+        due = datetime.now() + timedelta(seconds=seconds)
+        schedule = {"at": due.isoformat(timespec="seconds"), "cron": ""}
+    elif act == "add":
+        return (f"{_NOT_SCHEDULED} No schedule given: pass in_s (a delay in "
+                f"seconds), at (an ISO timestamp) or cron (recurring). "
+                f"{_CRON_HINT} {_RETRY_NOW}")
+
+    if act == "add":
+        if not (prompt or "").strip():
+            # Observed: the model put the task's NAME in task_id and left prompt
+            # empty. Name the parameter it actually needs, and show the shape.
+            return (f"{_NOT_SCHEDULED} The 'prompt' parameter is missing: it is "
+                    "the instruction your future self will be given (task_id is "
+                    "not a name, it identifies an EXISTING task). Example: "
+                    "action='add', prompt='check the disk space', "
+                    f"cron='0 9 * * 1'. {_RETRY_NOW}")
+        data = {"id": _tasks.new_id(), "agent_id": aid, "prompt": prompt.strip(),
+                "source": "agent", **schedule}
+    else:
+        data = {**current, **schedule, "enabled": True}
+        if (prompt or "").strip():
+            data["prompt"] = prompt.strip()
 
     try:
-        event = _events.append(
-            agent.id,
-            type="schedule" if repeat else "reminder",
-            payload={"text": message.strip()},
-            due_at=due,
-            source="tool:schedule_task",
-            repeat_s=repeat,
-        )
-    except (RuntimeError, ValueError) as e:
-        return f"ERROR: {e}"
-    out = f"Scheduled for {event['due_at']}"
-    if repeat:
-        out += f", repeating every {repeat}s"
-    if not getattr(agent, "live", False):
-        out += ". Note: this agent is not live, so the event will wait until it is started."
-    return out + f" (event {event['id']})."
+        saved = _tasks.save(Task(**data))
+    except ValueError as e:
+        return f"{_NOT_SCHEDULED} {e} {_RETRY_NOW}"
+    verb = "created" if act == "add" else "updated"
+    out = f"Task {saved['id']} {verb}: {saved['prompt']}\nNext run: {_when_summary(saved)}"
+    if saved.get("cron"):
+        out += f" (recurring, cron {saved['cron']})"
+    if not is_live:
+        out += ("\nNOTE: your autonomous mode is OFF, so this will not run until "
+                "it is started.")
+    return out

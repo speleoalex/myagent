@@ -174,10 +174,14 @@ const ConnectorsPage = {
         // Both lists are optional extras: the form must still work if either
         // fetch fails, so a failure degrades that one control, not the page.
         const [types, agents, contacts] = await Promise.all([
-            App.api('GET', '/connectors/bindings/types').catch(() => ({ types: ['telegram'] })),
+            App.api('GET', '/connectors/bindings/types').catch(() => ({ types: [] })),
             App.api('GET', '/agents?selectable=true').catch(() => []),
             App.api('GET', '/connectors/contacts').catch(() => []),
         ]);
+        // Each channel declares its label and which hint keys to show, so the
+        // form stops telling every channel to go ask @BotFather.
+        this._types = (types.types || []).length ? types.types
+                                                 : [{ type: b.type || 'telegram', label: b.type || 'telegram' }];
 
         const allowed = [
             ...(b.allowed_ids || []),
@@ -205,8 +209,8 @@ const ConnectorsPage = {
                     <div class="col-12 col-md-6">
                         <label class="form-label" for="f-type">${i18n('connectors.type')}</label>
                         <select class="form-select" id="f-type">
-                            ${(types.types || ['telegram']).map(t =>
-                                `<option value="${App.escAttr(t)}" ${t === b.type ? 'selected' : ''}>${App.esc(t)}</option>`
+                            ${this._types.map(t =>
+                                `<option value="${App.escAttr(t.type)}" ${t.type === b.type ? 'selected' : ''}>${App.esc(t.label || t.type)}</option>`
                             ).join('')}
                         </select>
                     </div>
@@ -232,7 +236,7 @@ const ConnectorsPage = {
                             <i class="bi bi-plug"></i> ${i18n('connectors.test')}
                         </button>
                     </div>
-                    <div class="form-text">${i18n('connectors.tokenHint')}</div>
+                    <div class="form-text" id="token-hint">${i18n(this._hint('token', 'connectors.tokenHint'))}</div>
                     <div id="test-result" class="mt-2"></div>
                 </div>
 
@@ -255,7 +259,7 @@ const ConnectorsPage = {
                 <div class="mb-3" id="block-allowed">
                     <label class="form-label" for="f-allowed">${i18n('connectors.allowed')}</label>
                     <input type="text" class="form-control" id="f-allowed" value="${App.escAttr(allowed)}">
-                    <div class="form-text" id="allowed-hint">${i18n('connectors.allowedHint')}</div>
+                    <div class="form-text" id="allowed-hint">${i18n(this._hint('allowed', 'connectors.allowedHint'))}</div>
                     <div id="allowed-chips" class="d-flex flex-wrap gap-2 mt-2"></div>
                 </div>
 
@@ -295,6 +299,14 @@ const ConnectorsPage = {
         this._syncAccess();
         this._renderChips();
         document.getElementById('f-access').onchange = () => this._syncAccess();
+        document.getElementById('f-type').onchange = () => {
+            // Hints and address-book chips are per channel: both follow the type.
+            const tok = document.getElementById('token-hint');
+            if (tok) tok.textContent = i18n(this._hint('token', 'connectors.tokenHint'));
+            const allow = document.getElementById('allowed-hint');
+            if (allow) allow.textContent = i18n(this._hint('allowed', 'connectors.allowedHint'));
+            this._renderChips();
+        };
         document.getElementById('f-allowed').oninput = () => this._renderChips();
         document.getElementById('btn-test').onclick = (e) => this._testToken(e.currentTarget, isEdit, b.id);
         document.getElementById('binding-form').onsubmit = (e) => this._save(e, isEdit, bindingId);
@@ -316,15 +328,36 @@ const ConnectorsPage = {
             .split(',').map(t => t.trim()).filter(Boolean);
     },
 
-    _matches(token, contact) {
-        const t = token.toLowerCase();
-        if (contact.user_id != null && t === String(contact.user_id)) return true;
-        return !!contact.username && t.replace(/^@/, '') === contact.username.toLowerCase();
+    // A contact's identifier on the channel this binding uses. Contacts carry one
+    // handle per channel type, so the same person can be reached on Telegram and
+    // elsewhere without the address book guessing which id is which.
+    _identifier(contact) {
+        return (contact.handles || {})[this._channelType()] || '';
     },
 
-    _identifier(contact) {
-        return contact.user_id != null ? String(contact.user_id)
-             : contact.username ? '@' + contact.username : '';
+    _channelType() {
+        const sel = document.getElementById('f-type');
+        return (sel && sel.value) || (this._types?.[0]?.type) || 'telegram';
+    },
+
+    /** The manifest of the channel currently selected in the form. */
+    _channel(type) {
+        const wanted = type || this._channelType();
+        return (this._types || []).find(t => t.type === wanted) || {};
+    },
+
+    /** A channel's hint key for one field, falling back to the generic one.
+     * I18n.t() degrades to the key itself when a translation is missing, so a
+     * channel may ship a key the dictionaries don't have yet without breaking. */
+    _hint(field, fallback) {
+        return this._channel().hints?.[field] || fallback;
+    },
+
+    _matches(token, contact) {
+        const handle = this._identifier(contact);
+        if (!handle) return false;
+        const norm = s => s.toLowerCase().replace(/^@/, '');
+        return norm(token) === norm(handle);
     },
 
     _renderChips() {
@@ -468,8 +501,7 @@ const ConnectorsPage = {
                    </tr></thead>
                    <tbody>${contacts.map(c => {
                        const ids = [
-                           c.user_id != null ? String(c.user_id) : '',
-                           c.username ? '@' + c.username : '',
+                           ...Object.entries(c.handles || {}).map(([k, v]) => `${k}: ${v}`),
                            c.notes || '',
                        ].filter(Boolean).join(' · ');
                        return `<tr>
@@ -488,16 +520,22 @@ const ConnectorsPage = {
 
     async renderContactForm(contactId) {
         const isEdit = !!contactId;
-        let c = { id: '', name: '', user_id: null, username: '', notes: '' };
-        if (isEdit) {
-            try {
-                c = await App.api('GET', `/connectors/contacts/${encodeURIComponent(contactId)}`);
-            } catch (err) {
-                App.toast(err.message, 'danger');
-                location.hash = '#/connectors/contacts';
-                return;
-            }
+        let c = { id: '', name: '', handles: {}, notes: '' };
+        const [loaded, types] = await Promise.all([
+            isEdit ? App.api('GET', `/connectors/contacts/${encodeURIComponent(contactId)}`)
+                        .catch(err => ({ _error: err.message }))
+                   : null,
+            App.api('GET', '/connectors/bindings/types').catch(() => ({ types: [] })),
+        ]);
+        if (loaded && loaded._error) {
+            App.toast(loaded._error, 'danger');
+            location.hash = '#/connectors/contacts';
+            return;
         }
+        if (loaded) c = loaded;
+        // One field per installed channel: the same person has a Telegram id AND
+        // a phone number, and each channel labels its own identifier.
+        this._types = types.types || [];
         App.container.innerHTML = `
         <div class="row"><div class="col-lg-8 mx-auto">
             <h3 class="mb-3">${isEdit ? i18n('connectors.contactEditTitle') : i18n('connectors.contactNewTitle')}</h3>
@@ -515,15 +553,15 @@ const ConnectorsPage = {
                     </div>
                 </div>
                 <div class="row g-3 mb-3">
+                    ${(this._types.length ? this._types : [{ type: 'telegram', label: 'Telegram' }]).map(t => `
                     <div class="col-12 col-md-6">
-                        <label class="form-label" for="c-userid">${i18n('connectors.contactUserId')}</label>
-                        <input type="text" inputmode="numeric" class="form-control" id="c-userid"
-                               value="${c.user_id != null ? App.escAttr(String(c.user_id)) : ''}">
-                    </div>
-                    <div class="col-12 col-md-6">
-                        <label class="form-label" for="c-username">${i18n('connectors.contactUsername')}</label>
-                        <input type="text" class="form-control" id="c-username" value="${App.escAttr(c.username)}">
-                    </div>
+                        <label class="form-label" for="c-h-${App.escAttr(t.type)}">
+                            ${App.esc(t.handle?.label || t.label || t.type)}</label>
+                        <input type="text" class="form-control" id="c-h-${App.escAttr(t.type)}"
+                               data-handle="${App.escAttr(t.type)}"
+                               placeholder="${App.escAttr(t.handle?.example || '')}"
+                               value="${App.escAttr((c.handles || {})[t.type] || '')}">
+                    </div>`).join('')}
                 </div>
                 <div class="mb-3">
                     <label class="form-label" for="c-notes">${i18n('connectors.contactNotes')}</label>
@@ -549,19 +587,21 @@ const ConnectorsPage = {
     async _saveContact(event, isEdit, contactId) {
         event.preventDefault();
         const val = id => document.getElementById(id).value.trim();
-        const rawId = val('c-userid');
         if (!val('c-name')) return App.toast(i18n('connectors.contactNameRequired'), 'danger');
-        if (rawId && !/^-?\d+$/.test(rawId)) {
-            return App.toast(i18n('connectors.contactUserIdNumeric'), 'danger');
-        }
-        if (!rawId && !val('c-username')) {
+        const handles = {};
+        document.querySelectorAll('[data-handle]').forEach(el => {
+            const v = el.value.trim();
+            if (v) handles[el.dataset.handle] = v;
+        });
+        // A contact nobody can be reached at is not useful — and would show up as
+        // a dead chip in every bot form.
+        if (!Object.keys(handles).length) {
             return App.toast(i18n('connectors.contactIdentifierRequired'), 'danger');
         }
         const data = {
             id: val('c-id'),
             name: val('c-name'),
-            user_id: rawId ? Number(rawId) : null,
-            username: val('c-username'),
+            handles,
             notes: document.getElementById('c-notes').value,
         };
         try {

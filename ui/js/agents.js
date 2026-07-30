@@ -80,8 +80,8 @@ const AgentsPage = {
             bits.push(`${i18n('agents.lastWake')}: ${status.last_wake} (${status.last_result || '—'})`);
         }
         if (status.next_wake) bits.push(`${i18n('agents.nextWake')}: ${status.next_wake}`);
-        if (status.pending_events) {
-            bits.push(i18n('agents.pendingEvents', { n: status.pending_events }));
+        if (status.tasks) {
+            bits.push(i18n('agents.scheduledTasks', { n: status.tasks }));
         }
         return bits;
     },
@@ -253,8 +253,6 @@ const AgentsPage = {
     // Label/min/step of the numeric ones live in numSpecs() (RangeField), the
     // single authority — stale copies here once looked authoritative and were not.
     AUTO_FIELDS: [
-        { key: 'interval_s',             el: 'f-auto-interval',     type: 'int',  dflt: 1800, group: 'grid' },
-        { key: 'instructions',           el: 'f-auto-instructions', type: 'text', dflt: '',   group: 'text' },
         { key: 'max_wakes_per_hour',     el: 'f-auto-maxwakes',     type: 'int',  dflt: 12,   group: 'grid' },
         { key: 'max_consecutive_errors', el: 'f-auto-maxerrors',    type: 'int',  dflt: 5,    group: 'grid' },
         { key: 'wake_timeout_s',         el: 'f-auto-timeout',      type: 'int',  dflt: 600,  group: 'grid' },
@@ -357,41 +355,17 @@ const AgentsPage = {
                         : { text: i18n(K + 'memthreshold.b.huge', { v: F.tokens(v), half }), warn: true };
                 },
             },
-            'f-auto-interval': {
-                // 0 is a SENTINEL, not a small period: index 0 of the step list,
-                // labelled "no heartbeat" at the left end of the track.
-                id: 'f-auto-interval', int: true, dflt: 1800, min: 0, max: 86400, sentinel: 0,
-                steps: [0, 60, 300, 600, 900, 1800, 3600, 7200, 14400, 28800, 43200, 86400],
-                label: i18n('agents.autoInterval'),
-                help: i18n(K + 'interval.help'),
-                deps: ['f-auto-maxwakes'],
-                minLabel: i18n(K + 'interval.endOff'),
-                fmt: (v) => (v === 0 ? i18n(K + 'interval.endOff') : F.seconds(v)),
-                describe: (v, c) => {
-                    if (v === 0) return { text: i18n(K + 'interval.b.off'), muted: true };
-                    // The real pace is min(3600/interval_s, max_wakes_per_hour):
-                    // the two limits multiply, and that surprises everyone once.
-                    const r = F.seconds(Math.max(v, Math.ceil(3600 / (c.maxWakes || 12))));
-                    return v <= 300 ? { text: i18n(K + 'interval.b.fast', { v: F.seconds(v), w: F.int(c.maxWakes), r }), warn: true }
-                        : v <= 3600 ? i18n(K + 'interval.b.mid', { v: F.seconds(v), r })
-                        : i18n(K + 'interval.b.slow', { v: F.seconds(v) });
-                },
-            },
             'f-auto-maxwakes': {
                 id: 'f-auto-maxwakes', int: true, dflt: 12, min: 1, max: 120,
                 steps: [1, 2, 3, 4, 6, 12, 20, 30, 60, 120],
                 label: i18n('agents.autoMaxWakes'),
                 help: i18n(K + 'maxwakes.help'),
-                deps: ['f-auto-interval'],
                 fmt: (v) => F.perHour(v),
-                describe: (v, c) => {
-                    const i = c.interval || 0;
-                    if (!i) return i18n(K + 'maxwakes.b.noHeartbeat', { n: F.int(v) });
-                    const capped = 3600 / i > v;
-                    const r = F.seconds(Math.max(i, Math.ceil(3600 / v)));
-                    return i18n(K + (capped ? 'maxwakes.b.paceCapped' : 'maxwakes.b.pace'),
-                                { n: F.int(v), i: F.seconds(i), r });
-                },
+                // The pace itself is the task list's business now; what this
+                // knob still decides is the ceiling, i.e. the shortest interval
+                // a recurring task can actually achieve.
+                describe: (v) => i18n(K + 'maxwakes.b.cap',
+                                      { n: F.int(v), r: F.seconds(Math.ceil(3600 / v)) }),
             },
             'f-auto-maxerrors': {
                 // 0 is a footgun, not "unlimited" (1 >= 0 pauses on the first
@@ -515,6 +489,37 @@ const AgentsPage = {
             <div class="col-12 col-md-6">
                 ${RangeField.render(specs[f.el], auto[f.key] ?? f.dflt)}
             </div>`).join('');
+    },
+
+    /** This agent's schedule, read-only, with links to the Tasks page.
+     *
+     *  Deliberately NOT an editable list: tasks are their own resource with
+     *  their own save cycle, and nesting a second CRUD inside this form would
+     *  make "Save agent" ambiguous. What it must not do is hide them — Live on
+     *  with no task is the one configuration that looks right and does nothing.
+     *  Rendering is delegated to TasksPage so the wording matches that page. */
+    taskBox(agentId, tasks) {
+        if (!agentId) {
+            return `<div class="form-text mb-3">${i18n('agents.tasksSaveFirst')}</div>`;
+        }
+        const rows = (tasks || []).map(t => `
+            <div class="d-flex flex-wrap gap-2 align-items-baseline small ${t.enabled ? '' : 'opacity-50'}">
+                <a href="#/tasks/${App.escAttr(t.id)}" class="text-decoration-none">${App.esc(t.prompt)}</a>
+                <span class="text-secondary">${App.esc(TasksPage.describe(t))}</span>
+                <span class="text-secondary ms-auto">${App.esc(t.enabled ? TasksPage.when(t.next_at) : i18n('tasks.disabled'))}</span>
+            </div>`).join('');
+        return `
+            <div class="border rounded p-2 mb-3">
+                <label class="form-label small mb-1">${i18n('agents.tasksTitle')}</label>
+                ${rows || `<div class="form-text text-warning-emphasis">
+                    <i class="bi bi-exclamation-triangle"></i> ${i18n('agents.tasksEmpty')}</div>`}
+                <div class="form-text">${i18n('agents.tasksHint')}</div>
+                <div class="d-flex gap-2 mt-2">
+                    <a href="#/tasks/new/${App.escAttr(agentId)}" class="btn btn-sm btn-outline-primary">
+                        <i class="bi bi-plus-lg"></i> ${i18n('agents.tasksAdd')}</a>
+                    <a href="#/tasks" class="btn btn-sm btn-outline-secondary">${i18n('agents.tasksManage')}</a>
+                </div>
+            </div>`;
     },
 
     /** The autonomous block as the server wants it: the object, or null when
@@ -733,10 +738,10 @@ const AgentsPage = {
             }
         }
 
-        // Six independent GETs (two of them — connectors proxy and MCP status —
+        // Seven independent GETs (two of them — connectors proxy and MCP status —
         // can be slow): fetched together instead of paying the sum of their
         // latencies on every form open. Each degrades on its own.
-        const [models, tools, agents, autoStatus, bindingsRes, mcpStatus] =
+        const [models, tools, agents, autoStatus, bindingsRes, mcpStatus, agentTasks] =
             await Promise.all([
                 App.api('GET', '/models').catch(() => []),
                 App.api('GET', '/tools').catch(() => []),
@@ -753,6 +758,11 @@ const AgentsPage = {
                     : null)(),
                 // Per-server state: a broken MCP server shows in the tool picker.
                 App.api('GET', '/mcp/status').catch(() => ({})),
+                // This agent's schedule, read-only here: WHEN it acts is the
+                // Tasks page's business, but hiding it from the Autonomy tab
+                // would leave "Live" looking like the whole story.
+                agentId ? App.api('GET', `/tasks?agent_id=${encodeURIComponent(agentId)}`)
+                    .catch(() => []) : [],
             ]);
         // The plugin answers with a plain array; a failed fetch gives null, and
         // that IS the "not available" signal — no separate flag needed.
@@ -813,7 +823,6 @@ const AgentsPage = {
         const rfCtx = () => ({
             temp: RangeField.read('f-temp') ?? 0.7,
             maxIter: RangeField.read('f-maxiter') ?? 10,
-            interval: RangeField.read('f-auto-interval') ?? 1800,
             maxWakes: RangeField.read('f-auto-maxwakes') ?? 12,
             maxErrors: RangeField.read('f-auto-maxerrors') ?? 5,
             memoryOn: document.getElementById('f-memory')?.checked ?? false,
@@ -974,6 +983,7 @@ const AgentsPage = {
                                     </div>
                                     <div class="form-text">${i18n('agents.wakeNowHint')}</div>
                                 </div>` : ''}
+                                ${this.taskBox(agentId, agentTasks)}
                                 ${relocated.map(group => group.tools.length === 0 ? '' : `
                                     <div class="border rounded p-2 mb-3">
                                         <label class="form-label small mb-1">${i18n('agents.autoTools')}</label>
@@ -994,11 +1004,6 @@ const AgentsPage = {
                                 <h6 class="small text-secondary">${i18n('agents.autonomySettings')}</h6>
                                 <div class="row g-3">
                                     ${this.autoGrid(auto, specs)}
-                                </div>
-                                <div class="mt-2">
-                                    <label class="form-label small mb-1" for="f-auto-instructions">${i18n('agents.autoInstructions')}</label>
-                                    <textarea class="form-control form-control-sm" id="f-auto-instructions" rows="3"
-                                              placeholder="${i18n('agents.autoInstructionsHint')}">${App.esc(auto.instructions || '')}</textarea>
                                 </div>
                                 <div class="row g-2 mt-1">
                                     <div class="col-6">
@@ -1167,13 +1172,13 @@ const AgentsPage = {
         });
 
         // First time Live is switched on, hand the agent the two tools it needs to
-        // be useful unattended: notify_user is its ONLY way out, and schedule_task
+        // be useful unattended: notify_user is its ONLY way out, and manage_tasks
         // lets it carry work forward. autonomy_control is NOT auto-granted — it
         // lets the agent flip its own live flag, a deliberate choice, and it is
         // just as useful with Live off.
         liveEl.onchange = () => {
             if (liveEl.checked) {
-                ['notify_user', 'schedule_task'].forEach(id => {
+                ['notify_user', 'manage_tasks'].forEach(id => {
                     const el = document.getElementById(`tool-${id}`);
                     if (el && !el.disabled) el.checked = true;
                 });
@@ -1182,7 +1187,7 @@ const AgentsPage = {
         };
 
         // Force a wake now — the main way to test an autonomous agent without
-        // waiting for its heartbeat. Works even when Live is off, which is why it
+        // waiting for its next scheduled task. Works even when Live is off, which is why it
         // is not hidden behind the switch: it is how you try an agent BEFORE
         // committing to letting it run by itself.
         if (isEdit) {

@@ -3,7 +3,7 @@
  *
  * A slider alone cannot own a value here: the server stores what the UI sends
  * verbatim (there is no ge=/le= anywhere in app/models.py), so a stored value may
- * sit outside any range this UI believes in (interval_s = 86400, temperature
+ * sit outside any range this UI believes in (wake_timeout_s = 86400, temperature
  * 0.75). A pure slider would clamp it on save and destroy it. So every field is a
  * PAIR:
  *
@@ -240,7 +240,7 @@ const RangeField = {
     /** The field's value, or null for a nullable field left on "inherit".
      *
      *  The ONLY readback path. Note Number.isFinite instead of `|| dflt`: 0 is a
-     *  legitimate value here (interval_s = 0 is "events only", temperature 0 is
+     *  legitimate value here (history_messages = 0 is "no history", temperature 0 is
      *  greedy decoding), and `parseFloat('0') || 0.7` is exactly the bug this
      *  replaces. */
     read(id) {
