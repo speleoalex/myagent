@@ -1,24 +1,29 @@
-"""Background compaction of chat sessions into per-agent deep memory.
+"""Background compaction of chat sessions into per-agent long-term memory.
 
 The session's ``conversation[]`` is the medium-short memory. When its cleaned
 size exceeds ``agent.memory_threshold`` (estimated tokens), the oldest turns
-are archived as a chunk in the agent's deep memory (:class:`MemoryStore`),
-summarized by the agent's own model, and replaced by a compact summary kept in
-``session["memory"]`` — never inside ``conversation[]``, so the scaffolding
-predicate and the rewind endpoint keep working unchanged:
+are summarized by the agent's own model, archived as one Markdown chunk in the
+agent's memory (:class:`MemoryStore` — summary only, the full transcript stays
+in the sessions store), indexed in memory.md, and replaced by a compact
+summary kept in ``session["memory"]`` — never inside ``conversation[]``, so
+the scaffolding predicate and the rewind endpoint keep working unchanged:
 
     session["memory"] = {
         "archived_user_turns": N,      # real user turns spliced out so far
         "context": [{"node", "ts", "summary"}, ...]   # FIFO, newest last
     }
 
-Crash-safe write order (all under ``memory.lock(agent_id)``): select head →
-summarize (no writes) → chunk file → tree.json → ONLY THEN re-read the session,
-verify the selected head is still there, splice and persist. Nothing is ever
-removed from the conversation before it is durable in deep memory; a crash in
-between is healed by the content-hash dedup (the retry finds the chunk and only
-performs the splice). Any failure — model down, garbage summary, session moved
-on — aborts silently: behavior degrades to exactly today's, retried next turn.
+Crash-safe write order: select head → summarize (NO lock held — an LLM call
+takes 10-60s on a local model and would starve the agent's memory tools) →
+then, under ``memory.lock(agent_id)`` for milliseconds: re-check the content
+hash (two concurrent compactions may race; the loser reuses the winner's
+chunk), chunk file, index line → ONLY THEN re-read the session, verify the
+selected head is still there, splice and persist. Nothing is ever removed from
+the conversation before it is durable in memory; a crash in between is healed
+by the content-hash dedup (the retry finds the chunk, repairs the index —
+``add_to_index`` is idempotent — and only redoes the splice). Any failure —
+model down, garbage summary, session moved on — aborts silently: behavior
+degrades to exactly today's, retried next turn.
 
 Runs fire-and-forget (``asyncio.create_task``) after a turn is persisted, so
 the user never waits on it.
@@ -39,16 +44,12 @@ from app.storage.sessions import now_iso
 
 log = logging.getLogger(__name__)
 
-# Parentless nodes at a level fold into one level-N+1 summary once they reach
-# this count (cascading upward).
-GROUP_SIZE = 8
-# Size gates for LLM-produced summaries (chars).
+# Size gate for LLM-produced summaries (chars).
 SUMMARY_MAX_CHARS = 1200
-ROOT_MAX_CHARS = 900
 # The newest real user turns are never archived: the model keeps them raw.
 KEEP_RECENT_TURNS = 2
 # FIFO cap of session["memory"]["context"] (older ground is covered by the
-# root digest and memory_search).
+# memory.md index and memory_search).
 CONTEXT_CAP = 6
 # Temperature for summarization calls: factual, not creative.
 _SUMMARY_TEMP = 0.2
@@ -67,7 +68,7 @@ def _is_real_user_turn(m: dict) -> bool:
 
 def _clean(conversation: list[dict]) -> list[dict]:
     """Dialogue-only view of raw conversation entries (scaffolding dropped,
-    content flattened to strings) — what gets archived and measured."""
+    content flattened to strings) — what gets summarized and measured."""
     out = []
     for m in conversation:
         content = AgentExecutor._flatten_content(m.get("content")) or ""
@@ -121,7 +122,7 @@ def _keywords_from(text: str, limit: int = 8) -> list[str]:
 # ------------------------------------------------------------- summarization
 
 def _validate_summary(text: str | None, max_chars: int) -> str | None:
-    """Reject anything that must never enter the permanent tree: too short,
+    """Reject anything that must never enter the permanent memory: too short,
     runaway-long, JSON/tool-call shaped, or echoed tool plumbing."""
     if not text:
         return None
@@ -131,7 +132,7 @@ def _validate_summary(text: str | None, max_chars: int) -> str | None:
     if text[0] in "{[":
         return None
     # The marker comes from prompts.py: this gate decides what enters the
-    # PERMANENT memory tree, so it must track any rewording of the scaffolding.
+    # PERMANENT memory, so it must track any rewording of the scaffolding.
     if prompts.TOOL_RESULTS_PREFIX in text or '"arguments"' in text:
         return None
     if len(text) > max_chars:
@@ -188,8 +189,7 @@ _BG_TASKS: set[asyncio.Task] = set()
 
 
 def schedule_background(coro) -> None:
-    """Fire-and-forget an engine coroutine WITHOUT losing it to the GC.
-    Used for the memory jobs (compaction, root-digest refresh after a note)."""
+    """Fire-and-forget an engine coroutine WITHOUT losing it to the GC."""
     task = asyncio.create_task(coro)
     _BG_TASKS.add(task)
     task.add_done_callback(_BG_TASKS.discard)
@@ -197,10 +197,10 @@ def schedule_background(coro) -> None:
 
 def schedule_compaction(executor, session_id: str, *, session_store=None,
                         named=None, live=None) -> None:
-    """Fire-and-forget deep-memory compaction AFTER a persisted turn: the user
+    """Fire-and-forget memory compaction AFTER a persisted turn: the user
     never waits on it (a summarization on a local model takes 10-60s). All
-    safety is inside compact_session (per-agent lock, head re-verification,
-    idempotent retry via content hash). No-op for agents without memory."""
+    safety is inside compact_session (head re-verification, idempotent retry
+    via content hash). No-op for agents without memory."""
     if not executor.agent.memory_enabled or executor.stores.memory is None:
         return
     schedule_background(compact_session(
@@ -222,9 +222,8 @@ async def compact_session(agent: Agent, model_config: ModelConfig,
     if memory is None or not agent.memory_enabled:
         return
     try:
-        async with memory.lock(agent.id):
-            await _compact_locked(agent, model_config, memory, session_id,
-                                  session_store=session_store, named=named, live=live)
+        await _compact_one(agent, model_config, memory, session_id,
+                           session_store=session_store, named=named, live=live)
     except Exception:
         log.exception("memory compaction failed for agent '%s'", agent.id)
 
@@ -235,9 +234,9 @@ def _load_session(session_id: str, session_store, named) -> dict | None:
     return session_store.get(session_id)
 
 
-async def _compact_locked(agent: Agent, model_config: ModelConfig,
-                          memory: MemoryStore, session_id: str, *,
-                          session_store, named, live) -> None:
+async def _compact_one(agent: Agent, model_config: ModelConfig,
+                       memory: MemoryStore, session_id: str, *,
+                       session_store, named, live) -> None:
     session = _load_session(session_id, session_store, named)
     if not session:
         return
@@ -252,13 +251,13 @@ async def _compact_locked(agent: Agent, model_config: ModelConfig,
         return
     chunk_hash = memory.hash_messages(head_clean)
 
-    # Idempotent retry: a crash after the tree write but before the splice
-    # left the chunk archived — reuse its node and only redo the splice.
-    memory.load_tree(agent.id, adopt=True)
-    node_id = memory.find_chunk_by_hash(agent.id, session_id, chunk_hash)
-    if node_id:
-        node = memory.load_tree(agent.id)["nodes"].get(node_id, {})
-        summary = node.get("summary", "")
+    # Phase A — LLM work, NO lock held. Idempotent retry first: a crash after
+    # the chunk write left it archived, reuse its summary without re-paying
+    # the model.
+    chunk_id = memory.find_chunk_by_hash(agent.id, session_id, chunk_hash)
+    if chunk_id:
+        existing = memory.read_chunk(agent.id, chunk_id) or {}
+        summary = existing.get("body") or "(archived conversation)"
     else:
         summary = await summarize(
             model_config, _transcript(head_clean), SUMMARY_MAX_CHARS,
@@ -267,41 +266,47 @@ async def _compact_locked(agent: Agent, model_config: ModelConfig,
         )
         if not summary:
             return  # model down or garbage output: abort, retry next turn
-        node_id, _ = memory.archive_chunk(
-            agent.id, head_clean,
-            summary=summary,
-            keywords=_keywords_from(summary),
-            session_id=session_id,
-            channel=session.get("channel", ""),
-            source=session.get("source", ""),
-        )
 
-    # Only now touch the session: re-read it fresh and make sure the head we
-    # archived is still exactly its beginning (a concurrent turn, a reset or a
-    # rewind means abort — the chunk stays, the retry is idempotent).
+    # Phase B — file writes under the lock (milliseconds). Re-check the hash:
+    # a concurrent compaction may have won the race while we were summarizing;
+    # the double check replaces the old whole-pipeline serialization.
+    async with memory.lock(agent.id):
+        cid = memory.find_chunk_by_hash(agent.id, session_id, chunk_hash)
+        if cid:
+            chunk_id = cid
+        else:
+            chunk_id = memory.write_chunk(
+                agent.id, body=summary,
+                session_id=session_id,
+                channel=session.get("channel", ""),
+                source=session.get("source", ""),
+                keywords=_keywords_from(summary),
+                hash_=chunk_hash,
+            )
+        memory.add_to_index(agent.id, chunk_id, summary)  # idempotent
+
+    # Phase C — only now touch the session: re-read it fresh and make sure the
+    # head we archived is still exactly its beginning (a concurrent turn, a
+    # reset or a rewind means abort — the chunk stays, the retry is idempotent).
     if named is not None:
         async with named.lock(session_id):
             fresh = named.get(session_id)
-            if not _splice(fresh, head, archived_turns, node_id, summary):
+            if not _splice(fresh, head, archived_turns, chunk_id, summary):
                 return
             await asyncio.to_thread(named.save, session_id, fresh)
     else:
         if live is not None and live.is_active(session_id):
             return
         fresh = session_store.get(session_id)
-        if not fresh or not _splice(fresh, head, archived_turns, node_id, summary):
+        if not fresh or not _splice(fresh, head, archived_turns, chunk_id, summary):
             return
         await asyncio.to_thread(session_store.persist, fresh)
     log.info("memory: archived %d turn(s) of session '%s' as %s (agent '%s')",
-             archived_turns, session_id, node_id, agent.id)
-
-    # Housekeeping (best-effort, after the splice so it never delays it):
-    # cascade folds and refresh the root digest.
-    await fold_and_reroot(agent, model_config, memory)
+             archived_turns, session_id, chunk_id, agent.id)
 
 
 def _splice(session: dict, head: list[dict], archived_turns: int,
-            node_id: str, summary: str) -> bool:
+            chunk_id: str, summary: str) -> bool:
     conversation = session.get("conversation", [])
     if conversation[: len(head)] != head:
         return False
@@ -309,53 +314,6 @@ def _splice(session: dict, head: list[dict], archived_turns: int,
     mem = session.setdefault("memory", {})
     mem["archived_user_turns"] = mem.get("archived_user_turns", 0) + archived_turns
     ctx = mem.setdefault("context", [])
-    ctx.append({"node": node_id, "ts": now_iso(), "summary": summary})
+    ctx.append({"node": chunk_id, "ts": now_iso(), "summary": summary})
     del ctx[: max(0, len(ctx) - CONTEXT_CAP)]
     return True
-
-
-async def fold_and_reroot(agent: Agent, model_config: ModelConfig,
-                          memory: MemoryStore) -> None:
-    """Cascading compaction: whenever a level has GROUP_SIZE parentless nodes,
-    fold the oldest GROUP_SIZE into one level-N+1 node (which can cascade
-    further up). Then regenerate the root digest from the remaining orphans.
-    Every step is optional: on failure the tree simply stays one fold behind.
-
-    Public: memory_note's handler also fires this (in the background) so a
-    fresh note reaches the root digest — what new sessions actually see —
-    without waiting for the next session compaction. Caller MUST hold
-    ``memory.lock(agent.id)`` (apply_fold / set_root / adopt all require it;
-    both real callers already do). NOTE: the lock is per-agent and
-    non-reentrant, and it stays held across the summarize() LLM calls — a
-    memory tool of the same agent can block for the duration.
-    """
-    level = 1
-    while level < 10:
-        orphans = memory.orphans_at_level(agent.id, level)
-        if len(orphans) < GROUP_SIZE:
-            level += 1
-            continue
-        group = orphans[:GROUP_SIZE]
-        text = "\n\n".join(n.get("summary", "") for n in group)
-        folded = await summarize(
-            model_config, text, SUMMARY_MAX_CHARS,
-            "Merge these summaries of consecutive past conversations into one.",
-        )
-        if not folded:
-            return  # model unavailable: retry the fold on a later compaction
-        memory.apply_fold(agent.id, [n["id"] for n in group], folded, level + 1)
-        # Same level may still hold another full group; re-check before moving up.
-
-    tree = memory.load_tree(agent.id)
-    orphans = [n for n in tree.get("nodes", {}).values() if not n.get("parent")]
-    if not orphans:
-        return
-    orphans.sort(key=lambda n: n.get("id", ""))
-    text = "\n\n".join(n.get("summary", "") for n in orphans)
-    root = await summarize(
-        model_config, text, ROOT_MAX_CHARS,
-        "Write the long-term memory digest of everything below (summaries of "
-        "all past conversations of an assistant).",
-    )
-    if root:
-        memory.set_root(agent.id, root)  # failure keeps the previous root

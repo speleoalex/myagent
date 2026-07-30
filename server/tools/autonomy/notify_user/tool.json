@@ -1,6 +1,6 @@
 {
   "name": "Notify User",
-  "description": "Send a message to a person on their messaging channel (e.g. Telegram). Use it to tell someone something proactively - when you run autonomously your normal reply text is NOT delivered anywhere. To reach a person, pass 'to' with their NAME as you know it (e.g. \"Alessandro\") and optionally 'channel' (e.g. \"Telegram\"): the name is looked up in the address book. NEVER invent a numeric id. If the name is not found, the error lists the contacts that do exist - pick one from that list.",
+  "description": "Send a message to a person on their messaging channel (e.g. Telegram). Use it to tell someone something proactively - when you run autonomously your normal reply text is NOT delivered anywhere. To reach a person, pass 'to' with their name and optionally 'channel': the name is looked up in the address book. NEVER invent a numeric id.",
   "internal": true,
   "parameters": {
     "type": "object",
@@ -11,11 +11,11 @@
       },
       "to": {
         "type": "string",
-        "description": "Who to send it to: a person's name from the address book (e.g. \"Alessandro\"). Preferred way to address someone. Omit to use the agent's configured target."
+        "description": "Who to send it to: a person's name from the address book — pick one of the listed values when this parameter has them, otherwise write the name and the error will list who exists. \"all\" sends to every contact on that channel: use it only when you were asked to tell everyone. Omit to use the agent's configured target."
       },
       "channel": {
         "type": "string",
-        "description": "Which messaging channel to use (e.g. \"Telegram\"). Only needed when more than one is configured."
+        "description": "Which messaging channel to use. Only needed when more than one is configured."
       },
       "binding_id": {
         "type": "string",
@@ -23,7 +23,7 @@
       },
       "chat_id": {
         "type": "string",
-        "description": "Advanced: the exact chat id, when you already know it. Prefer 'to'. Several recipients: comma-separated. LEAVE THIS ARGUMENT OUT to use the agent's configured target — do not pass the word \"default\" or any placeholder."
+        "description": "Advanced: the exact chat id, when you already know it. Prefer 'to', which wins over this one and over the agent's configured target. Several recipients: comma-separated. LEAVE THIS ARGUMENT OUT to use the agent's configured target — do not pass the word \"default\" or any placeholder."
       }
     },
     "required": [

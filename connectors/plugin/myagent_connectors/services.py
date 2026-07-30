@@ -29,6 +29,13 @@ STATE_KEY = "connectors"
 # Available Agents directory.
 MAX_LISTED = 12
 
+# "Send it to everyone." A reserved word rather than a second parameter: it rides
+# along in the schema's enum for free, and a model that forgets a boolean flag
+# cannot forget a value it was handed. Aliases because the user says "tutti" and
+# the model echoes the word it read.
+BROADCAST_WORD = "all"
+BROADCAST_WORDS = frozenset({BROADCAST_WORD, "everyone", "tutti", "everybody"})
+
 
 @dataclass
 class Recipient:
@@ -90,62 +97,135 @@ class Connectors:
     def channel_labels(self) -> list[str]:
         return [c["label"] for c in registry.available_types()]
 
-    def resolve_recipients(self, name: str = "",
-                           channel: str = "") -> tuple[list[Recipient], str]:
+    def _channel_label(self, channel_type: str) -> str:
+        channel = registry.get_channel(channel_type)
+        return (channel.label if channel else channel_type) or channel_type
+
+    def notify_targets(self) -> dict:
+        """What the core needs to write the address book into a tool schema.
+
+        One call because it feeds one place: the ``notify_user`` definition the
+        executor narrows per turn. NAMES only — a handle is an id, and a model
+        shown an id pastes it into ``chat_id`` and skips the lookup that makes the
+        recipient verifiable. ``broadcast`` is here rather than hardcoded in the
+        core so the vocabulary of "everyone" stays owned by the plugin that
+        implements it.
+        """
+        return {
+            "contacts": self.contact_names(),
+            "channels": self.channel_labels(),
+            "broadcast": BROADCAST_WORD,
+        }
+
+    def _pick_binding(self, channel_type: str,
+                      binding_id: str) -> tuple[Binding | None, str]:
+        """Which bot sends. ``binding_id`` wins when given — without it there is no
+        answer to the "several bots" error below, which is what made ``to=`` unusable
+        on a server with two bots."""
+        candidates = self._bindings_of(channel_type)
+        if not candidates:
+            where = f" of type '{channel_type}'" if channel_type else ""
+            return None, f"no enabled bot{where} is configured"
+        if binding_id:
+            for b in candidates:
+                if b.id == binding_id:
+                    return b, ""
+            listed = ", ".join(b.id for b in candidates[:MAX_LISTED])
+            return None, (f"no enabled bot has id '{binding_id}'. Enabled bots: "
+                          f"{listed}")
+        if len(candidates) > 1:
+            listed = ", ".join(f"{b.id} ({b.type})" for b in candidates[:MAX_LISTED])
+            return None, (f"several bots could send this — pass binding_id to choose: "
+                          f"{listed}")
+        return candidates[0], ""
+
+    def _broadcast(self, binding: Binding,
+                   contacts: list[Contact]) -> tuple[list[Recipient], str, str]:
+        """Every contact reachable on this binding's channel.
+
+        Contacts without a handle there are NAMED in the note. A broadcast is the
+        one case where a partial success reads as a total one: the agent goes on to
+        tell the user it warned everybody, and the person who was left out is the
+        one who needed telling.
+        """
+        label = self._channel_label(binding.type)
+        out, skipped = [], []
+        for c in sorted(contacts, key=lambda c: (c.name or c.id).lower()):
+            handle = c.handle_for(binding.type)
+            if handle:
+                out.append(Recipient(binding.id, handle, f"{c.name or c.id} on {label}"))
+            else:
+                skipped.append(c.name or c.id)
+        if not out:
+            if not skipped:
+                return [], "the address book is empty, so there is nobody to notify", ""
+            return [], (f"no contact has a {label} handle: "
+                        f"{', '.join(skipped[:MAX_LISTED])}"), ""
+        note = ""
+        if skipped:
+            note = (f"skipped for having no {label} handle: "
+                    f"{', '.join(skipped[:MAX_LISTED])}")
+        return out, "", note
+
+    def resolve_recipients(self, name: str = "", channel: str = "",
+                           binding_id: str = "") -> tuple[list[Recipient], str, str]:
         """Turn a person's name (and optionally a channel) into destinations.
 
-        Returns ``(recipients, error)``. On failure the error is written FOR THE
-        MODEL: it says what was ambiguous and lists the candidates, because the
+        Returns ``(recipients, error, note)``. On failure the error is written FOR
+        THE MODEL: it says what was ambiguous and lists the candidates, because the
         caller's next move is to pick one. Nothing raises — an exception here
-        would surface as a tool crash instead of a correctable answer.
+        would surface as a tool crash instead of a correctable answer. The note is
+        for a send that only partly matched the ask — see ``_broadcast``.
         """
         channel_type = ""
         if channel:
             channel_type = registry.resolve_type(channel)
             if not channel_type:
                 return [], (f"unknown channel '{channel}'. Available: "
-                            f"{', '.join(self.channel_labels()) or 'none'}")
+                            f"{', '.join(self.channel_labels()) or 'none'}"), ""
 
-        candidates = self._bindings_of(channel_type)
-        if not candidates:
-            where = f" of type '{channel_type}'" if channel_type else ""
-            return [], f"no enabled bot{where} is configured"
-        if len(candidates) > 1:
-            listed = ", ".join(f"{b.id} ({b.type})" for b in candidates[:MAX_LISTED])
-            return [], (f"several bots could send this — pass binding_id to choose: "
-                        f"{listed}")
-        binding = candidates[0]
+        binding, error = self._pick_binding(channel_type, binding_id)
+        if binding is None:
+            return [], error, ""
 
         target = (name or "").strip()
         if not target:
             return [], ("no recipient. Pass 'to' with a name from the address book "
                         f"({', '.join(self.contact_names()[:MAX_LISTED]) or 'empty'}) "
-                        "or an explicit chat_id")
+                        "or an explicit chat_id"), ""
+
+        contacts = self._contacts()
+
+        # "everyone". Only when no contact answers to that name: explicit data
+        # beats a reserved word, so an address book holding an "All" (or an
+        # "Allison", which prefix-matches) keeps addressing the person.
+        if (target.lower() in BROADCAST_WORDS
+                and not any(_name_matches(target, c.name or c.id) for c in contacts)):
+            return self._broadcast(binding, contacts)
 
         # An id or @username goes through untouched: the address book is a
         # convenience, not a gate.
         if _looks_like_handle(target):
-            return [Recipient(binding.id, target, target)], ""
+            return [Recipient(binding.id, target, target)], "", ""
 
-        matches = [c for c in self._contacts() if _name_matches(target, c.name or c.id)]
+        matches = [c for c in contacts if _name_matches(target, c.name or c.id)]
         if not matches:
             known = ", ".join(self.contact_names()[:MAX_LISTED]) or "the address book is empty"
-            return [], f"no contact matches '{target}'. Known contacts: {known}"
+            return [], f"no contact matches '{target}'. Known contacts: {known}", ""
         if len(matches) > 1:
             listed = ", ".join((c.name or c.id) for c in matches[:MAX_LISTED])
-            return [], f"'{target}' matches several contacts — be more specific: {listed}"
+            return [], f"'{target}' matches several contacts — be more specific: {listed}", ""
 
         contact = matches[0]
+        label = self._channel_label(binding.type)
         handle = contact.handle_for(binding.type)
         if not handle:
-            label = registry.get_channel(binding.type)
-            label = (label.label if label else binding.type) or binding.type
             # Deliberately distinct from "not found": the fix is to add a handle,
             # not to try another name.
             return [], (f"{contact.name or contact.id} has no {label} handle. "
-                        f"Add one in the address book, or pass chat_id explicitly")
+                        f"Add one in the address book, or pass chat_id explicitly"), ""
         return [Recipient(binding.id, handle,
-                          f"{contact.name or contact.id} on {binding.type}")], ""
+                          f"{contact.name or contact.id} on {label}")], "", ""
 
 
 def services(request: Request) -> Connectors:

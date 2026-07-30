@@ -258,7 +258,7 @@ const AgentsPage = {
         { key: 'wake_timeout_s',         el: 'f-auto-timeout',      type: 'int',  dflt: 600,  group: 'grid' },
         { key: 'history_messages',       el: 'f-auto-history',      type: 'int',  dflt: 0,    group: 'grid' },
         { key: 'notify_binding_id',      el: 'f-auto-binding',      type: 'text', dflt: '',   group: 'notify' },
-        { key: 'notify_chat_id',         el: 'f-auto-chat',         type: 'text', dflt: '',   group: 'notify' },
+        { key: 'notify_to',              el: 'f-auto-to',           type: 'text', dflt: '',   group: 'notify' },
     ],
 
     /** Slider specs for the agent's numeric fields, keyed by input id.
@@ -474,7 +474,8 @@ const AgentsPage = {
                 <option value="" ${!current ? 'selected' : ''}>${i18n('agents.autoBindingNone')}</option>
                 ${bindings.map(b => `
                     <option value="${App.escAttr(b.id)}" ${b.id === current ? 'selected' : ''}
-                            data-allowed="${App.escAttr((b.allowed_ids || []).join(','))}">
+                            data-allowed="${App.escAttr((b.allowed_ids || []).join(','))}"
+                            data-type="${App.escAttr(b.type || '')}">
                         ${App.esc(b.name || b.id)} (${App.esc(b.id)})${b.enabled === false ? ' — ' + i18n('mcp.stateDisabled') : ''}
                     </option>`).join('')}
                 ${current && !known ? `<option value="${App.escAttr(current)}" selected>${App.esc(current)} — ${i18n('agents.bindingMissing')}</option>` : ''}
@@ -724,7 +725,7 @@ const AgentsPage = {
     async renderForm(agentId) {
         // callable_agents defaults to [] (no delegation) for NEW agents only:
         // the user opts in explicitly. Existing agents keep their stored value.
-        let agent = { id: '', name: '', description: '', model_id: '', system_prompt: '', tools: [], max_iterations: 10, max_tool_calls: 5, temperature: 0.7, enabled: true, callable: true, callable_agents: [], memory_enabled: false, memory_threshold: 4000, live: false, autonomous: null };
+        let agent = { id: '', name: '', description: '', model_id: '', system_prompt: '', tools: [], max_iterations: 10, max_tool_calls: 5, temperature: 0.7, enabled: true, callable: true, callable_agents: [], memory_enabled: false, memory_threshold: 4000, live: false, schedule_others: false, autonomous: null };
         let isEdit = false;
 
         if (agentId) {
@@ -738,10 +739,11 @@ const AgentsPage = {
             }
         }
 
-        // Seven independent GETs (two of them — connectors proxy and MCP status —
-        // can be slow): fetched together instead of paying the sum of their
-        // latencies on every form open. Each degrades on its own.
-        const [models, tools, agents, autoStatus, bindingsRes, mcpStatus, agentTasks] =
+        // Eight independent GETs (three of them — the two connectors routes and
+        // MCP status — can be slow): fetched together instead of paying the sum of
+        // their latencies on every form open. Each degrades on its own.
+        const [models, tools, agents, autoStatus, bindingsRes, mcpStatus, agentTasks,
+               contactsRes] =
             await Promise.all([
                 App.api('GET', '/models').catch(() => []),
                 App.api('GET', '/tools').catch(() => []),
@@ -763,11 +765,17 @@ const AgentsPage = {
                 // would leave "Live" looking like the whole story.
                 agentId ? App.api('GET', `/tasks?agent_id=${encodeURIComponent(agentId)}`)
                     .catch(() => []) : [],
+                // The address book, same plugin and same gate: it turns the chat-id
+                // field from a number typed blind into a name the user recognizes.
+                (async () => (await App.plugin('connectors'))?.loaded
+                    ? App.api('GET', '/connectors/contacts').catch(() => null)
+                    : null)(),
             ]);
         // The plugin answers with a plain array; a failed fetch gives null, and
         // that IS the "not available" signal — no separate flag needed.
         const bindings = Array.isArray(bindingsRes) ? bindingsRes : [];
         const bindingsAvailable = Array.isArray(bindingsRes);
+        const contacts = Array.isArray(contactsRes) ? contactsRes : [];
         // Cache for the preview tree (opened from this form with unsaved values).
         this._allAgents = agents;
         this._allTools = tools;
@@ -1000,6 +1008,22 @@ const AgentsPage = {
                                         <div id="live-warn" class="form-text text-warning-emphasis d-none">
                                             <i class="bi bi-exclamation-triangle"></i> ${i18n('agents.liveNoNotify')}
                                         </div>
+                                        <hr class="my-2">
+                                        <!-- Not a tool grant (no .tool-check): a permission over the two
+                                             tools above, which is why it lives in this box and not in the
+                                             picker. Off, they act on the agent itself and never mention
+                                             another one. -->
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="checkbox" id="f-schedule-others"
+                                                   ${agent.schedule_others ? 'checked' : ''}>
+                                            <label class="form-check-label" for="f-schedule-others">
+                                                ${i18n('agents.scheduleOthers')}
+                                            </label>
+                                            <div class="form-text">${i18n('agents.scheduleOthersHelp')}</div>
+                                        </div>
+                                        <div id="schedule-others-warn" class="form-text text-warning-emphasis d-none">
+                                            <i class="bi bi-exclamation-triangle"></i> ${i18n('agents.scheduleOthersNoTools')}
+                                        </div>
                                     </div>`).join('')}
                                 <h6 class="small text-secondary">${i18n('agents.autonomySettings')}</h6>
                                 <div class="row g-3">
@@ -1007,27 +1031,31 @@ const AgentsPage = {
                                 </div>
                                 <div class="row g-2 mt-1">
                                     <div class="col-6">
-                                        <label class="form-label small mb-1" for="f-auto-binding">${i18n('agents.autoBinding')}</label>
-                                        ${this.bindingField(bindings, auto.notify_binding_id || '')}
+                                        <label class="form-label small mb-1" for="f-auto-to">${i18n('agents.autoTo')}</label>
+                                        <!-- Stays free text on purpose. The suggestions are the
+                                             address book, and a group chat is not in it: its id
+                                             is negative and no contact can hold it. So the names
+                                             are offered, not imposed - an id must stay typeable. -->
+                                        <input type="text" class="form-control form-control-sm" id="f-auto-to"
+                                               list="notify-to-options" autocomplete="off"
+                                               value="${App.escAttr(auto.notify_to || '')}">
+                                        <datalist id="notify-to-options"></datalist>
                                     </div>
                                     <div class="col-6">
-                                        <label class="form-label small mb-1" for="f-auto-chat">${i18n('agents.autoChat')}</label>
-                                        <!-- Stays free text on purpose: allowed_ids only covers private
-                                             chats (there the user id IS the chat id), never groups. So
-                                             the ids are offered as suggestions, not as a closed set. -->
-                                        <input type="text" class="form-control form-control-sm" id="f-auto-chat"
-                                               list="chat-id-options" autocomplete="off"
-                                               value="${App.escAttr(auto.notify_chat_id || '')}">
-                                        <datalist id="chat-id-options"></datalist>
+                                        <label class="form-label small mb-1" for="f-auto-binding">${i18n('agents.autoBinding')}</label>
+                                        ${this.bindingField(bindings, auto.notify_binding_id || '')}
                                     </div>
                                 </div>
                                 <div class="form-text">${i18n('agents.autoNotifyHint')}
                                     <a href="#/connectors">${i18n('agents.autoBindingManage')}</a></div>
-                                <!-- Filled by syncNotifyTargets(): either the chat-id
+                                <!-- Filled by syncNotifyTargets(): either the recipient
                                      suggestions or the "plugin not active" warning. It is
                                      written with textContent, so the link above cannot
                                      live in here. -->
-                                <div class="form-text" id="notify-hint"></div>`)}
+                                <div class="form-text" id="notify-hint"></div>
+                                <div id="notify-target-warn" class="form-text text-warning-emphasis d-none">
+                                    <i class="bi bi-exclamation-triangle"></i> ${i18n('agents.liveNoTarget')}
+                                </div>`)}
                             ${pane('advanced', `
                                 <div class="row g-3">
                                     <div class="col-12 col-lg-6">${RangeField.render(specs['f-maxiter'], agent.max_iterations ?? 10)}</div>
@@ -1095,6 +1123,14 @@ const AgentsPage = {
                 memory_enabled: state.memory_enabled,
                 memory_threshold: RangeField.read('f-memthreshold'),
                 live: state.live,
+                // Permission over manage_tasks / autonomy_control, not a grant:
+                // the executor injects their agent_id parameter only when it is on.
+                // Falls back to the STORED value, not to false: the box is rendered
+                // inside the autonomy-tools block, so on an install without those
+                // tools it does not exist — and defaulting to false there would
+                // silently revoke the permission on the next save of any other field.
+                schedule_others: document.getElementById('f-schedule-others')?.checked
+                    ?? !!agent.schedule_others,
                 // null = all defaults; the object is only stored when customized.
                 autonomous: this.readAutoConfig(),
             };
@@ -1135,6 +1171,27 @@ const AgentsPage = {
             const notify = document.getElementById('tool-notify_user');
             const liveWarn = document.getElementById('live-warn');
             if (liveWarn) liveWarn.classList.toggle('d-none', !(d.live && notify && !notify.checked));
+
+            // notify_user granted but nobody it could possibly reach. BOTH halves
+            // are needed: with an address book a blank default is legitimate — the
+            // model names a person and the server resolves it. It is only when the
+            // book is empty too that every notification fails at runtime, and a
+            // wake reports failure to a log nobody reads.
+            const targetWarn = document.getElementById('notify-target-warn');
+            if (targetWarn) {
+                const blank = !(d.autonomous?.notify_to || '').trim() && !contacts.length;
+                targetWarn.classList.toggle('d-none', !(d.live && notify?.checked && blank));
+            }
+
+            // Scheduling for others is a permission over the two tools above: with
+            // neither of them granted it adds a parameter to nothing, so the box is
+            // checked and the agent still cannot touch another schedule.
+            const schedWarn = document.getElementById('schedule-others-warn');
+            if (schedWarn) {
+                const canSchedule = ['manage_tasks', 'autonomy_control']
+                    .some(id => document.getElementById(`tool-${id}`)?.checked);
+                schedWarn.classList.toggle('d-none', !(d.schedule_others && !canSchedule));
+            }
 
             this.setTabIndicators(d, { memoryWidening: widening });
         };
@@ -1226,21 +1283,43 @@ const AgentsPage = {
             };
         }
 
-        // Chat-id suggestions follow the chosen binding. For a Telegram private
-        // chat the user id IS the chat id, so the binding's allowlist is the only
-        // real source we have — but it never contains group chat ids, hence a
-        // <datalist> (suggestions) rather than a <select>, plus a hint saying so.
+        // Recipient suggestions follow the chosen bot. Two sources, in this order:
+        // the address book — NAMES, which is what gets stored and what the server
+        // resolves — and then the bot's allowlist, for the ids that answer to
+        // nobody in particular. It stays a <datalist> and not a <select> because
+        // neither source can contain a group chat id.
+        //
+        // With no bot chosen and exactly one configured, that one is used: it is
+        // what the server does too (a single candidate needs no disambiguation),
+        // so the suggestions match what the empty field will actually do.
         const bindingEl = document.getElementById('f-auto-binding');
+        const soleBinding = bindings.length === 1 ? bindings[0] : null;
         const syncNotifyTargets = () => {
             const opt = bindingEl.selectedOptions ? bindingEl.selectedOptions[0] : null;
-            const ids = (opt?.dataset.allowed || '').split(',').filter(Boolean);
-            document.getElementById('chat-id-options').innerHTML =
-                ids.map(id => `<option value="${App.escAttr(id)}"></option>`).join('');
+            const chosen = opt && opt.value;
+            const type = (chosen ? opt.dataset.type : soleBinding?.type) || '';
+            const ids = (chosen
+                ? (opt.dataset.allowed || '').split(',')
+                : (soleBinding?.allowed_ids || [])).filter(Boolean);
+            // Only contacts reachable on THIS channel: a name without a handle
+            // there resolves to "has no Telegram handle", so suggesting it would
+            // be suggesting a failure.
+            const named = type
+                ? contacts.filter(c => (c.handles || {})[type])
+                    .map(c => ({ name: c.name || c.id, id: c.handles[type] }))
+                : [];
+            const seen = new Set(named.map(c => c.id));
+            document.getElementById('notify-to-options').innerHTML = [
+                ...named.map(c => `<option value="${App.escAttr(c.name)}"></option>`),
+                ...ids.filter(id => !seen.has(id))
+                    .map(id => `<option value="${App.escAttr(id)}"></option>`),
+            ].join('');
+            const total = named.length + ids.filter(id => !seen.has(id)).length;
             const hint = document.getElementById('notify-hint');
             hint.className = 'form-text' + (bindingsAvailable ? '' : ' text-warning-emphasis');
             hint.textContent = !bindingsAvailable
                 ? i18n('agents.autoBindingUnavailable')
-                : (ids.length ? i18n('agents.autoChatSuggest', { n: ids.length }) : '');
+                : (total ? i18n('agents.autoToSuggest', { n: total }) : '');
         };
         bindingEl.addEventListener('change', syncNotifyTargets);
         syncNotifyTargets();

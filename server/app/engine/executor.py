@@ -28,6 +28,23 @@ log = logging.getLogger(__name__)
 # dozens, and this block goes into a router agent's prompt on every single turn.
 _DIRECTORY_TOOLS_PER_AGENT = 12
 
+# How many contact names notify_user's 'to' parameter lists as an enum. Above this
+# the enum is dropped entirely and the model goes back to discovering names from the
+# tool's error, which lists candidates too: the text protocol renders an enum
+# truncated to 20 values with no sign that it was cut (see _build_tools_prompt), and
+# a silently shortened address book is worse than none — the missing name is
+# unaskable rather than merely unknown.
+_NOTIFY_TARGETS_MAX = 20
+
+# The tools that act on an agent's own schedule, and therefore the ones that gain
+# an ``agent_id`` parameter when Agent.schedule_others is on. Both, not just
+# manage_tasks: a task on an agent whose live switch is off never runs, so being
+# able to schedule for someone without being able to start them is half a
+# capability. Their tool.json says "your own" — _with_scheduling_targets amends
+# the description in the same pass that adds the parameter, so the schema and the
+# prose can never disagree.
+_SCHEDULING_TOOLS = ("manage_tasks", "autonomy_control")
+
 # Every injected string lives in app.engine.prompts — see its docstring for why
 # the scaffolding markers in particular must have exactly one definition.
 _FORCE_ANSWER_PROMPT = prompts.FORCE_ANSWER
@@ -76,7 +93,7 @@ def _tool_call_key(tc: dict) -> tuple[str, str]:
 class Stores:
     agents: JsonStore
     models: JsonStore
-    # Per-agent deep memory (None = memory subsystem not wired, e.g. in tests).
+    # Per-agent long-term memory (None = memory subsystem not wired, e.g. in tests).
     # Carried here so sub-agents inherit the pointer via create_for_agent —
     # access is still gated per-agent by Agent.memory_enabled.
     memory: MemoryStore | None = None
@@ -300,6 +317,32 @@ class AgentExecutor:
         """Raw agent dicts this agent is allowed to delegate to."""
         return [a for a in self.stores.agents.list_all() if self._agent_can_call(self.agent, a)]
 
+    @staticmethod
+    def _agent_can_schedule(caller_agent, target: dict) -> bool:
+        """Whether ``caller_agent`` may manage ``target``'s tasks and live switch.
+
+        Single source of truth for the scheduling gate, the way _agent_can_call is
+        for delegation: the caller must hold ``schedule_others``, and the target
+        must be enabled, ``callable`` and someone else. ``callable`` is honored
+        because scheduling a task IS making that agent run later — the same
+        absolute opt-out delegation respects. Deliberately NOT filtered through
+        ``callable_agents``: that list is the delegation allowlist, edited in
+        another tab next to the switch that grants call_agent, and reusing it
+        would make this flag silently inert for every agent that delegates to
+        nobody (the default for agents created in the UI)."""
+        if not getattr(caller_agent, "schedule_others", False):
+            return False
+        if not target.get("enabled", True):
+            return False
+        if not target.get("callable", True):
+            return False
+        return target.get("id") != caller_agent.id
+
+    def _scheduling_targets(self) -> list[dict]:
+        """Raw agent dicts whose schedule this agent may manage."""
+        return [a for a in self.stores.agents.list_all()
+                if self._agent_can_schedule(self.agent, a)]
+
     def _granted_tools(self) -> set[str]:
         """The agent's tool grants with group wildcards (``<category>/*``)
         expanded — the wildcard-aware form of ``x in self.agent.tools``."""
@@ -319,6 +362,12 @@ class AgentExecutor:
     def can_call(self, target: dict) -> bool:
         """Whether THIS agent may delegate to ``target`` (a raw agent dict)."""
         return self._agent_can_call(self.agent, target)
+
+    def scheduling_target_ids(self) -> list[str]:
+        """Ids of the agents whose tasks/live switch this agent may manage —
+        exactly the enum the schema advertises, so manage_tasks and
+        autonomy_control enforce what the model was offered."""
+        return sorted(a["id"] for a in self._scheduling_targets())
 
     def record_sub_trace(self, trace: dict) -> None:
         """Queue a called agent's full trace; consumed by the next call_agent
@@ -397,6 +446,92 @@ class AgentExecutor:
                 # The ids live in the enum and in the Available Agents block —
                 # repeating them here would be a third copy on every turn.
                 prop["description"] = "Agent to call (see Available Agents)"
+            out.append(td)
+        return out
+
+    def _with_scheduling_targets(self, tool_defs: list[dict]) -> list[dict]:
+        """Add the optional ``agent_id`` to manage_tasks / autonomy_control when
+        this agent may act on others, pinned to the ids it may reach.
+
+        The parameter is INJECTED rather than declared in tool.json: without the
+        grant the schema must not even mention it, or every agent would be told
+        about a capability its handler refuses — and a small model reads a
+        parameter as an invitation. With the grant, the enum is what keeps it from
+        inventing an id, exactly as for call_agent. Definitions are cached by the
+        registry, so each entry is deep-copied before it is touched."""
+        ids = self.scheduling_target_ids()
+        if not ids:
+            return tool_defs
+        out = []
+        for td in tool_defs:
+            if td.get("id") not in _SCHEDULING_TOOLS:
+                out.append(td)
+                continue
+            td = copy.deepcopy(td)
+            props = td.setdefault("parameters", {}).setdefault("properties", {})
+            props["agent_id"] = {
+                "type": "string",
+                "enum": ids,
+                # What it is FOR, first, and the trigger phrase second. Measured
+                # with a local model: a description opening with "Omit to act on
+                # yourself" got exactly that — asked to "schedule X for agent
+                # worker" it dropped the parameter and created the task on itself,
+                # then reported success. A small model acts on the head of a
+                # sentence, so the condition has to come before the exception.
+                "description": "Which agent this call is about. Required whenever "
+                               "the request names another agent ('schedule … for "
+                               "agent X', 'start X'); leave it out only when the "
+                               "request is about yourself.",
+            }
+            # The tool.json prose says "your own"; left alone it contradicts the
+            # parameter that was just added.
+            td["description"] = (td.get("description", "").rstrip()
+                                 + " If the request names another agent, pass its "
+                                   "id as agent_id — without it this acts on you.")
+            out.append(td)
+        return out
+
+    def _with_notify_targets(self, tool_defs: list[dict]) -> list[dict]:
+        """Pin notify_user's ``to`` to the names in the address book.
+
+        Same trade as ``_with_delegation_targets``: a handful of names in the schema
+        costs ~15 tokens and lands the message in one call, where the alternatives
+        cost more. A separate "list the contacts" tool would carry its own
+        definition in every payload — more tokens than the enum it replaces — plus
+        an iteration a small model tends to skip; a prompt section costs more than
+        the enum for the same names and constrains nothing.
+
+        The names come from a plugin, through the registry, and may be absent: no
+        contacts (or too many) leaves the schema exactly as it is, and the tool's
+        error still lists candidates. Definitions are cached by the registry, so the
+        entry is deep-copied before it is touched.
+        """
+        provider = getattr(self.tool_registry, "notify_targets", None)
+        if provider is None:
+            return tool_defs
+        targets = provider() or {}
+        names = [n for n in (targets.get("contacts") or []) if n]
+        channels = [c for c in (targets.get("channels") or []) if c]
+        if not names or len(names) > _NOTIFY_TARGETS_MAX:
+            names = []
+        if not names and not channels:
+            return tool_defs
+        # Broadcast last: given a list, a small model reaches for the first value,
+        # and "tell everyone" is the one choice that must be asked for.
+        broadcast = targets.get("broadcast") or ""
+        if names and broadcast and len(names) > 1:
+            names = [*names, broadcast]
+        out = []
+        for td in tool_defs:
+            if td.get("id") != "notify_user":
+                out.append(td)
+                continue
+            td = copy.deepcopy(td)
+            props = td.get("parameters", {}).get("properties", {})
+            if names and isinstance(props.get("to"), dict):
+                props["to"]["enum"] = names
+            if channels and isinstance(props.get("channel"), dict):
+                props["channel"]["enum"] = channels
             out.append(td)
         return out
 
@@ -656,19 +791,20 @@ class AgentExecutor:
 
     def _build_memory_section(self, memory_context: list | None) -> str:
         """The '## Memory' block injected into the system prompt: the agent's
-        long-term root digest plus the summaries of this session's archived
-        turns (session["memory"].context, filled by the memory compactor).
-        Kept OUT of conversation[] so the scaffolding predicate and the rewind
-        endpoint never see it. Empty unless the agent opted into memory."""
+        memory.md (profile prose + Notes/Recent indexes) plus the summaries of
+        this session's archived turns (session["memory"].context, filled by
+        the memory compactor). Kept OUT of conversation[] so the scaffolding
+        predicate and the rewind endpoint never see it. Empty unless the agent
+        opted into memory."""
         if not self.agent.memory_enabled or self.stores.memory is None:
             return ""
         parts = []
         try:
-            root = self.stores.memory.get_root_summary(self.agent.id)
+            md = self.stores.memory.get_memory_md(self.agent.id)
         except Exception:
-            root = ""
-        if root:
-            parts.append("### Long-term memory (from all past conversations)\n" + root)
+            md = ""
+        if md:
+            parts.append(md)
         lines = [
             f"- [{(c.get('ts') or '')[:10]}] {c['summary']}"
             for c in (memory_context or []) if c.get("summary")
@@ -691,6 +827,11 @@ class AgentExecutor:
         how to forward them to a sub-agent by index."""
         if tool_defs and any(d["id"] == "call_agent" for d in tool_defs):
             tool_defs = self._with_delegation_targets(tool_defs)
+        if tool_defs and any(d["id"] == "notify_user" for d in tool_defs):
+            tool_defs = self._with_notify_targets(tool_defs)
+        if tool_defs and getattr(self.agent, "schedule_others", False) \
+                and any(d["id"] in _SCHEDULING_TOOLS for d in tool_defs):
+            tool_defs = self._with_scheduling_targets(tool_defs)
         openai_tools = ToolRegistry.to_openai_format(tool_defs) if tool_defs else None
         # Turn-scoped additions (memory digest, attachments manifest) are kept
         # as a suffix on self too: the no-tools fallback rebuilds the system

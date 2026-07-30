@@ -1,6 +1,6 @@
 {
   "name": "Memory Note",
-  "description": "Save an important fact to your long-term memory so you can find it again in future conversations (with memory_search). Use it for stable facts, preferences and decisions - not for chit-chat. Only works for agents with memory enabled.",
+  "description": "Save an important fact to your long-term memory so you can find it again in future conversations. Notes go to the '## Notes' index of your memory, visible in every future session and kept longer than automatic summaries. Use it for stable facts, preferences and decisions - not for chit-chat. Only works for agents with memory enabled.",
   "internal": true,
   "parameters": {
     "type": "object",

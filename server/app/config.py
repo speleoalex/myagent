@@ -113,7 +113,7 @@ def ensure_sessions() -> Path:
     return SESSIONS_DIR
 
 
-# Per-agent deep memory (summary tree + archived conversation chunks). Written
+# Per-agent long-term memory (memory.md + Markdown summary chunks). Written
 # by the memory compactor and read by the memory_* tools; strictly one
 # subdirectory per agent id. Defaults to ~/myagent/memory; override with the
 # MYAGENT_MEMORY env var.

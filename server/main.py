@@ -45,6 +45,7 @@ from app.tools.internal import (
     autonomy_control_handler,
     call_agent_handler,
     manage_tasks_handler,
+    notify_targets,
     notify_user_handler,
 )
 from app.tools.memory_tools import (
@@ -117,10 +118,10 @@ if CONFIG_SEEDED:
     log.info("Initialized config directory %s from defaults (%s)", CONFIG_DIR, DEFAULT_CONFIG_DIR)
 else:
     log.info("Config directory: %s", CONFIG_DIR)
-# Per-agent deep memory (summary tree + archived chunks). Opt-in per agent
+# Per-agent long-term memory (memory.md + Markdown chunks). Opt-in per agent
 # via Agent.memory_enabled — nothing is written for agents that don't enable it.
 ensure_memory()
-log.info("Deep memory directory: %s", MEMORY_DIR)
+log.info("Memory directory: %s", MEMORY_DIR)
 memory_store = MemoryStore(MEMORY_DIR)
 
 stores = Stores(
@@ -192,6 +193,11 @@ tool_registry.register_internal(
     "notify_user",
     functools.partial(notify_user_handler, _named=named_sessions, _state=app.state),
 )
+# The other half of notify_user: the executor pins the tool's 'to' parameter to the
+# names in the address book, so it needs to READ that book while it builds a turn's
+# tool definitions. Same late, lazy app.state closure as above — the plugin that
+# owns the contacts is loaded further down.
+tool_registry.notify_targets = lambda: notify_targets(app.state)
 # manage_tasks needs the task store: bound here (underscore name so a model
 # hallucinating a "_tasks" argument can't collide silently — it just errors).
 tool_registry.register_internal(

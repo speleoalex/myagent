@@ -77,7 +77,7 @@
       },
       "autonomous": {
         "type": "object",
-        "description": "Optional autonomy safety rails: {max_wakes_per_hour, max_consecutive_errors, wake_timeout_s, notify_binding_id, notify_chat_id, history_messages}. null = defaults. WHEN the agent runs is not set here: that is its task list (manage_tasks / the Tasks page)."
+        "description": "Optional autonomy safety rails: {max_wakes_per_hour, max_consecutive_errors, wake_timeout_s, notify_binding_id, notify_to, history_messages}. notify_to is who gets the notifications when nobody is named: a contact's NAME, or a chat id. null = defaults. WHEN the agent runs is not set here: that is its task list (manage_tasks / the Tasks page)."
       }
     },
     "required": [

@@ -63,7 +63,11 @@ echo "[3/4] Installing systemd service..."
 cat > "$SERVICE_FILE" <<EOF
 [Unit]
 Description=MyAgent - AI Agent Platform
-After=network.target
+# network-online.target waits for actual connectivity (network.target does
+# not), so the messaging connectors don't start before DNS is resolvable.
+# They retry on their own anyway; this just avoids the noise at boot.
+Wants=network-online.target
+After=network.target network-online.target
 
 [Service]
 Type=simple

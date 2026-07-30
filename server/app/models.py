@@ -207,8 +207,15 @@ class AutonomousConfig(BaseModel):
     max_wakes_per_hour: int = 12
     max_consecutive_errors: int = 5
     wake_timeout_s: int = 600
-    notify_binding_id: str = ""     # default target for the notify_user tool
-    notify_chat_id: str = ""
+    # Which bot sends, when notify_user does not name one. Also the answer to
+    # the connectors plugin's "several bots could send this" — with two bots
+    # enabled, resolving a contact by name is impossible without it.
+    notify_binding_id: str = ""
+    # Who hears from the agent when the CALLER named nobody — a name from the
+    # address book, a raw chat id (a group's id is negative and no address book
+    # can hold it), or several of either separated by commas. A fallback only:
+    # notify_user's own ``to`` and ``chat_id`` both win over it.
+    notify_to: str = ""
     # How many messages of the PREVIOUS wakes a wake may see. Default 0: none.
     #
     # Nothing like the interactive window (200 with memory on). A recurring task
@@ -217,12 +224,30 @@ class AutonomousConfig(BaseModel):
     # loop: the model reads its last output and reproduces it, which is how an
     # already-fixed misconfiguration keeps being reported as broken (observed,
     # for three wakes running, after the fix landed). Continuity that actually
-    # matters belongs to deep memory, which is injected as a digest, and an agent
+    # matters belongs to long-term memory, whose memory.md is injected, and an agent
     # that needs more can be told to call memory_search in its instructions.
     #
     # The full conversation is still written to the session file either way: this
     # governs only what goes back INTO the prompt. Raise it if you have a reason.
     history_messages: int = 0
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_notify_chat_id(cls, data):
+        """Back-compat: the default target used to be a chat id and nothing else.
+
+        It now goes through the same resolver as ``notify_user``'s ``to``, so it
+        holds a person rather than a number and the key says so. Lifted on read,
+        like ModelConfig.migrate_num_ctx: the stored files are never rewritten,
+        and a legacy id still resolves — the plugin passes a bare id through.
+        """
+        if not isinstance(data, dict) or "notify_chat_id" not in data:
+            return data
+        legacy = data["notify_chat_id"]
+        data = {k: v for k, v in data.items() if k != "notify_chat_id"}
+        if not data.get("notify_to"):
+            data["notify_to"] = legacy
+        return data
 
 
 class Agent(BaseModel):
@@ -239,11 +264,11 @@ class Agent(BaseModel):
     enabled: bool = True
     callable: bool = True             # can be called/selected by others (delegation + pickers)
     callable_agents: list[str] = ["*"]  # agents this agent may delegate to via call_agent; ["*"] = all
-    # Per-agent deep memory (opt-in). False = hard exclusion: no compaction, no
+    # Per-agent long-term memory (opt-in). False = hard exclusion: no compaction, no
     # prompt injection, and the memory_* tools refuse even if attached.
     memory_enabled: bool = False
     # Compaction threshold in estimated tokens of the CLEANED conversation:
-    # above it, the oldest turns are archived to deep memory and summarized.
+    # above it, the oldest turns are archived to long-term memory and summarized.
     memory_threshold: int = 4000
     # THE autonomy switch (default off). True = the AutonomyService runs this
     # agent's due tasks (see Task). Persisted with the agent, so a started agent
@@ -251,6 +276,13 @@ class Agent(BaseModel):
     # enabled=false) is the kill switch, effective within one scheduler scan.
     # An agent with no task never wakes, live or not.
     live: bool = False
+    # May this agent schedule/steer OTHER agents? Default off, and off means the
+    # historical behaviour their descriptions promise: manage_tasks and
+    # autonomy_control act on the caller alone. On, the executor injects an
+    # optional ``agent_id`` into both, limited to the agents this one may reach
+    # (AgentExecutor._agent_can_schedule) — one flag, so the capability is
+    # granted deliberately and is visible in the agent file.
+    schedule_others: bool = False
     # Optional autonomy knobs; None = all defaults (live alone is enough).
     autonomous: AutonomousConfig | None = None
 

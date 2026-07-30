@@ -311,6 +311,9 @@ Whisper model) — see [connectors/README.md](connectors/README.md).
 
 ![The bundled agents in the web UI](docs/images/agents.png)
 
+*The seven bundled agents. The play button on a card starts that agent as a
+[live autonomous agent](#autonomous-agents).*
+
 First run seeds seven agents:
 
 | Agent | Does | Needs internet? |

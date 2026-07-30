@@ -1,6 +1,6 @@
 {
   "name": "Memory Search",
-  "description": "Search your long-term memory (summaries of past conversations and saved notes) by keywords. Returns matching memory ids with a short summary; use memory_read on an id for the details. Only works for agents with memory enabled.",
+  "description": "Search your long-term memory (saved notes and summaries of past conversations) by keywords. Returns matching memory ids with a short summary - explicit notes rank first; use memory_read on an id for the details. Only works for agents with memory enabled.",
   "internal": true,
   "parameters": {
     "type": "object",
@@ -8,10 +8,6 @@
       "query": {
         "type": "string",
         "description": "Keywords to look for (e.g. 'deploy telegram backup')"
-      },
-      "deep": {
-        "type": "boolean",
-        "description": "Also search the full archived transcripts, not just the summaries (slower). Default false."
       }
     },
     "required": [

@@ -261,36 +261,47 @@ keeps the stored value. Note that configuring a stdio server means running a
 local command — the same capability `POST /api/tools` already grants by writing
 an executable `run` script.
 
-## Deep memory (per-agent)
+## Long-term memory (per-agent)
 
-Opt-in long-term memory, off by default: an agent with `memory_enabled: true`
-remembers across chats. Two moving parts:
+Opt-in, off by default: an agent with `memory_enabled: true` remembers across
+chats. The store is plain Markdown, readable and hand-editable:
 
-- **Store** (`server/app/storage/memory.py`) — one tree per agent under
-  `~/myagent/memory/<agent_id>/`: `tree.json` holds a root digest plus every
-  summary node (`s-NNNNNN`); `chunks/c-NNNNNN.json` are the archived raw
-  conversation slices (and notes), read only on drill-down. Storage only, no
-  LLM calls; per-agent `asyncio.Lock`; atomic writes.
+- **Store** (`server/app/storage/memory.py`) — one directory per agent under
+  `~/myagent/memory/<agent_id>/`: a `memory.md` injected whole into the prompt
+  (as the `## Memory` section) plus flat `chunks/<YYMMDDHHMMSS>.md` files, one
+  per archived item. `memory.md` has three parts split by two load-bearing
+  markers: everything before `## Notes` is user prose (a durable profile,
+  edited by hand, preserved byte-for-byte); `## Notes` indexes explicit
+  `memory_note` facts (cap 20); `## Recent` indexes automatic conversation
+  summaries (cap 10, newest on top). Explicit "remember this" facts outrank
+  automatic summaries: their own section, a higher cap, and first place in
+  `memory_search` results. Evicted index lines disappear from `memory.md`
+  only — the chunk files stay on disk and remain searchable. A chunk is
+  frontmatter + body, where the body is ONLY the summary (or the full note
+  text): the complete transcripts already live in the sessions store, the
+  single ground truth — memory never duplicates them. Storage only, no LLM
+  calls; per-agent `asyncio.Lock` held for file I/O only; atomic writes.
 - **Compactor** (`server/app/engine/memory_compactor.py`) — fires in the
   background after a persisted turn. When the session's cleaned conversation
   exceeds `agent.memory_threshold` (estimated tokens, default 4000), the oldest
-  turns are archived as a chunk, summarized with the agent's own model, and
-  spliced out of `conversation[]`. The summary goes into
+  turns are summarized with the agent's own model (no lock held — an LLM call
+  takes 10-60s locally), written as a chunk, indexed in `memory.md`, and
+  spliced out of `conversation[]`. The summary also goes into
   `session["memory"] = {archived_user_turns, context[]}` — never into
   `conversation[]` (that would break the scaffolding predicate and the rewind
-  endpoint) — and is injected at prompt build as a `## Memory` section, along
-  with the tree's root digest. Every 8 parentless nodes fold into a
-  higher-level summary (cascading), and the root digest is refreshed
-  best-effort — both after a compaction and (fire-and-forget) after a
-  `memory_note`, so a fresh note reaches new sessions without waiting for the
-  next compaction. A `memory_search` with no keyword match still lists the
-  most recent top-level entries (vague queries like "what do you remember?"
-  would otherwise read as an empty memory).
+  endpoint). A `memory_note` lands straight in the `## Notes` index with no
+  LLM involved, so it reaches new sessions immediately. A `memory_search`
+  with no keyword match still lists the most recent entries (vague queries
+  like "what do you remember?" would otherwise read as an empty memory);
+  `memory_read` on a conversation chunk names the session holding the full
+  transcript.
 
-Crash safety: chunk file → tree.json → session splice, in that order, with a
-content-hash dedup making the retry idempotent — nothing is ever removed from
-a conversation before it is durable in deep memory. A failed or garbage
-summary aborts the whole pass (behavior degrades to exactly today's).
+Crash safety: chunk file → `memory.md` index → session splice, in that order,
+with a content-hash dedup making the retry idempotent (`add_to_index` is a
+no-op on an already-listed id) — nothing is ever removed from a conversation
+before it is durable in memory, and a chunk missing from the index is still
+found by `memory_search`, which scans the files, not the index. A failed or
+garbage summary aborts the whole pass (behavior degrades to exactly today's).
 
 Access: memory is strictly per-agent (`call_agent` transfers none), and
 `memory_enabled: false` (the default) is a hard exclusion — the three internal
@@ -342,13 +353,30 @@ stays idle whether it is live or not.
   naming what comes next so the agent can answer "what's scheduled?" without a
   tool call. A reply of exactly ``NOOP`` with zero tool calls skips persistence
   entirely (a 20-minute routine must not grow the session), while any tool call
-  is always recorded. Agents with ``memory_enabled`` get their root digest
+  is always recorded. Agents with ``memory_enabled`` get their memory.md
   injected and the session compacts like any other; agents without memory have
   the saved conversation capped.
 - **Reaching the user** — the ``notify_user`` tool hands the text to a running
-  connector, found through ``app.state.connectors`` (the connectors plugin), using
-  the agent's configured default binding/chat. Best-effort, and a clear error when
-  the plugin is not installed. The reply text of a wake is only logged.
+  connector, found through ``app.state.connectors`` (the connectors plugin).
+  Recipients are addressed BY NAME from the address book (``to``), and the agent's
+  configured binding/chat is the fallback for when no name is given — in that
+  order, so a named recipient is never overridden by the default. Best-effort, and
+  a clear error when the plugin is not installed. The reply text of a wake is only
+  logged.
+- **Scheduling for OTHER agents** (opt-in, ``Agent.schedule_others``, default
+  off) — with the flag, the executor injects an optional ``agent_id`` into
+  ``manage_tasks`` and ``autonomy_control``, pinned by an ``enum`` to the agents
+  this one may act on (``_with_scheduling_targets`` /
+  ``_agent_can_schedule``: enabled, ``callable``, not itself). Both tools,
+  because a task on an agent whose ``live`` is off never runs, so scheduling
+  without starting is half a capability. The parameter is injected rather than
+  declared in ``tool.json``: without the grant the schema must not even mention
+  it — a documented parameter reads as an invitation — and the handlers refuse
+  it too, against the same list the enum offered. Omitted (or a placeholder like
+  "self") always means the caller itself, which is the whole behaviour when the
+  flag is off. Every message that names a target says so ("Task t-3 created for
+  agent 'sysadmin'"): the reader is a model that relays the line to the user,
+  and "task created" is otherwise heard as its own.
 - **Safety rails** — per-hour rate limit (also the floor on how often a task
   can really run), auto-pause after N consecutive errors (cleared by re-saving
   the agent or ``POST /api/autonomy/{id}/resume``), ``wake_timeout_s`` wall,
@@ -364,7 +392,7 @@ trigger, also the main testing lever), `POST /api/autonomy/{id}/stop`,
 `POST /api/tasks/{id}/run` (make it due now) and `GET /api/tasks/preview?cron=`
 (the next occurrences, so the form never has to reimplement cron in JS).
 `DELETE /api/agents/{id}` removes the agent's autonomy state and its tasks
-(deep memory is deliberately kept).
+(long-term memory is deliberately kept).
 
 `notify_user` both sends and appends the sent text to the target chat's own
 conversation, so an unsolicited message is part of the history the agent replays
@@ -372,13 +400,32 @@ next turn (otherwise "repeat that" repeats the turn before it). The session key 
 asked of the connector (`session_id_for`): it derives from the binding's
 `session_prefix`, so nothing else can compute it. A wake receives no chat history
 at all by default (`AutonomousConfig.history_messages: 0`); continuity comes from
-deep memory instead.
+long-term memory instead.
 
 `GET /api/connectors/bindings` is served by the plugin and lets the agent form
-offer a real picker for `autonomous.notify_binding_id` instead of a free-text id.
-Secrets are masked, never forwarded. Without the plugin the route does not exist,
-so the fetch fails and the form falls back to a text input — which is the right
-control in that state, since the id must still be typeable.
+offer a real picker for `autonomous.notify_binding_id` instead of a free-text id;
+`GET /api/connectors/contacts` fills the suggestions for `autonomous.notify_to`,
+which stores a person's NAME — the same string `notify_user`'s `to` takes, resolved
+by the same code, so a default target is checkable and survives that person's chat
+id changing. A raw id still works (a group's is negative and no address book can
+hold it). Secrets are masked, never forwarded. Without the plugin the routes do not exist, so the fetches fail and the
+form falls back to a text input — which is the right control in that state, since
+the id must still be typeable.
+
+**The address book reaches the model through the tool schema.** The plugin exposes
+`Connectors.notify_targets()` (contact names, channel labels, the broadcast word);
+the core reads it through a late-bound `ToolRegistry.notify_targets` callable and
+the executor pins `notify_user`'s `to` and `channel` to those values per turn
+(`_with_notify_targets`, deep-copying the cached definition exactly as
+`_with_delegation_targets` does for `call_agent`). Names only, never handles: a
+model shown an id pastes it into `chat_id` and skips the lookup that makes the
+recipient verifiable. This is the cheapest of the three options — a separate
+"list the contacts" tool would carry its own definition in every payload, more
+tokens than the enum it replaces, plus an iteration; a prompt section costs more
+for the same names and constrains nothing. Above 20 contacts the enum is dropped
+rather than truncated, because the text protocol would cut it silently. `to: "all"`
+broadcasts to every contact reachable on that channel, and names the ones it could
+not reach in the result.
 
 ## Plugins
 
@@ -406,7 +453,7 @@ Everything is plain JSON under `~/myagent/` (see `server/app/config.py`):
 | `~/myagent/library/` | `MYAGENT_LIBRARY` | offline knowledge for `local_search` (ZIM archives, notes) — user-placed, never written by the app |
 | `~/myagent/workspace/` | `MYAGENT_WORKSPACE` | working dir for agents' file operations; relative paths in file/shell tools resolve here |
 | `~/myagent/sessions/` | `MYAGENT_SESSIONS` | `current.json`, `history/`, `channels/` (connector chats) |
-| `~/myagent/memory/` | `MYAGENT_MEMORY` | per-agent deep memory: `<agent_id>/tree.json` + `chunks/` |
+| `~/myagent/memory/` | `MYAGENT_MEMORY` | per-agent long-term memory: `<agent_id>/memory.md` + `chunks/*.md` |
 | `~/myagent/autonomy/` | `MYAGENT_AUTONOMY` | live agents' runtime state: `<agent_id>/state.json` (the schedule itself lives in `config/tasks/`) |
 | `~/myagent/connectors/` | `MYAGENT_CONNECTORS_DIR` | connectors *plugin* state: bot bindings (0600), grants, contacts, kill switch |
 | `~/myagent/plugins/` | `MYAGENT_PLUGINS` | installed plugins (code, replaceable — state never lives here) |
@@ -452,7 +499,7 @@ under `ui/vendor/`.
 | LLM communication | `server/app/engine/llm_provider.py` |
 | Context window / capability probe | `server/app/engine/model_probe.py` |
 | Live (client-decoupled) runs | `server/app/engine/live.py` |
-| Deep-memory store (tree + chunks) | `server/app/storage/memory.py` |
+| Long-term memory store (memory.md + chunks) | `server/app/storage/memory.py` |
 | Memory compaction pipeline | `server/app/engine/memory_compactor.py` |
 | Autonomy scheduler + wake turns | `server/app/engine/autonomy.py` |
 | Scheduled-task store (`next_at` is computed here) | `server/app/storage/tasks.py` |

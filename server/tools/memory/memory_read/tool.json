@@ -1,13 +1,13 @@
 {
   "name": "Memory Read",
-  "description": "Read one node of your long-term memory by id (from memory_search or a previous memory_read). A summary node (s-...) shows its summary and children; a chunk (c-...) returns the archived conversation transcript or note. Only works for agents with memory enabled.",
+  "description": "Read one item of your long-term memory by id (from memory_search or the Memory index), e.g. '260730143012'. A note returns its full text; a conversation memory returns the archived summary and names the session holding the full transcript. Only works for agents with memory enabled.",
   "internal": true,
   "parameters": {
     "type": "object",
     "properties": {
       "node_id": {
         "type": "string",
-        "description": "The memory node id, e.g. 's-000007' or 'c-000003'"
+        "description": "The memory id, e.g. '260730143012'"
       }
     },
     "required": [

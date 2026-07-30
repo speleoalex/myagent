@@ -148,6 +148,12 @@ class ToolRegistry:
         # definitions are kept OUT of self._cache: _scan() deletes every id it
         # doesn't see on disk, which would evict them on the next rescan.
         self.mcp_manager = None
+        # The address book behind notify_user's schema: a zero-argument callable
+        # returning {"contacts": [...], "channels": [...], "broadcast": "all"}.
+        # Assigned after construction for the same reason as mcp_manager, plus
+        # one of its own: it belongs to a PLUGIN, which registers itself into app
+        # state later, so this has to be a call and not a value.
+        self.notify_targets = None
 
     @property
     def tools_dir(self) -> Path:

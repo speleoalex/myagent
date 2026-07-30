@@ -57,7 +57,7 @@ log = logging.getLogger(__name__)
 # window opening is noticed within this many seconds (a queued event kicks the
 # loop immediately instead).
 SCAN_INTERVAL = 5.0
-# Conversation cap for autonomous sessions of agents WITHOUT deep memory: the
+# Conversation cap for autonomous sessions of agents WITHOUT memory: the
 # heartbeat would otherwise grow the compact history without bound. Agents with
 # memory_enabled get real continuity from the compactor instead.
 NO_MEMORY_CONV_CAP = 40
@@ -137,8 +137,15 @@ def build_wake_prompt(agent: Agent, cfg: AutonomousConfig, tasks: list[dict],
         lines.append("\nTo contact the user, use the notify_user tool. "
                      "Your reply text is only logged.")
     if "manage_tasks" in granted:
-        lines.append("You can schedule future work for yourself, and review or "
-                     "cancel what is already scheduled, with the manage_tasks tool.")
+        line = ("You can schedule future work for yourself, and review or "
+                "cancel what is already scheduled, with the manage_tasks tool.")
+        # Kept in step with the injected agent_id parameter (executor
+        # _with_scheduling_targets): unannounced, a model that holds the grant
+        # does not reach for it during a wake, where there is no user to suggest it.
+        if getattr(agent, "schedule_others", False):
+            line += (" Pass its agent_id to schedule work for another agent, and "
+                     "autonomy_control's agent_id to start one.")
+        lines.append(line)
     if "call_agent" in granted:
         # Load-bearing, not a courtesy: a router-style agent typically holds no
         # tool that can observe anything (master has none), so delegation is its

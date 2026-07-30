@@ -156,19 +156,42 @@ class TelegramConnector(BaseConnector):
     async def start(self) -> None:
         self.status.state = "starting"
         self._http = httpx.AsyncClient()
-        try:
-            me = await self.get_me()
-            # Kept so a recovery can restore it: on the way out of an error the
-            # status would otherwise keep showing the stale failure message while
-            # reporting "running".
-            self._account = "@" + me.get("username", "?")
-            self.status.detail = self._account
-        except Exception as e:
-            self.status.state = "error"
-            self.status.detail = redact(str(e), self.binding.token)
-            await self._http.aclose()
-            self._http = None
-            raise
+        # The initial getMe must survive a network that isn't there yet: at boot
+        # this task starts before DNS/routes are up (systemd's network.target
+        # doesn't wait for connectivity), and dying here left the bot in a
+        # permanent "error" until a manual resume. Transport errors get the same
+        # retry-with-backoff contract as the poll loop; a rejected token is not
+        # transient and still fails hard.
+        backoff = 1
+        last_logged = ""
+        while True:
+            try:
+                me = await self.get_me()
+                break
+            except httpx.TransportError as e:
+                if self._stop.is_set():
+                    await self._http.aclose()
+                    self._http = None
+                    return
+                self.status.state = "error"
+                self.status.detail = redact(str(e), self.binding.token)
+                if self.status.detail != last_logged:
+                    last_logged = self.status.detail
+                    log.warning("start blocked (%s): %s — retrying, backoff %ss",
+                                self.binding.id, self.status.detail, backoff)
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 60)
+            except Exception as e:
+                self.status.state = "error"
+                self.status.detail = redact(str(e), self.binding.token)
+                await self._http.aclose()
+                self._http = None
+                raise
+        # Kept so a recovery can restore it: on the way out of an error the
+        # status would otherwise keep showing the stale failure message while
+        # reporting "running".
+        self._account = "@" + me.get("username", "?")
+        self.status.detail = self._account
         # A bot in webhook mode can't use getUpdates — switch it to polling.
         try:
             await self._call("deleteWebhook")

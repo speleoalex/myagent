@@ -133,6 +133,10 @@ server was (there, only the outbound send endpoint was authenticated).
   consecutive errors instead of retrying forever. Fix the cause, then
   `POST /api/connectors/bindings/<id>/resume` — or just save the binding again,
   which also clears the pause.
+- **No network is not a failure, it's a wait.** At boot the service can come up
+  before DNS does; startup retries transport errors with backoff (showing
+  `error` with the reason meanwhile) and recovers on its own when the network
+  arrives. Only a rejected token makes startup fail for good.
 - **Stop everything**: `POST /api/connectors/stop` stops every bot and
   **remembers it across restarts**; `POST /api/connectors/start` re-enables.
   Deliberately not automatic — this is what you reach for when the plugin is
