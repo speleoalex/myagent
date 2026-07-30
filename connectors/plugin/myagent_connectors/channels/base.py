@@ -12,9 +12,9 @@ import contextlib
 import logging
 import re
 
-from app.models import Binding
-from app.myagent_client import MyAgentClient
-from app.storage import GrantStore
+from myagent_connectors.models import Binding
+from myagent_connectors.core import CoreClient
+from myagent_connectors.storage import GrantStore
 
 log = logging.getLogger("connectors.channel")
 
@@ -31,12 +31,33 @@ def _safe_session_id(prefix: str, chat_id) -> str:
     return _UNSAFE.sub("_", raw)
 
 
+def redact(text: str, *secrets: str) -> str:
+    """Strip bot credentials out of a string before it leaves the process.
+
+    Needed because the transport builds URLs that CONTAIN the token, and an HTTP
+    client's error message quotes the URL it failed on. Such a message used to
+    travel two ways that both hand the token to someone else: back to the chat
+    as "could not download: <error>", and into ``status.detail``, which the admin
+    API serves to the browser. Anyone reading it owns the bot.
+    """
+    for secret in secrets:
+        if secret and len(secret) > 4:
+            text = text.replace(secret, "***")
+    return text
+
+
 class ConnectorStatus:
     def __init__(self):
-        self.state = "stopped"      # stopped | starting | running | error
+        # stopped | starting | running | error | paused (disabled is derived
+        # from the binding, not stored here)
+        self.state = "stopped"
         self.detail = ""            # bot @username, or last error message
         self.last_update = ""       # iso timestamp of last processed message
         self.messages = 0           # processed message count
+        # Consecutive failures. Reset by the first success; when it reaches the
+        # configured ceiling the connector pauses itself instead of retrying
+        # forever — a dead token would otherwise fill the agent's own journal.
+        self.errors = 0
 
     def to_dict(self) -> dict:
         return {
@@ -44,13 +65,14 @@ class ConnectorStatus:
             "detail": self.detail,
             "last_update": self.last_update,
             "messages": self.messages,
+            "errors": self.errors,
         }
 
 
 class BaseConnector:
     type = "base"
 
-    def __init__(self, binding: Binding, client: MyAgentClient, grants: GrantStore):
+    def __init__(self, binding: Binding, client: CoreClient, grants: GrantStore):
         self.binding = binding
         self.client = client
         self.grants = grants
@@ -159,7 +181,7 @@ class BaseConnector:
         attachments = attachments or None
 
         # Log every sender so the admin can discover ids/usernames to authorize
-        # (visible via `journalctl -u myagent-connectors`).
+        # (visible via `journalctl -u myagent`).
         log.info("[%s] inbound from id=%s username=%s%s", self.binding.id, user_id,
                  ("@" + username) if username else "-",
                  f" ({len(attachments)} file)" if attachments else "")
@@ -189,7 +211,7 @@ class BaseConnector:
                 return
 
         if chat_id in self._busy:
-            await self.send(chat_id, "⏳ Sto ancora elaborando il messaggio precedente…")
+            await self.send(chat_id, "⏳ Still working on your previous message…")
             return
 
         sid = self.session_id_for(chat_id)
@@ -212,7 +234,7 @@ class BaseConnector:
             self._busy.discard(chat_id)
 
         self.status.messages += 1
-        await self.send(chat_id, reply or "(nessuna risposta)")
+        await self.send(chat_id, reply or "(no reply)")
 
     async def _typing_loop(self, chat_id) -> None:
         """Transport hook: keep a 'typing…' indicator alive while the agent

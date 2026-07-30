@@ -36,13 +36,16 @@ import json
 import logging
 import random
 import re
+import shutil
 from datetime import datetime, timedelta
 from pathlib import Path
 
 from app.engine import prompts
 from app.engine.executor import AgentExecutor
+from app.engine.memory_compactor import schedule_compaction
 from app.models import Agent, AutonomousConfig, ChatMessage
-from app.storage.sessions import now_iso, read_json, write_json
+from app.storage.sessions import (memory_context, now_iso, read_json,
+                                  record_turn, steps_from, write_json)
 
 log = logging.getLogger(__name__)
 
@@ -57,9 +60,17 @@ NO_MEMORY_CONV_CAP = 40
 
 _NOOP_RE = re.compile(r"^\s*noop[.!]?\s*$", re.IGNORECASE)
 
+# Naming convention of the dedicated per-agent autonomous session. Owned here;
+# other layers (the sessions router) must use these helpers, never the literal.
+AUTONOMOUS_PREFIX = "autonomous_"
+
 
 def session_id_for(agent_id: str) -> str:
-    return f"autonomous_{agent_id}"
+    return f"{AUTONOMOUS_PREFIX}{agent_id}"
+
+
+def is_autonomous_session(session_id: str) -> bool:
+    return (session_id or "").startswith(AUTONOMOUS_PREFIX)
 
 
 def _short(text: str, limit: int = 200) -> str:
@@ -149,12 +160,13 @@ def build_wake_prompt(agent: Agent, cfg: AutonomousConfig, events: list[dict],
 
 
 class AutonomyService:
-    def __init__(self, stores, tool_registry, named_sessions, session_store,
+    def __init__(self, stores, tool_registry, named_sessions,
                  live, events, base_dir: Path):
         self.stores = stores
         self.tool_registry = tool_registry
+        # Rotation/archival of the autonomous sessions is the named store's own
+        # policy (save_rotating), so no web SessionStore handle is needed here.
         self.named = named_sessions
-        self.session_store = session_store
         self.live = live
         self.events = events
         self.base = Path(base_dir)
@@ -209,10 +221,7 @@ class AutonomyService:
         write_json(path, st)
 
     def _agent_mtime(self, agent_id: str) -> float:
-        try:
-            return self.stores.agents._path(agent_id).stat().st_mtime
-        except (OSError, ValueError):
-            return 0.0
+        return self.stores.agents.mtime(agent_id)
 
     # ------------------------------------------------------------- main loop
     async def _loop(self) -> None:
@@ -351,12 +360,9 @@ class AutonomyService:
                                prompt: str, result: dict):
         """Mirror of routers.chat._make_drive on the named-session store,
         plus the NOOP contract. The session is loaded INSIDE named.lock(sid)
-        (layer 3), so a user turn in the same session can't interleave."""
-        # Imported here: engine → routers only inside the closure, and reusing
-        # these keeps the autonomous session byte-compatible with channel chats.
-        from app.routers.chat import (_maybe_compact, _record_turn,
-                                      _save_channel_session, _steps_from)
-
+        (layer 3), so a user turn in the same session can't interleave.
+        Recording goes through the same storage helpers as channel chats, so
+        the autonomous session stays byte-compatible with them."""
         # None means "all defaults", as everywhere else in this module.
         cfg = agent.autonomous or AutonomousConfig()
 
@@ -378,13 +384,12 @@ class AutonomyService:
                 else:
                     stored = []
                 prior = [ChatMessage(**m) for m in stored]
-                memory_context = (session.get("memory") or {}).get("context")
                 tool_events: list[dict] = []
                 reply_text = ""
                 recorded = False
                 try:
                     async for event in executor.run_stream(prompt, prior, None,
-                                                           memory_context):
+                                                           memory_context(session)):
                         et = event.get("type")
                         if et == "tool_result":
                             tool_events.append(event.get("data", {}))
@@ -404,15 +409,14 @@ class AutonomyService:
                                     "autonomous": True, "agent_id": agent.id,
                                     "ts": now_iso(),
                                 })
-                                steps = _steps_from(data.get("trace"), tool_events)
+                                steps = steps_from(data.get("trace"), tool_events)
                                 conv = data.get("conversation")
-                                _record_turn(session, steps, reply, conv)
+                                record_turn(session, steps, reply, conv)
                                 if not agent.memory_enabled:
                                     session["conversation"] = \
                                         session.get("conversation", [])[-NO_MEMORY_CONV_CAP:]
                                 await asyncio.shield(asyncio.to_thread(
-                                    _save_channel_session, self.named,
-                                    self.session_store, sid, session))
+                                    self.named.save_rotating, sid, session))
                             recorded = True
                         run.emit(event)
                 except asyncio.CancelledError:
@@ -424,13 +428,12 @@ class AutonomyService:
                         })
                         partial = (f"{reply_text}\n\n{prompts.INTERRUPTED}" if reply_text
                                    else prompts.INTERRUPTED)
-                        _record_turn(session, _steps_from(None, tool_events),
-                                     partial, None)
-                        _save_channel_session(self.named, self.session_store,
-                                              sid, session)
+                        record_turn(session, steps_from(None, tool_events),
+                                    partial, None)
+                        self.named.save_rotating(sid, session)
                     raise
             if result["tool_calls"] and agent.memory_enabled:
-                _maybe_compact(executor, sid, named=self.named)
+                schedule_compaction(executor, sid, named=self.named)
         return drive
 
     # ------------------------------------------------------------ public API
@@ -465,10 +468,14 @@ class AutonomyService:
         self._kick.set()
 
     def drop_agent(self, agent_id: str) -> None:
-        """Forget the runtime state of a deleted agent (files are removed by
-        the router)."""
+        """Forget a deleted agent: cached runtime state AND its on-disk
+        directory (state.json + event queues). This module owns that layout —
+        callers (the delete endpoint) must not reach into it themselves."""
         self._states.pop(agent_id, None)
         self._wakes.pop(agent_id, None)
+        agent_dir = self.base / agent_id
+        if agent_dir.is_dir():
+            shutil.rmtree(agent_dir, ignore_errors=True)
 
     def status(self) -> dict:
         """Per-agent runtime status for the UI/API."""

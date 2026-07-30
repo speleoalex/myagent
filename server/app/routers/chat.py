@@ -1,35 +1,18 @@
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
-from datetime import datetime
 import asyncio
 import json
 
-from app import config
-from app.models import ChatRequest, ChatResponse, ChatMessage, _VALID_ID
+from app.engine import prompts
+from app.engine.channel_turn import run_channel_turn
 from app.engine.executor import AgentExecutor, Stores
-from app.engine.memory_compactor import compact_session
-from app.storage.sessions import new_session
+from app.engine.memory_compactor import schedule_compaction
+from app.ids import is_valid_id
+from app.models import ChatRequest, ChatResponse, ChatMessage
+from app.storage.sessions import (memory_context, now_iso, record_turn,
+                                  record_user_turn, steps_from)
 
 router = APIRouter()
-
-
-def _memory_context(session: dict) -> list | None:
-    """This session's archived-turn summaries (injected at prompt build)."""
-    return (session.get("memory") or {}).get("context")
-
-
-def _maybe_compact(executor, session_id: str, *, session_store=None,
-                   named=None, live=None) -> None:
-    """Fire-and-forget deep-memory compaction AFTER a persisted turn: the user
-    never waits on it (a summarization on a local model takes 10-60s). All
-    safety is inside compact_session (per-agent lock, head re-verification,
-    idempotent retry via content hash)."""
-    if not executor.agent.memory_enabled or executor.stores.memory is None:
-        return
-    asyncio.create_task(compact_session(
-        executor.agent, executor.model_config, executor.stores.memory,
-        session_id, session_store=session_store, named=named, live=live,
-    ))
 
 
 def _sse(agen):
@@ -44,136 +27,9 @@ def _sse(agen):
     )
 
 
-def _now() -> str:
-    return datetime.now().isoformat(timespec="seconds")
-
-
-def _title_from(message: str, attachments) -> str:
-    t = (message or "").strip().replace("\n", " ")
-    if t:
-        return t[:60] + ("…" if len(t) > 60 else "")
-    return "(attachment)" if attachments else "New chat"
-
-
 def _record_user(session: dict, req: ChatRequest) -> None:
-    """Append the user turn to the session and set the title on first message."""
-    session.setdefault("messages", []).append({
-        "role": "user",
-        "text": req.message,
-        "attachments": [a.model_dump() for a in req.attachments],
-        "agent_id": req.agent_id,
-        "ts": _now(),
-    })
-    session["agent_id"] = req.agent_id
-    if not session.get("title"):
-        session["title"] = _title_from(req.message, req.attachments)
-
-
-def _tool_message_from_step(step: dict) -> dict:
-    """Turn one executor trace step into a stored 'tool' message. Keeps the full
-    result and — for call_agent — the nested sub_trace, so the archived session
-    holds the complete recursive flow (sub-agent calls, results and tools)."""
-    msg = {
-        "role": "tool",
-        "tool": step.get("tool"),
-        "arguments": step.get("arguments"),
-        "result_preview": step.get("result_preview"),
-        "result": step.get("result"),
-        "ts": step.get("ts") or _now(),
-    }
-    if step.get("sub_trace"):
-        msg["sub_trace"] = step["sub_trace"]
-    return msg
-
-
-def _steps_from(trace, tool_events: list[dict] | None) -> list[dict]:
-    """Prefer the rich recursive trace; fall back to flat tool summaries
-    (older path / no trace available)."""
-    if trace and trace.get("steps"):
-        return trace["steps"]
-    return [
-        {
-            "tool": t.get("tool"),
-            "arguments": t.get("arguments"),
-            "result_preview": t.get("result_preview"),
-            "result": t.get("result") or t.get("result_preview"),
-        }
-        for t in (tool_events or [])
-    ]
-
-
-def _record_turn(session: dict, steps: list[dict], reply: str, conversation) -> None:
-    """Append the tool calls (recursive trace) and assistant reply, and update
-    the compact LLM history."""
-    for step in steps:
-        session["messages"].append(_tool_message_from_step(step))
-    session["messages"].append({"role": "assistant", "text": reply, "ts": _now()})
-    if conversation is not None:
-        session["conversation"] = [
-            m for m in conversation if (m.get("role") if isinstance(m, dict) else m.role) != "system"
-        ]
-
-
-def _save_channel_session(named, session_store, sid: str, session: dict) -> None:
-    """Persist a channel session, rotating it once it outgrows
-    config.CHANNEL_ROTATE_BYTES: the recorded log is archived into the web
-    history (provenance preserved) and the file restarts with the same compact
-    LLM conversation, so the bot keeps its context while the file — which,
-    unlike a web chat, is never closed by "new chat" — stays bounded.
-    Runs in a worker thread (sessions grow large; blocking file I/O)."""
-    named.save(sid, session)
-    if named._path(sid).stat().st_size <= config.CHANNEL_ROTATE_BYTES:
-        return
-    session_store.archive_session(session)
-    fresh = new_session(sid, session.get("agent_id", ""),
-                        channel=session.get("channel") or sid,
-                        source=session.get("source", ""))
-    fresh["conversation"] = session.get("conversation", [])
-    # The medium-short memory travels with the conversation: losing it on
-    # rotation would drop the archived-turn summaries and the rewind offset.
-    if session.get("memory"):
-        fresh["memory"] = session["memory"]
-    named.save(sid, fresh)
-
-
-async def _chat_named(req: ChatRequest, request: Request, executor) -> ChatResponse:
-    """Run one turn against a channel-scoped named session (external
-    connectors). Serialized per session_id so concurrent messages from the same
-    external chat can't interleave their conversation writes.
-
-    Turns are recorded with the same helpers as web chats (_record_user /
-    _record_turn), so channel sessions share the web session format — title,
-    attachments and the full recursive tool trace included."""
-    named = request.app.state.named_sessions
-    session_store = request.app.state.sessions
-    sid = req.session_id
-    async with named.lock(sid):
-        session = await asyncio.to_thread(named.get, sid, req.agent_id)
-        # Provenance: upgrade sessions created before these fields existed.
-        session.setdefault("channel", sid)
-        if req.source:
-            session["source"] = req.source
-        if not session.get("title"):
-            # Legacy light-format sessions carry no title: backfill it from
-            # the conversation's first user message, so _record_user doesn't
-            # title a years-old chat with whatever message arrives today.
-            first = next((m.get("text") or "" for m in session.get("messages", [])
-                          if m.get("role") == "user" and m.get("text")), "")
-            if first:
-                session["title"] = _title_from(first, None)
-        prior = [ChatMessage(**m) for m in session.get("conversation", [])]
-        attachments = [a.model_dump() for a in req.attachments] or None
-
-        response = await executor.run(req.message, prior, attachments,
-                                      memory_context=_memory_context(session))
-
-        conv = [m.model_dump(exclude_none=True) for m in response.conversation]
-        _record_user(session, req)
-        _record_turn(session, _steps_from(response.trace, response.tool_results),
-                     response.reply, conv)
-        await asyncio.to_thread(_save_channel_session, named, session_store, sid, session)
-    _maybe_compact(executor, sid, named=named)
-    return response
+    record_user_turn(session, req.message,
+                     [a.model_dump() for a in req.attachments], req.agent_id)
 
 
 @router.post("")
@@ -190,7 +46,7 @@ async def chat(req: ChatRequest, request: Request) -> ChatResponse:
 
     # External connectors address their own persistent, per-channel session.
     if req.session_id:
-        return await _chat_named(req, request, executor)
+        return await run_channel_turn(req, request.app.state.named_sessions, executor)
 
     session = session_store.get_current()
     if live.is_active(session["id"]):
@@ -202,15 +58,16 @@ async def chat(req: ChatRequest, request: Request) -> ChatResponse:
     await asyncio.to_thread(session_store.save_current, session)
 
     response = await executor.run(req.message, prior, attachments,
-                                  memory_context=_memory_context(session))
+                                  memory_context=memory_context(session))
 
     conv = [m.model_dump(exclude_none=True) for m in response.conversation]
-    steps = _steps_from(response.trace, response.tool_results)
-    _record_turn(session, steps, response.reply, conv)
+    steps = steps_from(response.trace, response.tool_results)
+    record_turn(session, steps, response.reply, conv)
     # persist(), not save_current(): the user may have opened another chat
     # while this run was in flight — never clobber the new current.json.
     await asyncio.to_thread(session_store.persist, session)
-    _maybe_compact(executor, session["id"], session_store=session_store, live=live)
+    schedule_compaction(executor, session["id"], session_store=session_store,
+                        live=live)
     return response
 
 
@@ -224,7 +81,7 @@ def _make_drive(executor, message, prior, attachments, session, session_store, l
         recorded = False  # the completed turn has been recorded to `session`
         try:
             async for event in executor.run_stream(message, prior, attachments,
-                                                   _memory_context(session)):
+                                                   memory_context(session)):
                 et = event.get("type")
                 if et == "tool_result":
                     tool_events.append(event.get("data", {}))
@@ -232,32 +89,33 @@ def _make_drive(executor, message, prior, attachments, session, session_store, l
                     reply_text += event.get("data", "")
                 elif et == "error":
                     session["messages"].append(
-                        {"role": "error", "text": str(event.get("data", "")), "ts": _now()}
+                        {"role": "error", "text": str(event.get("data", "")), "ts": now_iso()}
                     )
                     await asyncio.to_thread(session_store.persist, session)
                 elif et == "done":
                     data = event.get("data", {})
-                    steps = _steps_from(data.get("trace"), tool_events)
+                    steps = steps_from(data.get("trace"), tool_events)
                     # Record + persist BEFORE emitting 'done' so a client that
                     # reacts to 'done' by reloading reads the fully-recorded
                     # turn. Sessions grow large (full traces) so the write runs
                     # off the event loop, but shielded: a Stop landing in this
                     # window must not lose the completed turn or trigger the
                     # partial-answer path below on top of it.
-                    _record_turn(session, steps, data.get("reply") or reply_text,
-                                 data.get("conversation"))
+                    record_turn(session, steps, data.get("reply") or reply_text,
+                                data.get("conversation"))
                     recorded = True
                     await asyncio.shield(asyncio.to_thread(session_store.persist, session))
-                    _maybe_compact(executor, session["id"],
-                                   session_store=session_store, live=live)
+                    schedule_compaction(executor, session["id"],
+                                        session_store=session_store, live=live)
                 run.emit(event)
         except asyncio.CancelledError:
             # Stop pressed mid-generation: keep the partial answer, unless the
             # turn already completed (Stop raced the final write). Persist
             # synchronously — no new awaits in an already-cancelled task.
             if not recorded:
-                partial = reply_text + ("\n\n_[interrotto]_" if reply_text else "_[interrotto]_")
-                _record_turn(session, _steps_from(None, tool_events), partial, None)
+                partial = (f"{reply_text}\n\n{prompts.INTERRUPTED}" if reply_text
+                           else prompts.INTERRUPTED)
+                record_turn(session, steps_from(None, tool_events), partial, None)
                 session_store.persist(session)
             raise
     return drive
@@ -332,7 +190,7 @@ async def chat_live(request: Request):
 def _valid_session_id(session_id: str) -> str:
     """Path segments become filenames: reject anything outside the safe id
     charset (mirrors ChatRequest.session_id validation)."""
-    if not _VALID_ID.match(session_id or "") or ".." in session_id:
+    if not is_valid_id(session_id):
         raise HTTPException(400, "invalid session_id")
     return session_id
 
@@ -342,7 +200,7 @@ async def get_named_session(session_id: str, request: Request):
     """Fetch a channel-scoped session (used by external connectors)."""
     _valid_session_id(session_id)
     named = request.app.state.named_sessions
-    if not named._path(session_id).exists():
+    if not named.exists(session_id):
         raise HTTPException(404, "Session not found")
     return await asyncio.to_thread(named.get, session_id)
 
@@ -351,18 +209,11 @@ async def get_named_session(session_id: str, request: Request):
 async def delete_named_session(session_id: str, request: Request):
     """Reset a channel-scoped conversation (e.g. Telegram /reset command).
 
-    Before clearing it, archive the conversation into the web UI history so
-    past external (bot) chats remain reviewable in the storico — the reset
-    "closes" the conversation just like starting a new chat archives the
-    current one. Serialized on the session lock so it can't race an in-flight
-    turn for the same channel."""
+    Before clearing it, the store archives the conversation into the web UI
+    history so past external (bot) chats remain reviewable in the storico —
+    the reset "closes" the conversation just like starting a new chat archives
+    the current one. Deliberately idempotent (a double /reset is fine)."""
     _valid_session_id(session_id)
     named = request.app.state.named_sessions
-    session_store = request.app.state.sessions
-    archived = None
-    async with named.lock(session_id):
-        if named._path(session_id).exists():
-            session = await asyncio.to_thread(named.get, session_id)
-            archived = await asyncio.to_thread(session_store.archive_session, session)
-        named.delete(session_id)
+    _existed, archived = await named.archive_and_reset(session_id)
     return {"ok": True, "archived": archived}

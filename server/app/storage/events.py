@@ -95,7 +95,9 @@ class EventStore:
             try:
                 self.on_append(agent_id)
             except Exception:
-                pass
+                # The event is durably queued either way; a failed kick only
+                # delays delivery to the next scheduler scan (~5s). Say so.
+                log.debug("event kick for '%s' failed", agent_id, exc_info=True)
         return event
 
     # ---------------------------------------------------------------- consume
@@ -118,20 +120,19 @@ class EventStore:
             out.append((f, event))
         return out
 
-    def pending(self, agent_id: str, now: str | None = None) -> list[dict]:
-        """Due events (``due_at <= now``), oldest first."""
+    def pending(self, agent_id: str, now: str | None = None, *,
+                include_future: bool = False) -> list[dict]:
+        """Due events (``due_at <= now``), oldest first. With
+        ``include_future`` every queued event is returned regardless of
+        ``due_at`` (the audit/inspection view, not the delivery view)."""
+        if include_future:
+            return [e for _, e in self._scan_pending(agent_id)]
         now = now or now_iso()
         return [e for _, e in self._scan_pending(agent_id)
                 if (e.get("due_at") or "") <= now]
 
     def pending_count(self, agent_id: str, now: str | None = None) -> int:
         return len(self.pending(agent_id, now))
-
-    def next_due(self, agent_id: str) -> str | None:
-        """The earliest due_at among pending events (also future ones), so the
-        scheduler can sleep exactly until the next scheduled task."""
-        events = self._scan_pending(agent_id)
-        return min((e.get("due_at") or "" for _, e in events), default=None) or None
 
     def consume(self, agent_id: str, ids: list[str], reaction: str | None = None) -> int:
         """Mark events as handled and archive them. ``reaction=None`` means

@@ -14,10 +14,17 @@ from datetime import datetime
 
 import httpx
 
-from app import config
-from app.channels.base import BaseConnector
+from myagent_connectors import config
+from myagent_connectors.channels.base import BaseConnector, redact
 
 log = logging.getLogger("connectors.telegram")
+
+# httpx logs every request line at INFO, and a Telegram URL embeds the bot token
+# ("POST https://api.telegram.org/bot123456:ABC…/getMe"). With the plugin inside
+# myagent that lands in the agent's own journal, so the credentials would be
+# readable by anyone who can read the service log. Its INFO output is per-request
+# noise anyway; warnings and errors still come through.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 API = "https://api.telegram.org/bot{token}/{method}"
 FILE_API = "https://api.telegram.org/file/bot{token}/{path}"
@@ -28,15 +35,15 @@ MAX_FILE = 15 * 1024 * 1024  # 15 MB (Telegram Bot API download cap is 20 MB)
 # button and the "/" autocomplete list. These mirror the built-in commands
 # handled in BaseConnector._handle_command.
 BOT_COMMANDS = [
-    {"command": "reset", "description": "Azzera la conversazione"},
-    {"command": "help", "description": "Mostra l'aiuto"},
-    {"command": "start", "description": "Avvia il bot"},
+    {"command": "reset", "description": "Clear the conversation"},
+    {"command": "help", "description": "Show help"},
+    {"command": "start", "description": "Start the bot"},
 ]
 
 # Persistent reply-keyboard buttons: (label shown on the button, command it
 # stands for). A tap sends the label as a normal message, which _dispatch maps
 # back to the command before the shared pipeline handles it.
-COMMAND_BUTTONS = [("🧹 Reset", "/reset"), ("❓ Aiuto", "/help")]
+COMMAND_BUTTONS = [("🧹 Reset", "/reset"), ("❓ Help", "/help")]
 _BUTTON_CMD = {label: cmd for label, cmd in COMMAND_BUTTONS}
 MENU_KEYBOARD = {
     "keyboard": [[{"text": label} for label, _ in COMMAND_BUTTONS]],
@@ -137,7 +144,7 @@ class TelegramConnector(BaseConnector):
             self.status.detail = "@" + me.get("username", "?")
         except Exception as e:
             self.status.state = "error"
-            self.status.detail = str(e)
+            self.status.detail = redact(str(e), self.binding.token)
             await self._http.aclose()
             self._http = None
             raise
@@ -165,10 +172,15 @@ class TelegramConnector(BaseConnector):
 
     async def _poll_loop(self) -> None:
         backoff = 1
+        last_logged = ""
         while not self._stop.is_set():
             try:
                 updates = await self._get_updates()
                 backoff = 1
+                self.status.errors = 0
+                last_logged = ""
+                if self.status.state == "error":
+                    self.status.state = "running"
                 for upd in updates or []:
                     self._offset = max(self._offset, upd.get("update_id", 0) + 1)
                     await self._dispatch(upd)
@@ -177,12 +189,29 @@ class TelegramConnector(BaseConnector):
             except Exception as e:
                 if self._stop.is_set():
                     break
+                self.status.errors += 1
                 self.status.state = "error"
-                self.status.detail = str(e)
-                log.warning("poll error (%s): %s — retry in %ss", self.binding.id, e, backoff)
+                self.status.detail = redact(str(e), self.binding.token)
+                # The state stays "error" until a poll actually succeeds. It used
+                # to be reset to "running" right here, which meant a bot broken
+                # for hours still reported itself healthy.
+                if self.status.errors >= config.MAX_CONSECUTIVE_ERRORS:
+                    self.status.state = "paused"
+                    log.warning(
+                        "connector '%s' paused after %d consecutive errors: %s "
+                        "(POST /api/connectors/bindings/%s/resume to retry)",
+                        self.binding.id, self.status.errors, self.status.detail,
+                        self.binding.id,
+                    )
+                    return
+                # Log the first occurrence of each distinct failure, then stay
+                # quiet: this loop shares its journal with the agent now.
+                if self.status.detail != last_logged:
+                    last_logged = self.status.detail
+                    log.warning("poll error (%s): %s — retrying, backoff %ss",
+                                self.binding.id, self.status.detail, backoff)
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 60)
-                self.status.state = "running"
 
     async def _get_updates(self):
         # 'timeout' is a Telegram param (long-poll seconds); the httpx read
@@ -204,16 +233,20 @@ class TelegramConnector(BaseConnector):
         info = await self._call("getFile", file_id=file_id)
         size = info.get("file_size") or 0
         if size and size > MAX_FILE:
-            raise ValueError("file troppo grande")
+            raise ValueError("file is too large")
         path = info.get("file_path")
         if not path:
-            raise ValueError("percorso file non disponibile")
+            raise ValueError("file path unavailable")
         url = FILE_API.format(token=self.binding.token, path=path)
         resp = await self._http.get(url, timeout=90.0)
-        resp.raise_for_status()
+        # Deliberately NOT raise_for_status(): httpx puts the failing URL in the
+        # message, and this URL embeds the bot token. Callers relay these errors
+        # to the chat, so that would publish the credentials.
+        if resp.status_code >= 400:
+            raise RuntimeError(f"download failed: HTTP {resp.status_code}")
         content = resp.content
         if len(content) > MAX_FILE:
-            raise ValueError("file troppo grande")
+            raise ValueError("file is too large")
         return content
 
     @staticmethod
@@ -254,7 +287,7 @@ class TelegramConnector(BaseConnector):
             try:
                 content = await self._fetch_file(photo["file_id"])
             except Exception as e:
-                return [], caption, f"⚠️ Non riesco a scaricare l'immagine: {e}"
+                return [], caption, f"⚠️ Could not download the image: {redact(str(e), self.binding.token)}"
             return [self._image_attachment(content, "image/jpeg", "photo.jpg")], caption, None
 
         doc = msg.get("document")
@@ -268,13 +301,13 @@ class TelegramConnector(BaseConnector):
             is_pdf = mime == "application/pdf" or ext == ".pdf"
             if not (is_image or is_text or is_audio or is_pdf):
                 return [], caption, (
-                    "📎 Tipo di file non supportato: posso gestire immagini, file di "
-                    f"testo, audio e PDF (ricevuto: {mime or ext or 'sconosciuto'})."
+                    "📎 Unsupported file type. I can handle images, text files "
+                    f"audio and PDF (got: {mime or ext or 'unknown'})."
                 )
             try:
                 content = await self._fetch_file(doc["file_id"])
             except Exception as e:
-                return [], caption, f"⚠️ Non riesco a scaricare il file: {e}"
+                return [], caption, f"⚠️ Could not download the file: {redact(str(e), self.binding.token)}"
             if is_image:
                 return [self._image_attachment(content, mime or "image/jpeg", name)], caption, None
             if is_text:
@@ -293,7 +326,7 @@ class TelegramConnector(BaseConnector):
             try:
                 content = await self._fetch_file(audio["file_id"])
             except Exception as e:
-                return [], caption, f"⚠️ Non riesco a scaricare l'audio: {e}"
+                return [], caption, f"⚠️ Could not download the audio: {redact(str(e), self.binding.token)}"
             return [self._audio_attachment(content, mime, name)], caption, None
 
         return [], caption, None
@@ -318,7 +351,7 @@ class TelegramConnector(BaseConnector):
         if text is None and not has_media:
             if any(msg.get(k) for k in ("video", "video_note", "sticker")):
                 if self.quick_authorized(user_id, username):
-                    await self.send(chat_id, "📎 Per ora gestisco testo, immagini, file di testo e messaggi vocali.")
+                    await self.send(chat_id, "📎 For now I handle text, images, text files and voice messages.")
             return
 
         self.status.last_update = datetime.now().isoformat(timespec="seconds")
@@ -360,13 +393,12 @@ class TelegramConnector(BaseConnector):
         try:
             content = await self._fetch_file(voice["file_id"])
         except Exception as e:
-            return None, f"⚠️ Non riesco a scaricare il messaggio vocale: {e}"
+            return None, f"⚠️ Could not download the voice message: {redact(str(e), self.binding.token)}"
         try:
-            from app import stt
-            transcript = await stt.transcribe(content)
+            transcript = await self.client.transcribe(content, "voice.oga")
         except Exception as e:
-            log.warning("STT failed (%s): %s", self.binding.id, e)
-            return None, "⚠️ Trascrizione vocale non disponibile."
+            log.warning("transcription failed (%s): %s", self.binding.id, e)
+            return None, "⚠️ Voice transcription is not available."
         if not transcript:
-            return None, "🎙️ Non ho riconosciuto parlato nel messaggio vocale."
+            return None, "🎙️ I could not make out any speech in that voice message."
         return (caption + "\n\n" + transcript if caption else transcript), None

@@ -1,20 +1,12 @@
 from __future__ import annotations
 
-import re
-
 from pydantic import BaseModel, field_validator
 
-# Binding ids become filenames and are used to derive channel session keys on
-# myagent, which validates the same charset — keep them compatible.
-_VALID_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
-
-
-def _check_id(v: str) -> str:
-    if not _VALID_ID.match(v or "") or ".." in v:
-        raise ValueError(
-            "id may only contain letters, digits, dots, hyphens and underscores"
-        )
-    return v
+# Binding ids become filenames and are used to derive channel session keys, so
+# they share the core's single charset definition. This used to be a literal
+# copy marked "keep in sync" — the plugin runs in myagent's process now, so it
+# can just import it.
+from app.ids import check_id
 
 
 class Binding(BaseModel):
@@ -56,12 +48,12 @@ class Binding(BaseModel):
     @field_validator("id")
     @classmethod
     def validate_id(cls, v: str) -> str:
-        return _check_id(v)
+        return check_id(v)
 
     @field_validator("session_prefix")
     @classmethod
     def validate_prefix(cls, v: str) -> str:
-        return "" if not v else _check_id(v)
+        return "" if not v else check_id(v)
 
     def effective_prefix(self) -> str:
         return self.session_prefix or self.id
@@ -81,7 +73,7 @@ class Contact(BaseModel):
     @field_validator("id")
     @classmethod
     def validate_id(cls, v: str) -> str:
-        return _check_id(v)
+        return check_id(v)
 
     @field_validator("username")
     @classmethod

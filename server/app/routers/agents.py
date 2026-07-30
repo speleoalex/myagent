@@ -1,33 +1,34 @@
-import json
-import re
-import shutil
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from app import config
+from app.ids import is_valid_id
 from app.models import Agent
+from app.routers.crud import get_or_404, require_absent, require_exists
+from app.storage.sessions import read_json
 
 router = APIRouter()
-
-# Agent ids become filenames under config/agents/: same safe charset as JsonStore.
-_VALID_AGENT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 def _store(request: Request):
     return request.app.state.stores.agents
 
 
+def _public(data: dict) -> dict:
+    """Stored agent as the frontend should see it: normalized through the
+    model, so omitted fields surface with their real server-side defaults
+    (the UI must never have to re-hardcode them). Malformed data is handed
+    back as-is rather than 500."""
+    try:
+        return Agent(**data).model_dump()
+    except Exception:
+        return data
+
+
 def _native_agents_dir() -> Path:
     return config.DEFAULT_CONFIG_DIR / "agents"
-
-
-def _load_json(path: Path) -> dict | None:
-    try:
-        return json.loads(path.read_text())
-    except Exception:
-        return None
 
 
 def _agent_fingerprint(data: dict) -> dict:
@@ -68,7 +69,7 @@ async def list_agents(request: Request, selectable: bool = False):
     agents = _store(request).list_all()
     if selectable:
         agents = [a for a in agents if a.get("enabled", True)]
-    return agents
+    return [_public(a) for a in agents]
 
 
 # --- Native agent catalog ------------------------------------------------
@@ -88,7 +89,7 @@ async def list_native_agents(request: Request):
     if not native.is_dir():
         return out
     for f in sorted(native.glob("*.json")):
-        meta = _load_json(f)
+        meta = read_json(f)
         if meta is None:
             continue
         aid = f.stem
@@ -116,10 +117,10 @@ async def import_native_agent(agent_id: str, req: AgentImportRequest, request: R
     ``overwrite=true`` re-imports it, restoring the original and discarding any
     local edits.
     """
-    if not _VALID_AGENT_ID.match(agent_id or "") or ".." in agent_id:
+    if not is_valid_id(agent_id):
         raise HTTPException(400, "Invalid agent ID")
 
-    data = _load_json(_native_agents_dir() / f"{agent_id}.json")
+    data = read_json(_native_agents_dir() / f"{agent_id}.json")
     if data is None:
         raise HTTPException(404, f"Native agent not found: {agent_id}")
 
@@ -144,17 +145,13 @@ async def import_native_agent(agent_id: str, req: AgentImportRequest, request: R
 
 @router.get("/{agent_id}")
 async def get_agent(agent_id: str, request: Request):
-    data = _store(request).get(agent_id)
-    if data is None:
-        raise HTTPException(404, f"Agent not found: {agent_id}")
-    return data
+    return _public(get_or_404(_store(request), agent_id, "Agent"))
 
 
 @router.post("", status_code=201)
 async def create_agent(agent: Agent, request: Request):
     store = _store(request)
-    if store.exists(agent.id):
-        raise HTTPException(409, f"Agent already exists: {agent.id}")
+    require_absent(store, agent.id, "Agent")
     store.save(agent.id, agent.model_dump())
     return agent.model_dump()
 
@@ -162,8 +159,7 @@ async def create_agent(agent: Agent, request: Request):
 @router.put("/{agent_id}")
 async def update_agent(agent_id: str, agent: Agent, request: Request):
     store = _store(request)
-    if not store.exists(agent_id):
-        raise HTTPException(404, f"Agent not found: {agent_id}")
+    require_exists(store, agent_id, "Agent")
     agent.id = agent_id
     store.save(agent_id, agent.model_dump())
     return agent.model_dump()
@@ -183,8 +179,7 @@ class EventRequest(BaseModel):
 async def queue_agent_event(agent_id: str, req: EventRequest, request: Request):
     """Queue an event for an agent. A live agent is woken right away; a
     non-live agent accumulates events until it is started."""
-    if _store(request).get(agent_id) is None:
-        raise HTTPException(404, f"Agent not found: {agent_id}")
+    get_or_404(_store(request), agent_id, "Agent")
     try:
         event = request.app.state.events.append(
             agent_id, type=req.type, payload=req.payload,
@@ -199,10 +194,9 @@ async def queue_agent_event(agent_id: str, req: EventRequest, request: Request):
 @router.get("/{agent_id}/events")
 async def list_agent_events(agent_id: str, request: Request):
     """Pending events plus the recent audit trail (reacted + reaction)."""
-    if _store(request).get(agent_id) is None:
-        raise HTTPException(404, f"Agent not found: {agent_id}")
+    get_or_404(_store(request), agent_id, "Agent")
     events = request.app.state.events
-    return {"pending": events.pending(agent_id, now="9999"),
+    return {"pending": events.pending(agent_id, include_future=True),
             "archive": events.archive(agent_id)}
 
 
@@ -212,13 +206,11 @@ async def delete_agent(agent_id: str, request: Request):
     if not store.delete(agent_id):
         raise HTTPException(404, f"Agent not found: {agent_id}")
     # Autonomy state (event queues, scheduler state) is operational data of
-    # the deleted agent: remove it. Deep memory is deliberately KEPT — an
-    # agent recreated with the same id finds its memory again.
+    # the deleted agent: remove it — drop_agent owns the on-disk layout. Deep
+    # memory is deliberately KEPT: an agent recreated with the same id finds
+    # its memory again.
     autonomy = getattr(request.app.state, "autonomy", None)
     if autonomy is not None:
         await autonomy.stop(agent_id)
         autonomy.drop_agent(agent_id)
-    agent_dir = config.AUTONOMY_DIR / agent_id
-    if agent_dir.is_dir():
-        shutil.rmtree(agent_dir, ignore_errors=True)
     return {"ok": True}

@@ -17,10 +17,14 @@ const ThemeManager = {
 
     init() {
         this.applyTheme(this.getSavedTheme());
-        if (document.readyState === 'loading') {
-            document.addEventListener('DOMContentLoaded', () => this.bindEvents());
-        } else {
-            this.bindEvents();
+        // Follow OS changes only while the user hasn't picked a theme manually
+        // (the explicit choice lives in the Settings screen -> setTheme).
+        if (window.matchMedia) {
+            window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (e) => {
+                if (!localStorage.getItem(this.STORAGE_KEY)) {
+                    this.applyTheme(e.matches ? this.DARK : this.LIGHT);
+                }
+            });
         }
     },
 
@@ -38,45 +42,12 @@ const ThemeManager = {
 
     applyTheme(theme) {
         document.documentElement.setAttribute('data-bs-theme', theme);
-        this.updateIcon(theme);
-    },
-
-    updateIcon(theme) {
-        const icon = document.getElementById('themeIcon');
-        if (icon) {
-            icon.className = theme === this.DARK ? 'bi bi-moon-stars-fill' : 'bi bi-sun-fill';
-        }
-    },
-
-    toggle() {
-        const current = this.getCurrentTheme();
-        this.setTheme(current === this.DARK ? this.LIGHT : this.DARK);
     },
 
     setTheme(theme) {
         if (theme !== this.LIGHT && theme !== this.DARK) return;
         this.applyTheme(theme);
         localStorage.setItem(this.STORAGE_KEY, theme);
-    },
-
-    bindEvents() {
-        // init() runs in <head>, before #themeIcon exists, so its updateIcon()
-        // is a no-op. Sync the icon now that the DOM is ready.
-        this.updateIcon(this.getCurrentTheme());
-
-        const toggleBtn = document.getElementById('themeToggle');
-        if (toggleBtn) {
-            toggleBtn.addEventListener('click', () => this.toggle());
-        }
-
-        // Follow OS changes only while the user hasn't picked a theme manually.
-        if (window.matchMedia) {
-            window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (e) => {
-                if (!localStorage.getItem(this.STORAGE_KEY)) {
-                    this.applyTheme(e.matches ? this.DARK : this.LIGHT);
-                }
-            });
-        }
     },
 
     getCurrentTheme() {

@@ -73,6 +73,30 @@ def coerce_arg_keys(arguments: dict, definition: dict | None) -> dict:
     return arguments
 
 
+def _cast_arg_types(arguments: dict, definition: dict | None) -> dict:
+    """Cast string values to the schema-declared type. The Python-style parser
+    can only produce strings (``repeat_s=60`` arrives as ``"60"``) and JSON
+    calls from small models quote numbers too; a failed cast leaves the value
+    alone (the tool's own validation reports it)."""
+    if not isinstance(arguments, dict) or not definition:
+        return arguments
+    props = definition.get("parameters", {}).get("properties", {})
+    for key, value in list(arguments.items()):
+        if not isinstance(value, str):
+            continue
+        typ = (props.get(key) or {}).get("type")
+        try:
+            if typ == "integer":
+                arguments[key] = int(value)
+            elif typ == "number":
+                arguments[key] = float(value)
+            elif typ == "boolean" and value.strip().lower() in ("true", "false"):
+                arguments[key] = value.strip().lower() == "true"
+        except ValueError:
+            pass
+    return arguments
+
+
 def parse_tool_calls_from_text(
     content: str,
     definitions: dict[str, dict],
@@ -91,23 +115,64 @@ def parse_tool_calls_from_text(
     text = content.strip()
     known_tools = set(definitions)
 
+    def finalize(name: str, arguments) -> dict | None:
+        """The ONE normalization tail every parsing path funnels through:
+        name recovery, argument-key coercion, schema type casts. It used to
+        run only on the JSON path, so a Python-style ``web_search(param="x")``
+        reached the tool with the wrong key while the same call as JSON was
+        repaired — the exact defect coerce_arg_keys was written for."""
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except json.JSONDecodeError:
+                arguments = {}
+        if arguments is None:
+            arguments = {}
+
+        # Recover from wrong/placeholder tool names emitted by small models
+        # (e.g. "tool_call", "tool_name", "function", or a bare agent id).
+        # The arguments are usually correct even when the name is not.
+        if name not in known_tools and agent_ids_provider is not None:
+            agent_ids = agent_ids_provider()
+            if name in agent_ids:
+                # Model used the agent id directly as the tool name
+                arguments = {"agent_id": name, "message": _extract_message(arguments)}
+                name = "call_agent"
+            elif isinstance(arguments, dict) and "agent_id" in arguments:
+                # Placeholder name but call_agent-shaped arguments
+                name = "call_agent"
+
+        if name not in known_tools:
+            return None
+        arguments = coerce_arg_keys(arguments, definitions.get(name))
+        arguments = _cast_arg_types(arguments, definitions.get(name))
+        return _make_call(name, arguments)
+
+    # Python-style call names: the agent ids join the pattern so that
+    # `master(message="…")` is recognized here exactly like its JSON twin
+    # {"name": "master", ...} is below (finalize turns both into call_agent).
+    py_names = known_tools | (agent_ids_provider() if agent_ids_provider else set())
+
     # Try Python-style function call: tool_name(key="value", key2="value2")
-    func_calls = _parse_python_style_calls(text, known_tools)
-    if func_calls:
-        return func_calls
+    raw_calls = _parse_python_style_calls(text, py_names)
+    if raw_calls:
+        finalized = [c for c in (finalize(n, a) for n, a in raw_calls) if c]
+        if finalized:
+            return finalized
 
     # Try "tool_name {json_args}" format (tool name followed by JSON object)
     if known_tools:
         tool_names_re = "|".join(re.escape(t) for t in known_tools)
         inline_match = re.search(rf'(?<!\w)({tool_names_re})\s+(\{{[\s\S]*\}})', text)
         if inline_match:
-            name = inline_match.group(1)
             try:
                 arguments = json.loads(inline_match.group(2))
-                if isinstance(arguments, dict):
-                    return [_make_call(name, arguments)]
             except json.JSONDecodeError:
-                pass
+                arguments = None
+            if isinstance(arguments, dict):
+                call = finalize(inline_match.group(1), arguments)
+                if call:
+                    return [call]
 
     # Extract from markdown code blocks first (all of them: a model may fence
     # each call separately).
@@ -129,44 +194,15 @@ def parse_tool_calls_from_text(
         return None
 
     tool_calls = []
-
     for item in parsed:
-        if not isinstance(item, dict):
-            continue
-
         name = item.get("name") or item.get("function", {}).get("name")
-        arguments = item.get("arguments") or item.get("parameters") or item.get("function", {}).get("arguments")
-
+        arguments = item.get("arguments") or item.get("parameters") \
+            or item.get("function", {}).get("arguments")
         if not name:
             continue
-
-        # Normalize arguments to a dict up front so we can inspect them
-        if isinstance(arguments, str):
-            try:
-                arguments = json.loads(arguments)
-            except json.JSONDecodeError:
-                arguments = {}
-        if arguments is None:
-            arguments = {}
-
-        # Recover from wrong/placeholder tool names emitted by small models
-        # (e.g. "tool_call", "tool_name", "function"). The arguments are
-        # usually correct even when the name is not.
-        if name not in known_tools and agent_ids_provider is not None:
-            agent_ids = agent_ids_provider()
-            if name in agent_ids:
-                # Model used the agent id directly as the tool name
-                arguments = {"agent_id": name, "message": _extract_message(arguments)}
-                name = "call_agent"
-            elif isinstance(arguments, dict) and "agent_id" in arguments:
-                # Placeholder name but call_agent-shaped arguments
-                name = "call_agent"
-
-        if name not in known_tools:
-            continue
-
-        arguments = coerce_arg_keys(arguments, definitions.get(name))
-        tool_calls.append(_make_call(name, arguments))
+        call = finalize(name, arguments)
+        if call:
+            tool_calls.append(call)
 
     return tool_calls if tool_calls else None
 
@@ -220,15 +256,16 @@ def _scan_balanced_json(text: str, start: int) -> int | None:
     return None
 
 
-def _parse_python_style_calls(text: str, known_tools: set[str]) -> list[dict] | None:
+def _parse_python_style_calls(text: str, names: set[str]) -> list[tuple[str, dict]]:
     """Parse Python-style function calls like: tool_name(key="value", key2="value2")
-    Also handles nested parentheses in quoted values."""
-    tool_names_re = "|".join(re.escape(t) for t in known_tools)
-    if not tool_names_re:
-        return None
-    # Match known tool name followed by opening paren, then capture until balanced close
-    pattern = re.compile(rf'(?<!\w)({tool_names_re})\s*\(')
-    tool_calls = []
+    into raw ``(name, arguments)`` pairs (normalization happens in the caller's
+    shared ``finalize`` tail). Handles nested parentheses in quoted values."""
+    names_re = "|".join(re.escape(t) for t in names)
+    if not names_re:
+        return []
+    # Match known name followed by opening paren, then capture until balanced close
+    pattern = re.compile(rf'(?<!\w)({names_re})\s*\(')
+    calls: list[tuple[str, dict]] = []
 
     for m in pattern.finditer(text):
         name = m.group(1)
@@ -257,9 +294,9 @@ def _parse_python_style_calls(text: str, known_tools: set[str]) -> list[dict] | 
         if args_str.strip() and not arguments:
             continue
 
-        tool_calls.append(_make_call(name, arguments))
+        calls.append((name, arguments))
 
-    return tool_calls if tool_calls else None
+    return calls
 
 
 def _extract_balanced_parens(text: str, start: int) -> str | None:

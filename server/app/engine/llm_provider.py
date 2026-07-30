@@ -6,7 +6,7 @@ from typing import AsyncIterator
 
 import httpx
 
-from app.engine import model_probe
+from app.engine import model_probe, prompts
 from app.models import ModelConfig
 
 log = logging.getLogger(__name__)
@@ -109,8 +109,11 @@ class LLMProvider:
                             result = messages[j].get("content", "")
                             break
                         j += 1
+                    # The marker is a prompts.py constant: the history matcher
+                    # (is_scaffolding_message) keys on it, and a rewording here
+                    # that missed the matcher would leak plumbing into history.
                     parts.append(
-                        f"[Called tool '{name}' with {args}]\n"
+                        f"{prompts.SANITIZED_TOOL_PREFIX} '{name}' with {args}]\n"
                         f"Result: {result}"
                     )
                 sanitized.append({

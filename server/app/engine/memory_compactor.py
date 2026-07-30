@@ -30,6 +30,7 @@ import logging
 import re
 from collections import Counter
 
+from app.engine import prompts
 from app.engine.executor import AgentExecutor
 from app.engine.llm_provider import LLMProvider
 from app.models import Agent, ModelConfig
@@ -129,7 +130,9 @@ def _validate_summary(text: str | None, max_chars: int) -> str | None:
         return None
     if text[0] in "{[":
         return None
-    if "TOOL RESULTS:" in text or '"arguments"' in text:
+    # The marker comes from prompts.py: this gate decides what enters the
+    # PERMANENT memory tree, so it must track any rewording of the scaffolding.
+    if prompts.TOOL_RESULTS_PREFIX in text or '"arguments"' in text:
         return None
     if len(text) > max_chars:
         cut = text[:max_chars]
@@ -177,6 +180,34 @@ def _transcript(cleaned: list[dict]) -> str:
 
 
 # ----------------------------------------------------------------- pipeline
+
+# Strong references to in-flight background tasks: asyncio.create_task keeps
+# only a weak reference, so an unanchored fire-and-forget task can be garbage
+# collected mid-run and silently vanish.
+_BG_TASKS: set[asyncio.Task] = set()
+
+
+def schedule_background(coro) -> None:
+    """Fire-and-forget an engine coroutine WITHOUT losing it to the GC.
+    Used for the memory jobs (compaction, root-digest refresh after a note)."""
+    task = asyncio.create_task(coro)
+    _BG_TASKS.add(task)
+    task.add_done_callback(_BG_TASKS.discard)
+
+
+def schedule_compaction(executor, session_id: str, *, session_store=None,
+                        named=None, live=None) -> None:
+    """Fire-and-forget deep-memory compaction AFTER a persisted turn: the user
+    never waits on it (a summarization on a local model takes 10-60s). All
+    safety is inside compact_session (per-agent lock, head re-verification,
+    idempotent retry via content hash). No-op for agents without memory."""
+    if not executor.agent.memory_enabled or executor.stores.memory is None:
+        return
+    schedule_background(compact_session(
+        executor.agent, executor.model_config, executor.stores.memory,
+        session_id, session_store=session_store, named=named, live=live,
+    ))
+
 
 async def compact_session(agent: Agent, model_config: ModelConfig,
                           memory: MemoryStore | None, session_id: str, *,
@@ -292,8 +323,11 @@ async def fold_and_reroot(agent: Agent, model_config: ModelConfig,
 
     Public: memory_note's handler also fires this (in the background) so a
     fresh note reaches the root digest — what new sessions actually see —
-    without waiting for the next session compaction. Caller must NOT hold
-    ``memory.lock``.
+    without waiting for the next session compaction. Caller MUST hold
+    ``memory.lock(agent.id)`` (apply_fold / set_root / adopt all require it;
+    both real callers already do). NOTE: the lock is per-agent and
+    non-reentrant, and it stays held across the summarize() LLM calls — a
+    memory tool of the same agent can block for the duration.
     """
     level = 1
     while level < 10:

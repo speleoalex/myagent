@@ -38,7 +38,7 @@ const SettingsPage = {
                             <label class="form-label">${i18n('settings.defaultModel')}</label>
                             <select class="form-select" id="f-default-model">
                                 <option value="">${i18n('settings.noDefaultModel')}</option>
-                                ${models.map(m => `<option value="${m.id}" ${m.id === settings.default_model_id ? 'selected' : ''}>${App.esc(m.name)} (${m.provider})</option>`).join('')}
+                                ${models.map(m => `<option value="${App.escAttr(m.id)}" ${m.id === settings.default_model_id ? 'selected' : ''}>${App.esc(m.name)} (${App.esc(m.provider)})</option>`).join('')}
                             </select>
                             <small class="text-secondary">${i18n('settings.defaultModelHint')}</small>
                         </div>
@@ -49,16 +49,6 @@ const SettingsPage = {
                         <div class="mb-3">
                             <label class="form-label">${i18n('settings.llamacppUrl')}</label>
                             <input type="text" class="form-control" id="f-llamacpp-url" value="${App.esc(settings.llamacpp_base_url || 'http://localhost:8080')}">
-                        </div>
-                        <div class="mb-3">
-                            <label class="form-label">${i18n('settings.connectorsUrl')}</label>
-                            <input type="text" class="form-control" id="f-connectors-url" value="${App.esc(settings.connectors_base_url || 'http://localhost:8899')}">
-                            <small class="text-secondary">${i18n('settings.connectorsUrlHint')}</small>
-                        </div>
-                        <div class="mb-3">
-                            <label class="form-label">${i18n('settings.connectorsKey')}</label>
-                            <input type="password" class="form-control" id="f-connectors-key" value="${App.esc(settings.connectors_api_key || '')}" autocomplete="off">
-                            <small class="text-secondary">${i18n('settings.connectorsKeyHint')}</small>
                         </div>
                         <button type="submit" class="btn btn-primary">${i18n('settings.save')}</button>
                     </form>
@@ -84,8 +74,6 @@ const SettingsPage = {
                 ollama_base_url: document.getElementById('f-ollama-url').value.trim(),
                 llamacpp_base_url: document.getElementById('f-llamacpp-url').value.trim(),
                 default_model_id: document.getElementById('f-default-model').value || null,
-                connectors_base_url: document.getElementById('f-connectors-url').value.trim(),
-                connectors_api_key: document.getElementById('f-connectors-key').value.trim(),
             };
             try {
                 await App.api('PUT', '/system/settings', data);
@@ -135,6 +123,22 @@ const SettingsPage = {
             }
         } catch (e) {
             html += `<div><i class="bi bi-exclamation-circle text-warning"></i> ${i18n('settings.llamacppUnreachable')}</div>`;
+        }
+
+        // Connectors plugin. Reuses the probe App already did at startup, so
+        // this costs no extra request; the bot count comes from the plugin's own
+        // summary and is only asked for when the plugin is actually there.
+        const plugin = await App.plugin('connectors');
+        if (!plugin) {
+            html += `<div><i class="bi bi-dash-circle text-secondary"></i> ${i18n('settings.connectorsPluginOff')}</div>`;
+        } else if (!plugin.loaded) {
+            html += `<div><i class="bi bi-exclamation-circle text-warning"></i> ${i18n('connectors.loadFailed')} ${App.esc(plugin.error)}</div>`;
+        } else {
+            let count = 0;
+            try {
+                count = (await App.api('GET', '/connectors/status')).bindings || 0;
+            } catch (e) { /* the line is informational; a failure just shows 0 */ }
+            html += `<div><i class="bi bi-check-circle text-success"></i> ${i18n('settings.connectorsPluginOk', { n: count })}</div>`;
         }
 
         container.innerHTML = html;

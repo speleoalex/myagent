@@ -11,20 +11,17 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ValidationError
 
 from app.mcp import naming
-from app.models import McpServer
+from app.models import MCP_ID_MAX_LEN, McpServer
+from app.routers.secrets import SECRET_MASK
 
 router = APIRouter()
 
-# Sentinel handed to the frontend in place of a stored secret.
-SECRET_MASK = "********"
-
 
 def _manager(request: Request):
+    # The manager owns the config store too (save_config/delete_config/raw_*):
+    # every write reloads its cache, so the router never touches the store or
+    # calls reload() itself.
     return request.app.state.mcp
-
-
-def _store(request: Request):
-    return request.app.state.mcp_store
 
 
 def _masked(data: dict) -> dict:
@@ -71,37 +68,13 @@ def _unmask(new: McpServer, existing: dict) -> McpServer:
 
 @router.get("")
 async def list_servers(request: Request):
-    return [_public(s, request) for s in _store(request).list_all()]
+    return [_public(s, request) for s in _manager(request).raw_all()]
 
 
 @router.get("/status")
 async def status_all(request: Request):
     manager = _manager(request)
     return {s.id: manager.status(s.id) for s in manager.servers()}
-
-
-@router.get("/tools")
-async def list_mcp_tools(request: Request):
-    """Tool catalogue grouped per server, for the agent tool picker.
-
-    Read-only and side-effect free: it reports what has been discovered (live or
-    from the on-disk cache) and never opens a connection.
-    """
-    manager = _manager(request)
-    by_server: dict[str, list[dict]] = {}
-    for meta in manager.catalogue(include_unavailable=True):
-        by_server.setdefault(meta["mcp"]["server"], []).append(meta)
-    out = []
-    for cfg in manager.servers():
-        out.append({
-            "server": cfg.id,
-            "name": cfg.name or cfg.id,
-            "enabled": cfg.enabled,
-            "wildcard": naming.wildcard_for(cfg.id),
-            "status": manager.status(cfg.id),
-            "tools": by_server.get(cfg.id, []),
-        })
-    return out
 
 
 class TestRequest(McpServer):
@@ -115,8 +88,8 @@ async def test_server(draft: TestRequest, request: Request):
     Returns HTTP 200 with ``{"ok": false, "error": ...}`` on failure so the UI can
     render the reason in the panel instead of a toast full of JSON.
     """
-    cfg = McpServer(**draft.model_dump())
-    existing = _store(request).get(cfg.id)
+    cfg = draft.model_copy()  # _unmask mutates; FastAPI already validated it
+    existing = _manager(request).raw_get(cfg.id)
     # Mask sentinels are resolved from the stored config ONLY when this draft
     # still points at the same target. Otherwise a caller could probe
     # {"id": "<known>", "url": "http://attacker/", "bearer": "********"} and have
@@ -161,7 +134,7 @@ async def import_servers(req: ImportRequest, request: Request):
         raise HTTPException(400, "No server definitions found (expected an "
                                  "'mcpServers' object)")
 
-    store = _store(request)
+    manager = _manager(request)
     created: list[dict] = []
     skipped: list[dict] = []
     # Ids taken WITHIN this request only. Deduping against the ids already on
@@ -178,7 +151,7 @@ async def import_servers(req: ImportRequest, request: Request):
         if not server_id:
             skipped.append({"name": str(raw_name), "reason": "cannot derive a valid id"})
             continue
-        if store.exists(server_id) and not req.overwrite:
+        if manager.exists(server_id) and not req.overwrite:
             skipped.append({"name": str(raw_name), "id": server_id,
                             "reason": "already exists (tick overwrite to replace it)"})
             continue
@@ -188,13 +161,11 @@ async def import_servers(req: ImportRequest, request: Request):
             skipped.append({"name": str(raw_name), "id": server_id,
                             "reason": _first_error(e)})
             continue
-        store.save(cfg.id, cfg.model_dump())
+        manager.save_config(cfg)
         used.add(cfg.id)
         created.append({"id": cfg.id, "name": cfg.name, "transport": cfg.transport,
                         "enabled": cfg.enabled})
 
-    manager = _manager(request)
-    manager.reload()
     for entry in created:
         manager.schedule_refresh(entry["id"])
     return {"created": created, "skipped": skipped}
@@ -206,13 +177,11 @@ async def import_servers(req: ImportRequest, request: Request):
 
 @router.post("", status_code=201)
 async def create_server(server: McpServer, request: Request):
-    store = _store(request)
-    if store.exists(server.id):
+    manager = _manager(request)
+    if manager.exists(server.id):
         raise HTTPException(409, f"MCP server already exists: {server.id}")
     server = _unmask(server, {})
-    store.save(server.id, server.model_dump())
-    manager = _manager(request)
-    manager.reload()
+    manager.save_config(server)
     # Discover in the background so the agent tool picker isn't empty until the
     # first chat turn happens to connect this server.
     manager.schedule_refresh(server.id)
@@ -221,7 +190,7 @@ async def create_server(server: McpServer, request: Request):
 
 @router.get("/{server_id}")
 async def get_server(server_id: str, request: Request):
-    data = _store(request).get(server_id)
+    data = _manager(request).raw_get(server_id)
     if data is None:
         raise HTTPException(404, f"MCP server not found: {server_id}")
     return _public(data, request)
@@ -229,15 +198,15 @@ async def get_server(server_id: str, request: Request):
 
 @router.put("/{server_id}")
 async def update_server(server_id: str, server: McpServer, request: Request):
-    store = _store(request)
-    existing = store.get(server_id)
-    if existing is None:
+    manager = _manager(request)
+    # exists(), not raw_get(): an invalid stored config must stay repairable
+    # by overwriting it (there is nothing readable to keep secrets from).
+    if not manager.exists(server_id):
         raise HTTPException(404, f"MCP server not found: {server_id}")
+    existing = manager.raw_get(server_id) or {}
     server.id = server_id
     server = _unmask(server, existing)
-    store.save(server_id, server.model_dump())
-    manager = _manager(request)
-    manager.reload()
+    manager.save_config(server)
     # Drop the live connection so the next turn reconnects with the new settings
     # (the manager also detects this by itself, this just makes it immediate).
     await manager.aclose_server(server_id)
@@ -250,14 +219,10 @@ async def update_server(server_id: str, server: McpServer, request: Request):
 
 @router.delete("/{server_id}")
 async def delete_server(server_id: str, request: Request):
-    store = _store(request)
-    if not store.exists(server_id):
-        raise HTTPException(404, f"MCP server not found: {server_id}")
     manager = _manager(request)
-    await manager.forget(server_id)
-    manager.drop_cache(server_id)
-    store.delete(server_id)
-    manager.reload()
+    if not manager.exists(server_id):
+        raise HTTPException(404, f"MCP server not found: {server_id}")
+    await manager.delete_config(server_id)
     return {"ok": True}
 
 
@@ -265,6 +230,12 @@ async def delete_server(server_id: str, request: Request):
 async def refresh_server(server_id: str, request: Request):
     manager = _manager(request)
     if manager.get(server_id) is None:
+        # Distinguish "no such entry" from "the entry exists but its config is
+        # invalid" — the list endpoint shows the latter, so a bare 404 here
+        # contradicted what the user could see.
+        reason = manager.invalid_reason(server_id)
+        if reason:
+            raise HTTPException(400, f"MCP server config is invalid: {reason}")
         raise HTTPException(404, f"MCP server not found: {server_id}")
     status = await manager.refresh(server_id)
     return {"server": server_id, "status": status,
@@ -279,17 +250,18 @@ def _slugify_id(name: str, taken: set[str]) -> str:
     """Derive a valid McpServer id from a config key ("my Server.v2" -> "my-server-v2").
 
     The result is validated by the McpServer model itself, so an unusable slug
-    surfaces as a per-entry skip reason rather than being rejected here.
+    surfaces as a per-entry skip reason rather than being rejected here. The
+    length cap is the model's own (MCP_ID_MAX_LEN), never a re-typed number.
     """
     base = re.sub(r"[^a-z0-9_-]+", "-", name.strip().lower())
-    base = base.strip("-_")[:24].strip("-_")
+    base = base.strip("-_")[:MCP_ID_MAX_LEN].strip("-_")
     if not base:
         return ""
     if base not in taken:
         return base
     for n in range(2, 100):
         suffix = f"-{n}"
-        candidate = base[: 24 - len(suffix)] + suffix
+        candidate = base[: MCP_ID_MAX_LEN - len(suffix)] + suffix
         if candidate not in taken:
             return candidate
     return ""

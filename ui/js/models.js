@@ -31,7 +31,7 @@ const ModelsPage = {
                                 <td><code>${App.esc(m.id)}</code></td>
                                 <td>${App.esc(m.name)}</td>
                                 <td><span class="badge bg-${providerBadge(m.provider)}">${App.esc(m.provider)}</span></td>
-                                <td class="model-cell" data-mid="${App.esc(m.id)}">
+                                <td class="model-cell" data-mid="${App.escAttr(m.id)}">
                                     <code>${App.esc(m.model || '—')}</code>
                                     <span class="model-live"></span>
                                 </td>
@@ -67,7 +67,7 @@ const ModelsPage = {
         };
         const b = map[cap];
         if (!b) return '';
-        return `<span class="badge ${b.cls} me-1" title="${App.esc(cap)}"><i class="bi ${b.icon}"></i> ${b.label}</span>`;
+        return `<span class="badge ${b.cls} me-1" title="${App.escAttr(cap)}"><i class="bi ${b.icon}"></i> ${b.label}</span>`;
     },
 
     async enrichLiveInfo(models) {
@@ -123,7 +123,7 @@ const ModelsPage = {
                                     <strong>${App.esc(m.name)}</strong>
                                     <small class="text-secondary ms-2">${m.size ? (m.size / 1e9).toFixed(1) + ' GB' : ''}</small>
                                 </div>
-                                <button class="btn btn-sm btn-outline-success btn-import-model" data-model="${App.esc(m.name)}">
+                                <button class="btn btn-sm btn-outline-success btn-import-model" data-model="${App.escAttr(m.name)}">
                                     <i class="bi bi-plus"></i> ${i18n('models.import')}
                                 </button>
                             </div>
@@ -199,10 +199,14 @@ const ModelsPage = {
         ]);
     },
 
+    // snake_case -> CamelCase for building i18n keys (optTemperature, ctxSourceModelMax).
+    _camel(key) {
+        return key.replace(/(^|_)([a-z])/g, (m, _s, c) => c.toUpperCase());
+    },
+
     optionLabel(key) {
         // temperature -> models.optTemperature, repeat_last_n -> models.optRepeatLastN
-        const camel = key.replace(/(^|_)([a-z])/g, (m, _s, c) => c.toUpperCase());
-        return i18n('models.opt' + camel);
+        return i18n('models.opt' + this._camel(key));
     },
 
     // No step grid on these fields: in HTML5 `step` is a VALIDATION rule, not
@@ -275,8 +279,7 @@ const ModelsPage = {
             el.innerHTML = `<i class="bi bi-exclamation-triangle text-warning"></i> ${i18n('models.serverOffline')}`;
             return;
         }
-        const srcKey = 'models.ctxSource' + info.context_source
-            .replace(/(^|_)([a-z])/g, (m, _s, c) => c.toUpperCase());
+        const srcKey = 'models.ctxSource' + this._camel(info.context_source);
         const parts = [i18n('models.contextEffective', {
             n: info.context_window, k: this.fmtTokens(info.context_window), src: i18n(srcKey),
         })];
@@ -356,7 +359,7 @@ const ModelsPage = {
                                 <input type="text" class="form-control" id="f-model" value="${App.esc(model.model)}"
                                        list="remote-models"
                                        ${model.provider !== 'llamacpp' ? 'required' : ''}
-                                       placeholder="e.g. qwen2.5-coder:14b">
+                                       placeholder="${i18n('models.modelPlaceholder')}">
                                 <button type="button" class="btn btn-outline-secondary" id="btn-fetch-models"
                                         ${model.provider === 'openai' ? '' : 'style="display:none"'}>
                                     <i class="bi bi-cloud-download"></i> ${i18n('models.fetchRemote')}
@@ -390,7 +393,7 @@ const ModelsPage = {
                             <div class="input-group">
                                 <input type="number" class="form-control" id="f-ctx" min="0" step="1024"
                                        value="${model.context_window || ''}" placeholder="${i18n('models.contextAuto')}">
-                                <span class="input-group-text">token</span>
+                                <span class="input-group-text">${i18n('models.tokensUnit')}</span>
                                 ${isEdit ? `<button type="button" class="btn btn-outline-secondary" id="btn-probe-ctx">
                                     <i class="bi bi-arrow-clockwise"></i> ${i18n('models.contextDetect')}</button>` : ''}
                             </div>
@@ -467,7 +470,10 @@ const ModelsPage = {
                     model_id: isEdit ? modelId : null,
                 });
                 document.getElementById('remote-models').innerHTML =
-                    ids.map(id => `<option value="${App.esc(id)}">`).join('');
+                    // escAttr, not esc: these ids come from a third-party
+                    // gateway's /v1/models — in attribute position a quote in
+                    // the value would open an injection (see App.escAttr).
+                    ids.map(id => `<option value="${App.escAttr(id)}">`).join('');
                 App.toast(i18n('models.remoteLoaded', { count: ids.length }));
             } catch (err) {
                 App.toast(i18n('models.remoteError') + ': ' + err.message, 'danger');

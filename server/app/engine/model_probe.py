@@ -95,7 +95,9 @@ async def probe(cfg, *, client: httpx.AsyncClient | None = None, force: bool = F
         if hit and (now - hit[0]) < CACHE_TTL:
             return hit[1]
 
-    lock = _LOCKS.setdefault(key, asyncio.Lock())
+    lock = _LOCKS.get(key)
+    if lock is None:  # avoid allocating a Lock on every cache hit
+        lock = _LOCKS.setdefault(key, asyncio.Lock())
     async with lock:
         # A concurrent turn may have filled the cache while we waited on the lock.
         hit = _CACHE.get(key)
@@ -107,11 +109,18 @@ async def probe(cfg, *, client: httpx.AsyncClient | None = None, force: bool = F
 
 
 def invalidate(cfg=None) -> None:
-    """Drop cached probes — one config's, or all of them (on save/delete)."""
+    """Drop cached probes — one config's, or all of them (on save/delete).
+    The per-key locks go too, or the dict grows one entry per (provider,
+    base_url, model) ever probed; a prober still holding a dropped lock keeps
+    its own reference, so the worst case is two concurrent probes racing to
+    fill the same cache slot (benign)."""
     if cfg is None:
         _CACHE.clear()
+        _LOCKS.clear()
         return
-    _CACHE.pop(_cache_key(_as_dict(cfg)), None)
+    key = _cache_key(_as_dict(cfg))
+    _CACHE.pop(key, None)
+    _LOCKS.pop(key, None)
 
 
 async def _probe_now(c: dict, client: httpx.AsyncClient | None) -> dict:

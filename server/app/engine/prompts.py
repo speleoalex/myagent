@@ -5,8 +5,8 @@ Two different kinds of thing live here, for two different reasons.
 **Section headers** (``## Available Tools``, ``## Memory``, …). The system prompt
 is assembled from the agent's own text plus up to four generated blocks, built by
 different methods in different files. Keeping the headers together is what makes
-the resulting prompt reviewable as a whole: the order below IS the order the model
-sees (see ``SYSTEM_SECTION_ORDER``).
+the resulting prompt reviewable as a whole (the assembly order lives in the
+executor: _system_prompt_with_tools, then _prepare_turn).
 
 **Scaffolding markers** — and these are load-bearing, not cosmetic. Text-protocol
 turns are stitched with literal markers (``TOOL RESULTS:``, ``(used tool: …)``)
@@ -34,8 +34,15 @@ MALFORMED_PREFIX = "MALFORMED TOOL CALL"
 #: Assistant-turn prefixes that mark plumbing rather than a reply.
 ASSISTANT_MARKER_PREFIXES = (USED_TOOL_PREFIX, UNPARSED_CALL_PREFIX)
 
-#: Earlier assistant wordings, kept so already-stored sessions stay clean.
-LEGACY_ASSISTANT_PREFIXES = ("[Called tool",)
+#: Written by LLMProvider._sanitize_messages when an endpoint rejects `tools`
+#: and the in-flight payload must be flattened to plain text. Not "legacy":
+#: still produced today — but only inside a single request's payload, so the
+#: history matcher treats it like the legacy wordings below.
+SANITIZED_TOOL_PREFIX = "[Called tool"
+
+#: Earlier assistant wordings, kept so already-stored sessions stay clean
+#: (SANITIZED_TOOL_PREFIX doubles as one: old versions did store it).
+LEGACY_ASSISTANT_PREFIXES = (SANITIZED_TOOL_PREFIX,)
 
 #: Earlier user-turn wordings, matched as substrings rather than prefixes.
 LEGACY_USER_SUBSTRINGS = (
@@ -85,16 +92,16 @@ INTERRUPTED = "_[interrotto]_"
 # bodies depend on live state (tool schemas, the agent registry, attachments,
 # the memory store) that does not belong in a string module.
 
+# The model sees them in this order: agents, tools, memory, attachments.
+# `agents`/`tools` are part of the base prompt (fixed capabilities, built in
+# _system_prompt_with_tools); `memory`/`attachments` are turn-scoped and are
+# re-appended by _prepare_turn after any mid-loop rebuild of the base —
+# dropping them there was a real bug once. The order lives in those two
+# methods; a constant here pretending to drive it would just go stale.
 SECTION_TOOLS = "\n\n## Available Tools\n"
 SECTION_AGENTS = "\n\n## Available Agents\n"
 SECTION_ATTACHMENTS = "\n\n## Attachments (this turn)"
 SECTION_MEMORY = "\n\n## Memory\n"
-
-#: The order the model sees them in. `tools` and `agents` are part of the base
-#: prompt (they describe fixed capabilities); `memory` and `attachments` are
-#: turn-scoped and are re-appended by _prepare_turn after any mid-loop rebuild
-#: of the base — dropping them there was a real bug once.
-SYSTEM_SECTION_ORDER = ("agents", "tools", "memory", "attachments")
 
 #: Preamble of the text-protocol tool block. Only sent when the provider has no
 #: native tool calling: in native mode the `tools` payload IS the documentation,

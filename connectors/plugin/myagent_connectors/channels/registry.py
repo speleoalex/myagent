@@ -6,11 +6,11 @@ needs to change.
 """
 from __future__ import annotations
 
-from app.channels.base import BaseConnector
-from app.channels.telegram import TelegramConnector
-from app.models import Binding
-from app.myagent_client import MyAgentClient
-from app.storage import GrantStore
+from myagent_connectors.channels.base import BaseConnector
+from myagent_connectors.channels.telegram import TelegramConnector
+from myagent_connectors.models import Binding
+from myagent_connectors.core import CoreClient
+from myagent_connectors.storage import GrantStore
 
 CONNECTOR_TYPES: dict[str, type[BaseConnector]] = {
     "telegram": TelegramConnector,
@@ -22,7 +22,7 @@ def available_types() -> list[str]:
     return sorted(CONNECTOR_TYPES.keys())
 
 
-def create_connector(binding: Binding, client: MyAgentClient,
+def create_connector(binding: Binding, client: CoreClient,
                      grants: GrantStore) -> BaseConnector:
     cls = CONNECTOR_TYPES.get(binding.type)
     if cls is None:

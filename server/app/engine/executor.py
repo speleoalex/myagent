@@ -2,15 +2,12 @@ from __future__ import annotations
 
 import base64
 import copy
-import hashlib
 import json
 import logging
-import os
 import re
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime
 
 from app import config
 from app.engine import prompts
@@ -18,14 +15,12 @@ from app.models import Agent, ChatMessage, ChatResponse, ModelConfig
 from app.engine.llm_provider import LLMProvider
 from app.engine.toolcall_parser import parse_tool_calls_from_text
 from app.tools.registry import ToolRegistry
+from app.storage.attachments import store_attachment
 from app.storage.memory import MemoryStore
+from app.storage.sessions import now_iso as _now_iso
 from app.storage.store import JsonStore
 
 log = logging.getLogger(__name__)
-
-
-def _now_iso() -> str:
-    return datetime.now().isoformat(timespec="seconds")
 
 
 # How many of a delegatable agent's tools the "Available Agents" directory names
@@ -310,6 +305,40 @@ class AgentExecutor:
         expanded — the wildcard-aware form of ``x in self.agent.tools``."""
         return set(self.tool_registry.expand_tool_ids(self.agent.tools))
 
+    # ------------------------------------------------------------------
+    # Public surface for internal tool handlers (app.tools.internal).
+    # Handlers receive executor=self on dispatch; these methods are their
+    # contract — they must never reach into _private state directly.
+    # ------------------------------------------------------------------
+
+    @property
+    def turn_attachments(self) -> list[dict]:
+        """The current user turn's attachments (what call_agent may forward)."""
+        return self._turn_attachments
+
+    def can_call(self, target: dict) -> bool:
+        """Whether THIS agent may delegate to ``target`` (a raw agent dict)."""
+        return self._agent_can_call(self.agent, target)
+
+    def record_sub_trace(self, trace: dict) -> None:
+        """Queue a called agent's full trace; consumed by the next call_agent
+        step so the whole multi-agent flow is persisted recursively."""
+        self._sub_traces.append(trace)
+
+    def emit_sub_events(self, agent_id: str, tool_results: list[dict]) -> None:
+        """Forward a sub-agent's tool activity to this run's SSE stream,
+        namespaced as ``<agent_id>/<tool>``. This is the ONE place the
+        sub-event envelope is built — it mirrors _step_summary's field set."""
+        for tr in tool_results or []:
+            tool = f"{agent_id}/{tr.get('tool')}"
+            self._pending_sub_events.append(
+                {"type": "tool_start",
+                 "data": {"tool": tool, "arguments": tr.get("arguments")}})
+            self._pending_sub_events.append(
+                {"type": "tool_result",
+                 "data": {"tool": tool, "arguments": tr.get("arguments"),
+                          "result_preview": tr.get("result_preview", "")}})
+
     def _build_agents_directory(self) -> str:
         """Compact directory of the agents this one may call: one line per
         agent — description + tool ids, nothing else. An agent can only act
@@ -449,19 +478,9 @@ class AgentExecutor:
                 out.append(att)
                 continue
             name = att.get("name") or (kind or "file")
-            stem, ext = os.path.splitext(name)
-            digest = hashlib.md5(raw).hexdigest()[:8]
-            safe = re.sub(r"[^A-Za-z0-9_.-]", "_", stem)[:40] or (kind or "file")
-            fname = f"{safe}-{digest}{ext}"
-            dest = workdir / fname
-            if not dest.exists():
-                try:
-                    dest.write_bytes(raw)
-                except OSError as e:
-                    log.warning("cannot write attachment '%s': %s", name, e)
-                    out.append(att)
-                    continue
-            att["path"] = f"_attachments/{fname}"  # relative to the tool workspace cwd
+            path = store_attachment(raw, name, kind or "file")
+            if path:
+                att["path"] = path  # relative to the tool workspace cwd
             out.append(att)
         return out
 

@@ -1,5 +1,4 @@
 import json
-import re
 import shutil
 import stat
 from pathlib import Path
@@ -8,17 +7,16 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from app import config
+from app.ids import is_valid_id
+from app.storage.sessions import write_json
 
 router = APIRouter()
 
-# Tool ids become directory names under tools/: reject anything that could
-# escape it (path traversal via '..', separators, etc.). Group (category)
-# names share the same charset — they are directory names too.
-_VALID_TOOL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
-
 
 def _check_tool_id(tool_id: str) -> None:
-    if not _VALID_TOOL_ID.match(tool_id or "") or ".." in tool_id:
+    # Tool ids become directory names under tools/ (group names too): reject
+    # anything that could escape it — same charset as every other entity id.
+    if not is_valid_id(tool_id):
         raise HTTPException(400, "Invalid tool ID")
 
 
@@ -142,8 +140,9 @@ async def create_tool(req: ToolCreateRequest, request: Request):
         "timeout": req.timeout,
         "max_output": req.max_output,
     }
-    (tool_dir / "tool.json").write_text(json.dumps(meta, indent=2))
+    write_json(tool_dir / "tool.json", meta)  # atomic, like every other store
     _write_run(tool_dir, req.script)
+    _registry(request).mark_dirty()
 
     meta["id"] = req.id
     if category:
@@ -169,8 +168,13 @@ async def update_tool(tool_id: str, req: ToolUpdateRequest, request: Request):
         raise HTTPException(404, f"Tool not found: {tool_id}")
     tool_json_path = tool_dir / "tool.json"
 
-    with open(tool_json_path) as f:
-        meta = json.load(f)
+    # Tolerant read: a corrupt tool.json must be repairable through this same
+    # endpoint (a 500 here would make the tool uneditable forever).
+    try:
+        with open(tool_json_path) as f:
+            meta = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        meta = {}
 
     if req.name is not None:
         meta["name"] = req.name
@@ -185,10 +189,11 @@ async def update_tool(tool_id: str, req: ToolUpdateRequest, request: Request):
     if req.enabled is not None:
         meta["enabled"] = req.enabled
 
-    tool_json_path.write_text(json.dumps(meta, indent=2))
+    write_json(tool_json_path, meta)  # atomic
 
     if req.script is not None:
         _write_run(tool_dir, req.script)
+    registry.mark_dirty()
 
     meta["id"] = tool_id
     if current.get("category"):
@@ -206,6 +211,7 @@ def _remove_user_copy(request: Request, path: Path) -> None:
             parent.rmdir()
         except OSError:
             pass
+    _registry(request).mark_dirty()
 
 
 @router.post("/{tool_id}/reset")

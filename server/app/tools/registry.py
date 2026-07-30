@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import shutil
+import time
 from pathlib import Path, PurePosixPath
 from typing import Callable
 
@@ -128,6 +129,12 @@ class ToolRegistry:
         self._app_dir = app_dir
         self._cache: dict[str, dict] = {}
         self._mtimes: dict[str, float] = {}
+        # Scan debounce: every query method calls _scan(), and one GET
+        # /api/tools annotates each tool with 3 more queries — dozens of full
+        # directory walks per request without this. Within the TTL the cache
+        # answers; manual folder edits are still picked up within a second
+        # (hot reload preserved), and every write path calls mark_dirty().
+        self._last_scan = 0.0
         # tool_id -> RESOLVED folder (the user override when there is one, the
         # bundled folder otherwise); execution and the CRUD routes go through
         # this instead of assuming a location.
@@ -190,9 +197,22 @@ class ToolRegistry:
                     add(sub, entry.name)
         return out
 
-    def _scan(self) -> None:
+    _SCAN_TTL = 1.0  # seconds a scan result stays authoritative
+
+    def mark_dirty(self) -> None:
+        """Make the next query rescan immediately. Every write path (the tools
+        router, ensure_override) calls this so its own follow-up reads never
+        see a stale catalog."""
+        self._last_scan = 0.0
+
+    def _scan(self, force: bool = False) -> None:
         """Rescan both layers.  Only re-reads tool.json files whose mtime (or
-        resolution: which layer wins, what category applies) changed."""
+        resolution: which layer wins, what category applies) changed.
+        Debounced by _SCAN_TTL unless ``force``."""
+        now = time.monotonic()
+        if not force and now - self._last_scan < self._SCAN_TTL:
+            return
+        self._last_scan = now
         native = self._walk_layer(self._bundled_dir)
         user = self._walk_layer(self._tools_dir)
         self._native_dirs = {tid: entry for tid, (entry, _cat) in native.items()}
@@ -358,15 +378,9 @@ class ToolRegistry:
         shutil.copytree(
             native, dst, ignore=shutil.ignore_patterns("__pycache__", "*.pyc")
         )
+        self.mark_dirty()
         log.info("Created override for native tool %s at %s", tool_id, dst)
         return dst
-
-    def categories(self) -> list[str]:
-        """Group names currently present on disk, sorted."""
-        self._scan()
-        return sorted({
-            m["category"] for m in self._cache.values() if m.get("category")
-        })
 
     def expand_tool_ids(self, tool_ids: list[str]) -> list[str]:
         """Expand ``<category>/*`` grants into the enabled tool ids of that
@@ -468,6 +482,18 @@ class ToolRegistry:
     # ------------------------------------------------------------------
 
     async def execute(self, tool_id: str, arguments: dict, **extra) -> str:
+        """Run a tool and ALWAYS return a string. The executor feeds this back
+        to the model with no try/except of its own, so an exception escaping
+        here (a stat() race in _execute_external, a handler bug) would abort
+        the whole chat turn instead of coming back as an in-band tool error —
+        this outer guard is the one enforcement point of that contract."""
+        try:
+            return await self._execute(tool_id, arguments, **extra)
+        except Exception as e:
+            log.exception("Tool '%s' failed", tool_id)
+            return f"ERROR: Tool '{tool_id}' failed: {e}"
+
+    async def _execute(self, tool_id: str, arguments: dict, **extra) -> str:
         # MCP first: their ids live outside the filesystem cache, and looking
         # there first keeps every MCP call from triggering a directory rescan.
         # `tool_id not in self._cache` preserves filesystem precedence without
@@ -478,7 +504,9 @@ class ToolRegistry:
             meta = self.mcp_manager.get_meta(tool_id)
         if meta is None:
             if tool_id not in self._cache:
-                self._scan()
+                # force: a tool created seconds ago (manage_tools) must be
+                # callable in the same turn, debounce notwithstanding.
+                self._scan(force=True)
             meta = self._cache.get(tool_id)
         if meta is None:
             return f"ERROR: Unknown tool '{tool_id}'"
@@ -506,11 +534,7 @@ class ToolRegistry:
             kwargs = {**arguments, **extra}
             if not accepts_any:
                 kwargs = {k: v for k, v in kwargs.items() if k in params}
-            try:
-                return await handler(**kwargs)
-            except Exception as e:
-                log.exception("Internal tool '%s' failed", tool_id)
-                return f"ERROR: Tool '{tool_id}' failed: {e}"
+            return await handler(**kwargs)
 
         # External tool: run executable via subprocess
         return await self._execute_external(tool_id, arguments, meta)

@@ -47,7 +47,7 @@ const ChatPage = {
                 <div class="d-flex gap-2 mb-2 flex-wrap align-items-center">
                     <select id="agent-select" class="form-select" style="max-width:200px">
                         ${agents.map(a => `
-                            <option value="${a.id}" ${a.id === this.currentAgentId ? 'selected' : ''}>${App.esc(a.name)}</option>
+                            <option value="${App.escAttr(a.id)}" ${a.id === this.currentAgentId ? 'selected' : ''}>${App.esc(a.name)}</option>
                         `).join('')}
                     </select>
                     <button class="btn btn-outline-primary" id="btn-new" title="${i18n('chat.newChatTitle')}">
@@ -182,7 +182,7 @@ const ChatPage = {
                             · <span class="hi-source" title="${App.escAttr(s.channel || '')}">
                                 <i class="bi ${srcIcon}"></i> ${App.esc(src)}</span>` : '';
             html += `
-                <div class="history-item${active}" data-id="${App.esc(s.id)}" role="button" tabindex="0">
+                <div class="history-item${active}" data-id="${App.escAttr(s.id)}" role="button" tabindex="0">
                     <div class="hi-main">
                         <div class="hi-title">${App.esc(s.title || i18n('chat.untitled'))}</div>
                         <div class="hi-meta">
@@ -191,7 +191,7 @@ const ChatPage = {
                         </div>
                     </div>
                     <div class="hi-when">${App.esc(this.fmtTime(s.updated_at))}</div>
-                    <button class="btn btn-sm btn-link text-danger hi-del" data-id="${App.esc(s.id)}"
+                    <button class="btn btn-sm btn-link text-danger hi-del" data-id="${App.escAttr(s.id)}"
                             title="${i18n('chat.deleteArchivedTitle')}"><i class="bi bi-trash"></i></button>
                 </div>`;
         }
@@ -696,13 +696,17 @@ const ChatPage = {
     },
 
     // Format an ISO timestamp (server local time) for display. Omitted ts = now.
+    // Locale-aware like dayLabel(): a hardcoded dd/mm read as "month 30" in en.
     fmtTime(ts) {
         let d = ts ? new Date(ts) : new Date();
         if (isNaN(d.getTime())) d = new Date();
-        const pad = (n) => String(n).padStart(2, '0');
-        const hhmm = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+        const hhmm = d.toLocaleTimeString(I18n.getDateLocale(),
+            { hour: '2-digit', minute: '2-digit' });
         const sameDay = d.toDateString() === new Date().toDateString();
-        return sameDay ? hhmm : `${pad(d.getDate())}/${pad(d.getMonth() + 1)} ${hhmm}`;
+        if (sameDay) return hhmm;
+        const dm = d.toLocaleDateString(I18n.getDateLocale(),
+            { day: '2-digit', month: '2-digit' });
+        return `${dm} ${hhmm}`;
     },
 
     _timeEl(ts) {
@@ -713,13 +717,11 @@ const ChatPage = {
         return el;
     },
 
+    // Only error banners come through here (assistant text streams via the
+    // live-run path), so plain textContent is all it needs.
     appendMessage(role, content, ts) {
         const div = this.createMessageDiv(role);
-        if (role === 'assistant') {
-            div.innerHTML = this.renderMarkdown(content || '');
-        } else {
-            div.textContent = content;
-        }
+        div.textContent = content;
         div.appendChild(this._timeEl(ts));
         document.getElementById('chat-messages').scrollTop =
             document.getElementById('chat-messages').scrollHeight;
@@ -1100,7 +1102,7 @@ const ChatPage = {
         const codes = [];
         s = s.replace(/`([^`]+)`/g, (m, c) => {
             codes.push(c);
-            return `${codes.length - 1}`;
+            return `\x01${codes.length - 1}\x01`;
         });
         s = s
             .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
@@ -1111,7 +1113,7 @@ const ChatPage = {
             // href attribute and inject event handlers — neutralize quotes.
             .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, (m, text, url) =>
                 `<a href="${url.replace(/"/g, '%22')}" target="_blank" rel="noopener">${text}</a>`);
-        s = s.replace(/(\d+)/g, (m, n) => `<code>${codes[parseInt(n, 10)]}</code>`);
+        s = s.replace(/\x01(\d+)\x01/g, (m, n) => `<code>${codes[parseInt(n, 10)]}</code>`);
         return s;
     },
 
@@ -1125,7 +1127,7 @@ const ChatPage = {
         const blocks = [];
         src = src.replace(/```(\w*)\n?([\s\S]*?)```/g, (m, lang, code) => {
             blocks.push(`<pre><code>${code.replace(/\n$/, '')}</code></pre>`);
-            return ` ${blocks.length - 1} `;
+            return `\x00${blocks.length - 1}\x00`;
         });
 
         const lines = src.split('\n');
@@ -1140,7 +1142,7 @@ const ChatPage = {
             const trimmed = line.trim();
 
             // Protected code block
-            if (/^ \d+ $/.test(trimmed)) { out.push(trimmed); i++; continue; }
+            if (/^\x00\d+\x00$/.test(trimmed)) { out.push(trimmed); i++; continue; }
 
             // Table: a row with pipes followed by a separator row
             if (line.includes('|') && isTableSep(lines[i + 1])) {
@@ -1198,7 +1200,7 @@ const ChatPage = {
             const para = [];
             while (i < lines.length) {
                 const l = lines[i];
-                if (l.trim() === '' || /^ \d+ $/.test(l.trim()) ||
+                if (l.trim() === '' || /^\x00\d+\x00$/.test(l.trim()) ||
                     /^(#{1,6})\s+/.test(l.trim()) || /^\s*[-*+]\s+/.test(l) ||
                     /^\s*\d+[.)]\s+/.test(l) || /^\s*&gt;\s?/.test(l) ||
                     (l.includes('|') && isTableSep(lines[i + 1]))) break;
@@ -1209,7 +1211,7 @@ const ChatPage = {
         }
 
         let html = out.join('\n');
-        html = html.replace(/ (\d+) /g, (m, n) => blocks[parseInt(n, 10)]);
+        html = html.replace(/\x00(\d+)\x00/g, (m, n) => blocks[parseInt(n, 10)]);
         return html;
     },
 };

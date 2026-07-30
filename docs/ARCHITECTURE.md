@@ -2,8 +2,8 @@
 
 MyAgent is an AI agent platform built around **atomic agents** (model +
 system prompt + tools). Stack: FastAPI backend (`server/`), vanilla
-JS/Bootstrap 5 frontend (`ui/`), plain-JSON storage. A separate, optional
-messaging-bridge server lives in `connectors/`.
+JS/Bootstrap 5 frontend (`ui/`), plain-JSON storage. An optional messaging
+plugin lives in `connectors/`, installed separately (see `docs/PLUGINS.md`).
 
 It is designed to run **without internet**: a local model serves the
 inference, the `local_search` tool answers from the offline library
@@ -27,7 +27,8 @@ server/
 ├── config/            # bundled seed: default agents, models, settings.json
 └── tools/             # bundled seed: default tool folders
 ui/                    # static SPA (index.html, js/, css/, vendor/)
-connectors/            # standalone Telegram bridge server (own README)
+connectors/            # optional Telegram plugin: source only, NOT deployed
+                       # with the core (installed to ~/myagent/plugins/)
 ```
 
 ## Request flow
@@ -252,7 +253,8 @@ Endpoints: `GET/POST /api/mcp`, `GET/PUT/DELETE /api/mcp/{id}`,
 `POST /api/mcp/{id}/refresh`, `POST /api/mcp/test` (probes an unsaved draft and
 returns `{"ok": false, "error": ...}` with HTTP 200 on failure),
 `POST /api/mcp/import` (a Claude Desktop / VS Code `mcpServers` blob),
-`GET /api/mcp/tools`, `GET /api/mcp/status`. Secrets (`bearer`, `env` and
+`GET /api/mcp/status`. The tool catalogue reaches the UI through the unified
+`GET /api/tools` (each MCP entry marked `source: "mcp"`). Secrets (`bearer`, `env` and
 `headers` values) are write-only: masked on GET, and a PUT that echoes the mask
 keeps the stored value. Note that configuring a stdio server means running a
 local command — the same capability `POST /api/tools` already grants by writing
@@ -328,11 +330,10 @@ limits, notify target); ``live`` alone is a working configuration.
   recorded. Agents with ``memory_enabled`` get their root digest injected and
   the session compacts like any other; agents without memory have the saved
   conversation capped.
-- **Reaching the user** — the ``notify_user`` tool POSTs to the connectors
-  server (`POST /api/bindings/{id}/send`, bearer-gated by
-  ``MYAGENT_CONNECTORS_API_KEY``, best-effort) using the agent's configured
-  default binding/chat; ``Settings.connectors_base_url`` / ``connectors_api_key``
-  point at it. The reply text of a wake is only logged.
+- **Reaching the user** — the ``notify_user`` tool hands the text to a running
+  connector, found through ``app.state.connectors`` (the connectors plugin), using
+  the agent's configured default binding/chat. Best-effort, and a clear error when
+  the plugin is not installed. The reply text of a wake is only logged.
 - **Safety rails** — per-hour rate limit, auto-pause after N consecutive
   errors (cleared by re-saving the agent or ``POST /api/autonomy/{id}/resume``),
   ``wake_timeout_s`` wall, plus the existing per-turn ``max_iterations`` /
@@ -347,18 +348,27 @@ deliberately kept).
 `notify_user` both sends and appends the sent text to the target chat's own
 conversation, so an unsolicited message is part of the history the agent replays
 next turn (otherwise "repeat that" repeats the turn before it). The session key is
-returned by the connectors `/send` ack — it derives from the binding's
-`session_prefix` and is not derivable by myagent. A wake receives no chat history
+asked of the connector (`session_id_for`): it derives from the binding's
+`session_prefix`, so nothing else can compute it. A wake receives no chat history
 at all by default (`AutonomousConfig.history_messages: 0`); continuity comes from
 deep memory instead.
 
-`GET /api/connectors/bindings` is a read-only proxy to the connectors server's
-own binding list, so the agent form can offer a real picker for
-`autonomous.notify_binding_id` instead of a free-text id. It exists because that
-server listens on loopback and sets no CORS headers, so the browser cannot query
-it directly; only picker-relevant fields are forwarded (never the bot token), and
-an unreachable connectors server returns `{bindings: [], available: false}` rather
-than an error — the form then falls back to a text input.
+`GET /api/connectors/bindings` is served by the plugin and lets the agent form
+offer a real picker for `autonomous.notify_binding_id` instead of a free-text id.
+Secrets are masked, never forwarded. Without the plugin the route does not exist,
+so the fetch fails and the form falls back to a text input — which is the right
+control in that state, since the id must still be typeable.
+
+## Plugins
+
+`~/myagent/plugins/<id>/plugin.py` exposing `register(app)` (plus optional
+`startup`/`shutdown` lifespan hooks) — loaded by `app/plugins.py` between the core
+routers and the static catch-all mount, because Starlette matches routes in
+registration order. Every step is guarded: a broken plugin logs a warning and is
+reported by `GET /api/plugins` with `loaded: false`, but never stops the server
+from starting. Nothing in the core names a specific plugin; there is no bundled
+plugin layer, since shipping one would put optional online code inside an install
+meant to work offline. Full contract and isolation rules: `docs/PLUGINS.md`.
 
 ## Data storage
 
@@ -376,7 +386,8 @@ Everything is plain JSON under `~/myagent/` (see `server/app/config.py`):
 | `~/myagent/sessions/` | `MYAGENT_SESSIONS` | `current.json`, `history/`, `channels/` (connector chats) |
 | `~/myagent/memory/` | `MYAGENT_MEMORY` | per-agent deep memory: `<agent_id>/tree.json` + `chunks/` |
 | `~/myagent/autonomy/` | `MYAGENT_AUTONOMY` | live agents' runtime state: `<agent_id>/state.json` + `events/{pending,archive}/` |
-| `~/myagent/connectors/` | `MYAGENT_CONNECTORS_DIR` | connector server state: bot bindings (0600), grants, contacts (address book) |
+| `~/myagent/connectors/` | `MYAGENT_CONNECTORS_DIR` | connectors *plugin* state: bot bindings (0600), grants, contacts, kill switch |
+| `~/myagent/plugins/` | `MYAGENT_PLUGINS` | installed plugins (code, replaceable — state never lives here) |
 | `~/myagent/logs/` | `MYAGENT_DEBUG_FILE` | `debug.log` when `MYAGENT_DEBUG=1` |
 
 On first run, if `~/myagent/config` (or `~/myagent/tools`) doesn't exist,
@@ -423,6 +434,9 @@ under `ui/vendor/`.
 | Memory compaction pipeline | `server/app/engine/memory_compactor.py` |
 | Autonomy scheduler + wake turns | `server/app/engine/autonomy.py` |
 | Per-agent event queues | `server/app/storage/events.py` |
+| One agent turn on a channel session | `server/app/engine/channel_turn.py` |
+| Plugin discovery + lifecycle | `server/app/plugins.py` |
+| Connectors plugin (messaging bots) | `connectors/plugin/` (see `docs/PLUGINS.md`) |
 | Tool discovery/execution | `server/app/tools/registry.py` |
 | Internal tool handlers | `server/app/tools/internal.py`, `server/app/tools/memory_tools.py` |
 | MCP wire protocol (stdio + HTTP) | `server/app/mcp/client.py` |

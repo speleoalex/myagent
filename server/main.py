@@ -52,8 +52,9 @@ from app.tools.memory_tools import (
     memory_read_handler,
     memory_note_handler,
 )
+from app.plugins import load_plugins, start_plugins, stop_plugins
 from app.routers import (agents, tools, llm_models, chat, mcp, system, sessions,
-                         autonomy, connectors)
+                         autonomy, plugins)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -75,7 +76,12 @@ async def lifespan(app: FastAPI):
     unaffected.
     """
     app.state.autonomy.start()
+    # Plugins start last and stop first: they are PRODUCERS of agent turns (an
+    # inbound message drives the executor and may schedule a wake), so the
+    # engines they feed must be up before them and still up while they drain.
+    await start_plugins(app)
     yield
+    await stop_plugins(app)
     try:
         await app.state.autonomy.aclose()
     except Exception as e:
@@ -141,9 +147,10 @@ tool_registry.register_internal("memory_note", memory_note_handler)
 
 # External MCP servers: their tools join the registry as a second source. No
 # connection is opened here — servers are started lazily, only for the agents
-# that actually reference their tools (see ToolRegistry.ensure_mcp).
-mcp_store = JsonStore(MCP_DIR)
-mcp_manager = McpManager(mcp_store, JsonStore(MCP_CACHE_DIR), WORKSPACE_DIR)
+# that actually reference their tools (see ToolRegistry.ensure_mcp). The
+# manager OWNS its config store (save_config/delete_config reload the cache),
+# so the store is not exposed on app.state — the router goes through the manager.
+mcp_manager = McpManager(JsonStore(MCP_DIR), JsonStore(MCP_CACHE_DIR), WORKSPACE_DIR)
 tool_registry.mcp_manager = mcp_manager
 if mcp_manager.server_ids():
     log.info("MCP servers configured: %s", ", ".join(sorted(mcp_manager.server_ids())))
@@ -156,8 +163,9 @@ session_store = SessionStore(SESSIONS_DIR)
 # Channel-scoped sessions: independent, persistent conversations addressed by
 # an external key (one per messaging chat), used by external connectors.
 # Namespaced under sessions/channels/, kept separate from the web UI's
-# current/history flow.
-named_sessions = NamedSessionStore(SESSIONS_DIR)
+# current/history flow. The web store is handed over as the archive target:
+# rotation (save_rotating) and /reset both park closed logs in the web history.
+named_sessions = NamedSessionStore(SESSIONS_DIR, archive=session_store)
 
 # Manages background (client-decoupled) chat generations for resume/stop
 live_runs = LiveRunManager()
@@ -167,7 +175,7 @@ live_runs = LiveRunManager()
 ensure_autonomy()
 event_store = EventStore(AUTONOMY_DIR)
 autonomy_service = AutonomyService(
-    stores, tool_registry, named_sessions, session_store,
+    stores, tool_registry, named_sessions,
     live_runs, event_store, AUTONOMY_DIR,
 )
 # notify_user is registered here, not with the others above: besides sending, it
@@ -175,8 +183,12 @@ autonomy_service = AutonomyService(
 # session store (which only exists further down). Without that append the user sees
 # the notification in Telegram but the agent does not — ask it to repeat and it
 # repeats the turn BEFORE the notification.
+# _state is app.state itself, not a snapshot of it: a connectors plugin puts its
+# services there further down (load_plugins), so the lookup has to happen when
+# the tool runs, not when it is bound.
 tool_registry.register_internal(
-    "notify_user", functools.partial(notify_user_handler, _named=named_sessions)
+    "notify_user",
+    functools.partial(notify_user_handler, _named=named_sessions, _state=app.state),
 )
 # schedule_task needs the event store: bound here (underscore name so a model
 # hallucinating an "_events" argument can't collide silently — it just errors).
@@ -194,7 +206,6 @@ tool_registry.register_internal(
 app.state.stores = stores
 app.state.tool_registry = tool_registry
 app.state.mcp = mcp_manager
-app.state.mcp_store = mcp_store
 app.state.sessions = session_store
 app.state.named_sessions = named_sessions
 app.state.live = live_runs
@@ -211,7 +222,18 @@ app.include_router(mcp.router, prefix="/api/mcp", tags=["mcp"])
 app.include_router(sessions.router, prefix="/api/sessions", tags=["sessions"])
 app.include_router(system.router, prefix="/api/system", tags=["system"])
 app.include_router(autonomy.router, prefix="/api/autonomy", tags=["autonomy"])
-app.include_router(connectors.router, prefix="/api/connectors", tags=["connectors"])
+app.include_router(plugins.router, prefix="/api/plugins", tags=["plugins"])
+
+# Optional plugins installed under ~/myagent/plugins (see docs/PLUGINS.md).
+# Mounted HERE, after the core routers and BEFORE the static catch-all below:
+# Starlette matches routes in registration order, so anything registered after
+# the "/" mount is unreachable — and it fails as a 404, indistinguishable from
+# "this plugin is not installed".
+app.state.plugins = load_plugins(app)
+if app.state.plugins:
+    log.info("Plugins: %s", ", ".join(
+        f"{p.id}{'' if p.loaded else ' (FAILED)'}" for p in app.state.plugins.values()
+    ))
 
 # Serve the frontend (static UI lives in <root>/ui, separate from the server).
 STATIC_DIR = PROJECT_ROOT / "ui"

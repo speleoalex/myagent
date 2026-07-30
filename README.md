@@ -54,8 +54,8 @@ had no internet access.*
 - **Live chat** — token streaming, background generation you can leave and
   re-attach to, stop button, session history; regenerate an answer, edit a
   prompt and send it again, copy any answer as Markdown
-- **Telegram connector** — bridge any agent to a Telegram bot
-  (see [connectors/](connectors/README.md))
+- **Telegram connector** — bridge any agent to a Telegram bot. An optional
+  plugin, installed separately (see [connectors/](connectors/README.md))
 - **Optional online tools** — web search and page reading are there when you
   *do* have connectivity, in a separate agent
 - **i18n UI** — English and Italian out of the box
@@ -219,6 +219,7 @@ MyAgent keeps all runtime state under `~/myagent/`, decoupled from the code:
 ~/myagent/
 ├── config/      # agents, models (API keys, 0600), MCP servers, settings — small & precious: back this up
 ├── connectors/  # Telegram bindings (bot tokens, 0600), grants, address book
+├── plugins/     # installed plugins — code, replaceable (see docs/PLUGINS.md)
 ├── tools/       # your tools: the ones you (or the AI) create, plus your edits to the built-in ones
 ├── library/     # your offline knowledge: Wikipedia ZIM archives + notes/documents
 ├── workspace/   # working directory for agents' file operations
@@ -247,13 +248,15 @@ Everything is configured via environment variables (none are required):
 | `MYAGENT_MEMORY`     | `~/myagent/memory`     | per-agent long-term memory                 |
 | `MYAGENT_AUTONOMY`   | `~/myagent/autonomy`   | live agents' state and event queues        |
 | `MYAGENT_LIBRARY`    | `~/myagent/library`    | `local_search` knowledge folder            |
+| `MYAGENT_PLUGINS`    | `~/myagent/plugins`    | installed plugins                          |
+| `MYAGENT_CHANNEL_ROTATE_BYTES` | `2 MiB`      | size at which a channel session is archived and restarted |
 | `MYAGENT_DEBUG`      | *(off)*                | `1` = verbose executor trace (full chat content) |
 | `MYAGENT_DEBUG_FILE` | `~/myagent/logs/debug.log` | trace file location                    |
 | `MYAGENT_OLLAMA_DEFAULT_CTX` | `4096`         | assumed context window of an Ollama model when not probed |
 | `MYAGENT_MCP_SHUTDOWN_TIMEOUT` | `10`         | seconds shutdown waits for MCP servers to close |
 
-The Telegram connector server has its own variables — see
-[connectors/README.md](connectors/README.md).
+The connectors plugin adds a few of its own (state directory, poll timeout,
+Whisper model) — see [connectors/README.md](connectors/README.md).
 
 ## Bundled agents and models
 
@@ -287,9 +290,9 @@ dependencies are present (`./setup.sh` reports what it finds):
 | Feature                          | Tools                                | Needs                                             |
 |----------------------------------|--------------------------------------|---------------------------------------------------|
 | Web search & browsing            | `web_search`, `browse_web`, `web_research` | Node.js + Chrome/Chromium (`PUPPETEER_EXECUTABLE_PATH` honored) |
-| Document extraction (PDF, images, audio) | `document_extract`           | `poppler-utils`, `tesseract`, `pandoc`, `ffmpeg` (each optional) |
+| Document extraction (PDF, images)| `document_extract`                   | `poppler-utils`, `tesseract`, `pandoc` (each optional) |
 | Offline Wikipedia archives       | `local_search`                       | `pip install libzim` (`.zim` files only — Markdown/text notes need nothing) |
-| Voice notes on Telegram          | connectors server                    | `ffmpeg` (uses faster-whisper)                    |
+| Audio transcription (files and Telegram voice notes) | `document_extract` | `ffmpeg` + `faster-whisper` (installed with the connectors plugin) |
 
 ## Autonomous agents
 
@@ -306,9 +309,8 @@ Useful pieces to give a live agent:
 - `schedule_task` — it schedules its own reminders and recurring jobs
   ("check the backup log every morning")
 - `notify_user` — it messages you on Telegram through the
-  [connectors server](connectors/README.md) (`POST /api/bindings/{id}/send`,
-  protected by `MYAGENT_CONNECTORS_API_KEY`; set the URL/key in Settings and
-  the default chat in the agent's autonomy settings)
+  [connectors plugin](connectors/README.md); pick the bot and the default chat
+  in the agent's autonomy settings
 - memory (`memory_enabled`) — so it remembers what it did across wakes
 - `POST /api/agents/{id}/events` — feed it events from scripts and webhooks
 
@@ -334,8 +336,9 @@ rely on shebangs); use WSL2.
   context-window probing, storage
 - [Writing tools](docs/TOOLS.md) — anatomy of a tool, the `run` contract,
   a worked example
-- [Telegram connectors](connectors/README.md) — standalone messaging-bridge
-  server
+- [Writing plugins](docs/PLUGINS.md) — the plugin contract, isolation rules,
+  where state goes
+- [Telegram connectors](connectors/README.md) — the messaging plugin
 
 ## Contributing
 

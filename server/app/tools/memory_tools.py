@@ -14,8 +14,11 @@ small local models.
 """
 from __future__ import annotations
 
-import asyncio
 import logging
+
+# Module-level on purpose: no cycle exists (memory_compactor -> executor ->
+# registry; none of them imports this module).
+from app.engine.memory_compactor import fold_and_reroot, schedule_background
 
 log = logging.getLogger(__name__)
 
@@ -137,8 +140,6 @@ def _schedule_reroot(executor, memory) -> None:
     a fresh note stays out of the injected '## Memory' section — what new
     sessions see without any tool call — until the next session compaction
     happens to run. Best-effort: on failure the digest is simply stale."""
-    from app.engine.memory_compactor import fold_and_reroot  # lazy: import cycle
-
     agent, model_config = executor.agent, executor.model_config
 
     async def _job():
@@ -148,4 +149,4 @@ def _schedule_reroot(executor, memory) -> None:
         except Exception:
             log.exception("memory reroot after note failed for agent '%s'", agent.id)
 
-    asyncio.create_task(_job())
+    schedule_background(_job())

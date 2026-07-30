@@ -195,7 +195,7 @@ const ToolsPage = {
             + this.section({
                 icon: 'box-seam', title: i18n('tools.sectionBuiltin'),
                 hint: i18n('tools.sectionBuiltinHint'), rows: buckets.builtin,
-                cols: { edit: true, reset: true, status: true },
+                cols: { edit: true, reset: true },
             })
             + this.section({
                 icon: 'cpu', title: i18n('tools.sectionSystem'),
@@ -204,24 +204,22 @@ const ToolsPage = {
             });
 
         box.querySelectorAll('[data-tool-reset]').forEach(btn => {
-            btn.onclick = () => {
-                if (!confirm(i18n('tools.confirmReset'))) return;
-                this.resetTool(btn.dataset.toolReset);
-            };
+            btn.onclick = () => this.resetTool(btn.dataset.toolReset);
         });
         box.querySelectorAll('[data-tool-delete]').forEach(btn => {
-            btn.onclick = () => {
-                if (!confirm(i18n('tools.confirmDelete'))) return;
-                this.deleteTool(btn.dataset.toolDelete);
-            };
+            btn.onclick = () => this.deleteTool(btn.dataset.toolDelete);
         });
     },
 
-    async deleteTool(id) {
+    /** Confirm + delete. `after` lets the form navigate away instead of
+     *  re-rendering the list (the form handlers used to re-implement all of
+     *  this inline, and the two copies had started to drift). */
+    async deleteTool(id, after) {
+        if (!confirm(i18n('tools.confirmDelete'))) return;
         try {
             await App.api('DELETE', `/tools/${id}`);
             App.toast(i18n('tools.deleted'));
-            this.renderList();
+            (after || (() => this.renderList()))();
         } catch (err) {
             App.toast(err.message, 'danger');
         }
@@ -229,11 +227,12 @@ const ToolsPage = {
 
     /** Discard the local copy of a native tool: the shipped original shows
      *  through again (no re-import — it was never uninstalled). */
-    async resetTool(id) {
+    async resetTool(id, after) {
+        if (!confirm(i18n('tools.confirmReset'))) return;
         try {
             await App.api('POST', `/tools/${id}/reset`);
             App.toast(i18n('tools.resetDone'));
-            this.renderList();
+            (after || (() => this.renderList()))();
         } catch (err) {
             App.toast(err.message, 'danger');
         }
@@ -244,12 +243,16 @@ const ToolsPage = {
         let isEdit = false;
         let script = '#!/bin/bash\n# Read JSON from stdin\nINPUT=$(cat)\necho "Hello from tool"\n';
 
-        // Existing group names, offered as suggestions for the category field.
+        // Existing group names, offered as suggestions for the category field —
+        // which only exists when CREATING (edit mode renders no datalist, so
+        // fetching the whole catalog there was download-and-discard).
         let categories = [];
-        try {
-            const all = await App.api('GET', '/tools');
-            categories = [...new Set(all.map(t => t.category).filter(Boolean))].sort();
-        } catch (e) { /* empty */ }
+        if (!toolId) {
+            try {
+                const all = await App.api('GET', '/tools');
+                categories = [...new Set(all.map(t => t.category).filter(Boolean))].sort();
+            } catch (e) { /* empty */ }
+        }
 
         if (toolId) {
             try {
@@ -376,34 +379,16 @@ const ToolsPage = {
             }
         };
 
+        const backToList = () => { location.hash = '#/tools'; };
         const delBtn = document.getElementById('btn-delete');
         if (delBtn) {
-            delBtn.onclick = async () => {
-                if (!confirm(i18n('tools.confirmDelete'))) return;
-                try {
-                    await App.api('DELETE', `/tools/${toolId}`);
-                    App.toast(i18n('tools.deleted'));
-                    location.hash = '#/tools';
-                } catch (err) {
-                    App.toast(err.message, 'danger');
-                }
-            };
+            delBtn.onclick = () => this.deleteTool(toolId, backToList);
         }
-
         // Native tool with local changes: drop the copy and go back to the
         // list, which then shows the shipped version.
         const resetBtn = document.getElementById('btn-reset');
         if (resetBtn) {
-            resetBtn.onclick = async () => {
-                if (!confirm(i18n('tools.confirmReset'))) return;
-                try {
-                    await App.api('POST', `/tools/${toolId}/reset`);
-                    App.toast(i18n('tools.resetDone'));
-                    location.hash = '#/tools';
-                } catch (err) {
-                    App.toast(err.message, 'danger');
-                }
-            };
+            resetBtn.onclick = () => this.resetTool(toolId, backToList);
         }
     },
 };

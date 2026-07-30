@@ -583,6 +583,11 @@ body {
     .attach-remove {
         padding: 0.55rem;
     }
+    /* Address-book chips on the bot form: btn-sm is ~31px, under the 44px a
+       finger needs. Outside a table, so .table .btn-sm above doesn't cover it. */
+    .chip-toggle {
+        min-height: 44px;
+    }
 }
 
 @media (max-width: 576px) {

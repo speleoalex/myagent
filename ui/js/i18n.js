@@ -50,10 +50,6 @@ const I18n = {
         }
     },
 
-    available() {
-        return Object.keys(this.translations);
-    },
-
     getDateLocale() {
         return this.locale === 'it' ? 'it-IT' : 'en-US';
     }

@@ -19,16 +19,22 @@ from __future__ import annotations
 import hashlib
 import re
 
+from app.models import MCP_ID_MAX_LEN
+
 # OpenAI function-name budget.
 MAX_NAME_LEN = 64
 PREFIX = "mcp_"
 
 # Wildcard entry in Agent.tools meaning "every tool this server exposes".
-# Deliberately not a valid tool id, so it can never collide with one.
-WILDCARD_RE = re.compile(r"^mcp:([a-z0-9][a-z0-9_-]{0,23})/\*$")
+# Deliberately not a valid tool id, so it can never collide with one. The id
+# charset/length inside must match models._VALID_MCP_ID — hence the shared cap.
+WILDCARD_RE = re.compile(r"^mcp:([a-z0-9][a-z0-9_-]{0,%d})/\*$" % (MCP_ID_MAX_LEN - 1))
 
 _UNSAFE = re.compile(r"[^A-Za-z0-9_-]")
-_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+# Control characters never forwarded to the UI/model verbatim. Shared with
+# client._clean_error_body — one definition of "what gets stripped".
+CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_CONTROL = CONTROL_CHARS
 
 # Description limits. MCP descriptions are third-party text that lands verbatim
 # in the system prompt (twice, for text-fallback models: once in the tool schema
@@ -61,14 +67,12 @@ def parse_wildcard(entry: str) -> str | None:
     return m.group(1) if m else None
 
 
-def server_of(tool_id: str) -> str | None:
-    """Best-effort server id of a qualified MCP tool id (routing only).
-
-    Returns the segment between the fixed ``mcp_`` prefix and the first
-    underscore that follows a valid server id. Since server ids may contain
-    underscores this cannot be exact — callers must intersect the result with
-    the set of configured server ids, which is what makes it unambiguous.
-    """
+def after_prefix(tool_id: str) -> str | None:
+    """Everything after the fixed ``mcp_`` prefix (``server id + '_' + tool``),
+    or None when the id is not MCP-qualified. It deliberately does NOT split
+    the server id out: server ids may contain underscores, so only the caller
+    — matching against the set of configured ids — can do that unambiguously
+    (see McpManager.servers_for_tool_ids)."""
     if not tool_id or not tool_id.startswith(PREFIX):
         return None
     return tool_id[len(PREFIX):] or None

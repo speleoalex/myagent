@@ -1,164 +1,149 @@
 # MyAgent Connectors
 
-Standalone bridge between messaging services (Telegram today, others tomorrow)
-and a running **MyAgent** instance. It runs as its **own server**, independent
-of the myagent sources: it talks to myagent only over its HTTP API.
+Bridge between messaging services (Telegram today, others tomorrow) and your
+agents. It is an **optional plugin**: not part of the core install, because the
+core works offline and this is the part that needs the internet.
+
+Installed, it runs **inside** myagent's process — one service, one port, one UI.
 
 ```text
-┌──────────────────────────┐    HTTP    ┌───────────────────────┐
-│  myagent-connectors      │ ─────────► │  myagent (:8888)      │
-│  (this server, :8899)    │  /api/chat │  agent runtime        │
-│  • Telegram long polling │ ◄───────── │  + channel sessions   │
-│  • access control        │   reply    │                       │
-│  • admin UI              │            └───────────────────────┘
-└──────────────────────────┘
+┌────────────────────────────────────────────┐         ┌──────────────────┐
+│  myagent (:8888)                           │  HTTPS  │ api.telegram.org │
+│  ┌──────────────────────────────────────┐  │ ──────► │                  │
+│  │ connectors plugin                    │  │ ◄────── │                  │
+│  │  • one long-poll task per bot        │  │         └──────────────────┘
+│  │  • access control + address book     │  │
+│  └──────────────────────────────────────┘  │
+│  agent runtime · channel sessions · UI     │
+└────────────────────────────────────────────┘
 ```
 
-Each **binding** links one bot ↔ one agent, configured from the admin UI:
-*"messages on THIS bot are answered by THIS agent, for THESE users only."*
+Each **binding** links one bot ↔ one agent: *"messages on THIS bot are answered
+by THIS agent, for THESE users only."* Configure them at
+`http://127.0.0.1:8888/#/connectors`.
 
 ## What it does
 
-- **Long polling** (`getUpdates`) — no public URL, HTTPS, or webhook needed.
+- **Long polling** (`getUpdates`) — no public URL, HTTPS or webhook needed.
   Ideal for a bot driven from a local PC.
 - **Per-chat conversations** — every Telegram chat maps to its own persistent
-  session on myagent (`session_id = "<prefix>_<chat_id>"`), so context is kept
-  per user without polluting the web UI's chat history. Sessions use the same
-  format as web chats (tagged with `source: "telegram"`); on `/reset` the
-  closed conversation is archived into the web UI's history, marked with a
-  channel badge.
-- **Access control** per binding: `allowlist` (Telegram user ids),
-  `password` (`/start <password>` unlocks), or `open`.
-- **Built-in commands**: `/start`, `/help`, `/reset` (clears the conversation).
-- **Admin UI** at `/` — add/edit/delete bots, pick the agent, test the token,
-  see live status. Bot tokens are stored `0600` and never shown in clear.
-  Multilingual (English / Italian), following the myagent UI i18n pattern
-  (`ui/js/i18n.js` + `ui/js/i18n/{en,it}.js`); language switcher in the header,
-  choice persisted in `localStorage`.
-- **Address book** — save people once (name + numeric id and/or @username,
-  `/api/contacts`, stored in `contacts/` next to bindings); the binding form's
-  authorized-users field shows them as one-click chips, so allowlists are
-  built by name instead of pasting ids. The text field stays authoritative —
-  chips only add/remove their contact's id in it.
+  session (`session_id = "<prefix>_<chat_id>"`), so context is kept per user
+  without polluting the web UI's chat history. Sessions use the same format as
+  web chats (tagged `source: "telegram"`); on `/reset` the closed conversation is
+  archived into the web history with a channel badge.
+- **Access control** per binding: `allowlist` (user ids and/or @usernames),
+  `password` (`/start <password>` unlocks, grants persist), or `open`.
+- **Built-in commands**: `/start`, `/help`, `/reset`.
+- **Attachments** — photos, text files, PDFs and audio are forwarded to the
+  agent; **voice notes are transcribed** to text first (see below).
+- **Address book** — save people once (name + numeric id and/or @username); the
+  binding form offers them as one-click chips, so allowlists are built by name
+  instead of pasting ids. The text field stays authoritative, so you can also
+  authorize someone who is not in the address book.
+- **Outbound push** — the `notify_user` tool lets an agent (typically an
+  autonomous one) start a conversation. It both delivers the message and appends
+  it to that chat's own history, so the agent remembers having said it.
 
 ## Requirements
 
-- A running myagent server (default `http://localhost:8888`).
-- Python 3.12+.
+- An installed myagent (`./deploy.sh`, or `./setup.sh` for a dev checkout).
 - A Telegram bot token from [@BotFather](https://t.me/BotFather).
+- Optional, for voice notes: `ffmpeg` on the PATH.
 
-## Run (development)
-
-```bash
-cd connectors
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-python server/main.py
-# Admin UI:  http://127.0.0.1:8899
-```
-
-Point it at a non-default myagent with an env var:
+## Install
 
 ```bash
-MYAGENT_API_URL=http://192.168.1.10:8888 python server/main.py
+bash connectors/install.sh          # from the git checkout
 ```
 
-### Configuration (environment variables)
+It copies the plugin to `~/myagent/plugins/connectors/`, installs its one extra
+Python dependency into myagent's virtualenv, and restarts the service. If the old
+standalone `myagent-connectors` service is still running it refuses to proceed —
+two pollers on one bot token means Telegram delivers each message to only one of
+them, at random, with no error on either side.
 
-| Variable                        | Default                 | Meaning                               |
-|---------------------------------|-------------------------|---------------------------------------|
-| `MYAGENT_API_URL`               | `http://localhost:8888` | myagent base URL                      |
-| `MYAGENT_API_TOKEN`             | *(empty)*               | Bearer token — set it to the myagent server's `MYAGENT_API_KEY` if that is configured |
-| `MYAGENT_CONNECTORS_HOST`       | `127.0.0.1`             | bind host                             |
-| `MYAGENT_CONNECTORS_PORT`       | `8899`                  | bind port                             |
-| `MYAGENT_CONNECTORS_DIR`        | `~/myagent/connectors`  | bindings, grants and contacts storage |
-| `MYAGENT_CONNECTORS_API_KEY`    | *(empty = open)*        | Bearer key for the `/send` endpoint   |
-| `MYAGENT_TELEGRAM_POLL_TIMEOUT` | `30`                    | long-poll seconds                     |
-| `MYAGENT_CHAT_TIMEOUT`          | `180`                   | max seconds per agent turn            |
+Then, at `http://127.0.0.1:8888/#/connectors`: **New bot** → paste the token →
+**Test token** → pick the agent → list the authorized user ids → Save. The bot
+starts polling immediately, no restart needed. To find your numeric id, message
+[@userinfobot](https://t.me/userinfobot).
 
-## Add a Telegram bot
+Logs: `journalctl -u myagent -f | grep connectors`
 
-1. Create a bot with @BotFather and copy the token.
-2. Open the admin UI → **+ New bot**.
-3. Fill: ID, agent, paste the token → **Test** to validate.
-4. Access control: `allowlist` and add your Telegram user id
-   (message [@userinfobot](https://t.me/userinfobot) to find it), or use
-   `password`.
-5. Tick **Enabled** → **Save**. The bot starts polling immediately (hot,
-   no restart). Write to your bot on Telegram.
-
-> ⚠️ Agents can run tools (`shell_exec`, `file_write`, …). For a bot reachable
-> by others, bind it to an agent scoped to safe tools, and keep access on
-> `allowlist` / `password`.
-
-## myagent dependency
-
-This bridge relies on **channel-scoped sessions** added to myagent:
-
-- `POST /api/chat` accepts an optional `session_id` (a named, persistent
-  conversation, isolated from the web UI's `current.json`).
-- `GET/DELETE /api/chat/sessions/{session_id}` inspect / reset a conversation.
-
-Those live in the myagent repo (`server/app/storage/channel_sessions.py`,
-`server/app/routers/chat.py`). No other myagent change is required.
-
-## Outbound push (autonomous agents)
-
-`POST /api/bindings/{binding_id}/send` with `{"chat_id": ..., "text": ...}`
-sends an unsolicited message through a **running** binding (409 otherwise).
-It is what myagent's `notify_user` tool calls when a live agent wants to reach
-the user. The endpoint is best-effort (the connector logs and swallows
-transport errors; Telegram messages are chunked at 4096 chars) and is the only
-authenticated route: set `MYAGENT_CONNECTORS_API_KEY` here and the same value
-as "Connectors send key" in myagent's Settings. Empty key = open, fine on
-localhost.
-
-## Adding another channel (Slack, Discord, …)
-
-1. Implement a `BaseConnector` subclass in `app/channels/<name>.py`
-   (`start`, `stop`, `send`; the shared inbound pipeline is in `base.py`).
-2. Register it in `app/channels/registry.py` under its `type` string.
-
-Nothing else changes — the manager, storage, API and UI are channel-agnostic.
-
-## Production
-
-Same conventions as myagent's `deploy.sh` / `deploy-macos.sh`.
-
-### Linux (systemd)
-
-Installs to `/opt/applications/myagent-connectors` and registers a system
-service running as the invoking user:
+## Uninstall
 
 ```bash
-sudo bash deploy_connectors.sh
-# point at a non-default myagent (env is baked into the unit):
-MYAGENT_API_URL=http://192.168.1.10:8888 sudo -E bash deploy_connectors.sh
+rm -rf ~/myagent/plugins/connectors
+sudo systemctl restart myagent
 ```
+
+**Your bots and tokens stay** in `~/myagent/connectors/` — reinstalling brings
+them back. To reclaim the transcription dependency too (~380 MB):
 
 ```bash
-systemctl status myagent-connectors
-journalctl -u myagent-connectors -f
+<install>/server/.venv/bin/pip uninstall -y faster-whisper ctranslate2 onnxruntime
 ```
 
-Configurable env (override when invoking): `MYAGENT_API_URL`,
-`MYAGENT_API_TOKEN`, `MYAGENT_CONNECTORS_HOST` (default `127.0.0.1`),
-`MYAGENT_CONNECTORS_PORT` (default `8899`).
+## Voice notes: size and first run
 
-### macOS (launchd, no sudo)
+Transcription runs through the bundled `document_extract` tool, which the tool
+registry executes as a **subprocess** with a timeout. That matters: the Whisper
+runtime is a heavy native library, and a crash inside it would otherwise take
+down every chat in the agent's process.
 
-Runs in place and registers a per-user LaunchAgent:
+- `install.sh` adds `faster-whisper` to myagent's virtualenv: **~380 MB**.
+- The **first** voice note downloads a model into `~/.cache/huggingface`:
+  **~464 MB** for the default `small`. Set `MYAGENT_WHISPER_MODEL=base` in the
+  service environment to use a ~2.6 MB one instead.
+- Without `ffmpeg` the bot answers that transcription is unavailable; everything
+  else keeps working.
 
-```bash
-bash deploy_connectors-macos.sh
-tail -f ~/Library/Logs/myagent-connectors.log
-```
+## State and configuration
 
-### Rootless alternative (systemd user unit)
+State lives in `~/myagent/connectors/` (override with `MYAGENT_CONNECTORS_DIR`):
+`bindings/` (bot definitions, **0600**, they hold the tokens), `grants/`
+(password-mode authorized ids), `contacts/` (address book), `state.json` (the
+kill switch). It is separate from the plugin's code on purpose, so reinstalling
+or removing the plugin never touches your bots — back this directory up together
+with `~/myagent/config`.
 
-For an install without `sudo`/`/opt`, `deploy/myagent-connectors.service` is a
-sample **user** unit (`systemctl --user`) you can adapt — see the comments in
-that file.
+| Variable | Default | What |
+|---|---|---|
+| `MYAGENT_CONNECTORS_DIR` | `~/myagent/connectors` | state directory |
+| `MYAGENT_TELEGRAM_POLL_TIMEOUT` | `30` | long-poll seconds |
+| `MYAGENT_CHAT_TIMEOUT` | `180` | wall clock for one agent turn |
+| `MYAGENT_CONNECTORS_CONCURRENCY` | `2` | inbound turns running at once, all bots |
+| `MYAGENT_CONNECTORS_MAX_ERRORS` | `10` | consecutive failures before self-pausing |
+| `MYAGENT_WHISPER_MODEL` | `small` | Whisper model for voice notes |
 
-> The admin UI binds to `127.0.0.1` by default (local only). Expose it beyond
-> localhost only behind an authenticated reverse proxy — it manages bot tokens.
+There is no host, port, API url or API token: the plugin does not talk to myagent
+over the network any more. The whole API — bot tokens included — sits behind
+myagent's own `MYAGENT_API_KEY` gate, which is stricter than the standalone
+server was (there, only the outbound send endpoint was authenticated).
+
+## When a bot misbehaves
+
+- **Status per bot** is in the list at `#/connectors`: `running`, `starting`,
+  `error` (with the reason), `paused`, or `disabled`.
+- **A bot that keeps failing pauses itself** after `MYAGENT_CONNECTORS_MAX_ERRORS`
+  consecutive errors instead of retrying forever. Fix the cause, then
+  `POST /api/connectors/bindings/<id>/resume` — or just save the binding again,
+  which also clears the pause.
+- **Stop everything**: `POST /api/connectors/stop` stops every bot and
+  **remembers it across restarts**; `POST /api/connectors/start` re-enables.
+  Deliberately not automatic — this is what you reach for when the plugin is
+  causing damage.
+- Operate bots **hot** (enable/disable, edit, resume). Restarting myagent to fix
+  one bot also kills in-flight web turns and any MCP subprocesses.
+
+## Adding another channel
+
+Implement a `BaseConnector` subclass in
+`plugin/myagent_connectors/channels/<name>.py` (transport only: receive, send)
+and register it in `channels/registry.py`. Access control, commands, session
+keys and the agent call are already shared. The plugin contract itself is
+documented in [../docs/PLUGINS.md](../docs/PLUGINS.md).
+
+## Security note
+
+Bindings hold bot tokens. Keep myagent bound to `127.0.0.1` (the default) or set
+`MYAGENT_API_KEY` before exposing it on a network.

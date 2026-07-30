@@ -2,15 +2,62 @@ const App = {
     container: null,
     apiKey: null,
     _authPrompting: false,
+    // Installed plugins, keyed by id (null until the first probe resolves).
+    plugins: null,
+    _pluginsPromise: null,
+    // The one live timer of the current page, cleared on navigation.
+    pageInterval: null,
 
     init() {
         this.container = document.getElementById('app');
         this.apiKey = this._initApiKey();
         I18n.init();
         this.applyStaticI18n();
+        // Not awaited: the other pages must not wait on the network to render.
+        // Pages that need it await pluginsReady(), sharing this same promise.
+        this.pluginsReady();
         window.addEventListener('hashchange', () => this.route());
         this.route();
         this.updateActiveNav();
+    },
+
+    /** Which optional plugins this server has, probed once per page load.
+     *
+     * Menu entries marked [data-plugin="<id>"] start hidden in the HTML and are
+     * revealed here. That direction is deliberate: on a server without the
+     * plugin nothing ever appears, and the alternative (render then hide) makes
+     * a menu entry visibly vanish on every load. */
+    pluginsReady() {
+        if (!this._pluginsPromise) {
+            this._pluginsPromise = this.api('GET', '/plugins')
+                .catch(() => ({ plugins: [] }))
+                .then(res => {
+                    this.plugins = {};
+                    (res.plugins || []).forEach(p => { this.plugins[p.id] = p; });
+                    document.querySelectorAll('[data-plugin]').forEach(el => {
+                        el.classList.toggle('d-none', !this.plugins[el.dataset.plugin]);
+                    });
+                    this.updateActiveNav();
+                    return this.plugins;
+                });
+        }
+        return this._pluginsPromise;
+    },
+
+    /** The plugin's record, or undefined when it isn't installed. A record with
+     * loaded=false means installed but broken — worth showing, not hiding. */
+    async plugin(id) {
+        return (await this.pluginsReady())[id];
+    },
+
+    /** One repeating timer at a time, owned by the current page.
+     *
+     * route() clears it, so a page can poll without cleaning up after itself.
+     * Guarding inside the callback instead would leave the timer alive for the
+     * whole session and stack a new one on every re-render. */
+    setPageInterval(fn, ms) {
+        clearInterval(this.pageInterval);
+        this.pageInterval = setInterval(fn, ms);
     },
 
     // Translate the static chrome (navbar labels) that lives outside the SPA
@@ -26,6 +73,11 @@ const App = {
     },
 
     route() {
+        // Stop the previous page's polling before anything else: its callback
+        // would otherwise keep fetching (and writing into a DOM that is gone).
+        clearInterval(this.pageInterval);
+        this.pageInterval = null;
+
         // A Bootstrap modal (e.g. the chat history window) may still be open.
         // SPA re-renders replace #app without Bootstrap's own cleanup, which
         // would leave a stuck backdrop and a scroll-locked body — clear those.
@@ -52,6 +104,7 @@ const App = {
             case 'models':  ModelsPage.render(params); break;
             case 'chat':    ChatPage.render(params); break;
             case 'settings': SettingsPage.render(params); break;
+            case 'connectors': ConnectorsPage.render(params); break;
             default:        this.renderHome(); break;
         }
         this.updateActiveNav();

@@ -1,0 +1,357 @@
+"""Extract text + images from a document (PDF / HTML / image / audio) into Markdown.
+
+Wraps battle-tested system binaries:
+  - PDF  : pdftotext + pdfimages (poppler-utils); OCR fallback via pdftoppm+tesseract
+  - HTML : pandoc (html -> gfm), with images decoded/copied to disk
+  - image: copied to disk + optional OCR (tesseract)
+  - audio: ffmpeg (any codec -> 16k mono wav) + faster-whisper transcription
+
+Extracted images are written as files under image_dir (default /tmp/...) and
+linked inline in the Markdown — never inlined as base64, so the output stays
+small and a vision step can open the files afterwards. Audio is transcribed to
+plain text (faster-whisper is imported lazily, only when an audio file is
+processed, so the other formats keep working without it).
+"""
+import base64
+import hashlib
+import json
+import mimetypes
+import os
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tif", ".tiff", ".ppm", ".pgm"}
+AUDIO_EXTS = {".oga", ".ogg", ".opus", ".mp3", ".m4a", ".aac", ".wav", ".flac",
+              ".wma", ".amr", ".webm", ".weba"}
+
+
+def err(msg: str, code: int = 1):
+    print(f"ERROR: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def run_cmd(cmd: list[str], input_bytes: bytes | None = None, timeout: int = 90) -> tuple[int, bytes, bytes]:
+    """Run a command; return (rc, stdout, stderr). rc=127 if the binary is missing."""
+    try:
+        p = subprocess.run(cmd, input=input_bytes, capture_output=True, timeout=timeout)
+        return p.returncode, p.stdout, p.stderr
+    except FileNotFoundError:
+        return 127, b"", f"{cmd[0]} not found".encode()
+    except subprocess.TimeoutExpired:
+        return 124, b"", f"{cmd[0]} timed out".encode()
+
+
+def have(binary: str) -> bool:
+    return shutil.which(binary) is not None
+
+
+def detect_kind(path: Path) -> str:
+    ext = path.suffix.lower()
+    if ext == ".pdf":
+        return "pdf"
+    if ext in (".html", ".htm", ".xhtml"):
+        return "html"
+    if ext in IMAGE_EXTS:
+        return "image"
+    if ext in AUDIO_EXTS:
+        return "audio"
+    # Fall back to the mime type reported by `file`
+    rc, out, _ = run_cmd(["file", "--mime-type", "-b", str(path)])
+    mime = out.decode(errors="replace").strip() if rc == 0 else (mimetypes.guess_type(str(path))[0] or "")
+    if mime == "application/pdf":
+        return "pdf"
+    if mime in ("text/html", "application/xhtml+xml"):
+        return "html"
+    if mime.startswith("image/"):
+        return "image"
+    if mime.startswith("audio/"):
+        return "audio"
+    return "unknown"
+
+
+def default_image_dir(path: Path) -> Path:
+    h = hashlib.md5(str(path.resolve()).encode()).hexdigest()[:8]
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", path.stem)[:40] or "doc"
+    return Path("/tmp/myagent_extract") / f"{safe}-{h}"
+
+
+def dedup_and_clean(files: list[Path]) -> list[Path]:
+    """Drop byte-identical duplicates (common in PDFs); keep first occurrence."""
+    seen: dict[str, Path] = {}
+    kept: list[Path] = []
+    for f in files:
+        try:
+            digest = hashlib.md5(f.read_bytes()).hexdigest()
+        except OSError:
+            continue
+        if digest in seen:
+            f.unlink(missing_ok=True)  # remove the duplicate file
+            continue
+        seen[digest] = f
+        kept.append(f)
+    return kept
+
+
+# --------------------------------------------------------------------------- PDF
+def _pdf_image_types(path: Path) -> dict[tuple[int, int], str]:
+    """Map (page, num) -> image type from `pdfimages -list` (to skip smasks)."""
+    rc, out, _ = run_cmd(["pdfimages", "-list", str(path)])
+    types: dict[tuple[int, int], str] = {}
+    if rc != 0:
+        return types
+    for line in out.decode(errors="replace").splitlines():
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        try:
+            page, num = int(parts[0]), int(parts[1])
+        except ValueError:
+            continue  # header / separator rows
+        types[(page, num)] = parts[2]
+    return types
+
+
+def extract_pdf(path: Path, out_dir: Path, max_pages: int) -> str:
+    if not have("pdftotext"):
+        err("pdftotext (poppler-utils) is not installed")
+
+    # 1) Text, page by page (pages are separated by form-feed).
+    rc, out, serr = run_cmd(["pdftotext", "-layout", str(path), "-"], timeout=90)
+    if rc == 127:
+        err("pdftotext (poppler-utils) is not installed")
+    text = out.decode(errors="replace") if rc == 0 else ""
+    text_pages = [p.rstrip() for p in text.split("\x0c")]
+    while text_pages and not text_pages[-1].strip():
+        text_pages.pop()
+
+    # 2) Extract embedded images, skipping soft-masks; then dedup.
+    img_by_page: dict[int, list[Path]] = {}
+    if have("pdfimages"):
+        types = _pdf_image_types(path)
+        prefix = out_dir / "img"
+        run_cmd(["pdfimages", "-all", "-p", str(path), str(prefix)], timeout=90)
+        raw = sorted(out_dir.glob("img-*"))
+        keep: list[Path] = []
+        for f in raw:
+            m = re.match(r"img-(\d+)-(\d+)\.", f.name)
+            if not m:
+                continue
+            page, num = int(m.group(1)), int(m.group(2))
+            # Keep only real images (drop smask/stencil alpha masks).
+            if types.get((page, num), "image") != "image":
+                f.unlink(missing_ok=True)
+                continue
+            keep.append(f)
+        for f in dedup_and_clean(keep):
+            m = re.match(r"img-(\d+)-", f.name)
+            page = int(m.group(1)) if m else 0
+            img_by_page.setdefault(page, []).append(f)
+
+    total_pages = max(len(text_pages), max(img_by_page or [0]))
+    has_text = any(p.strip() for p in text_pages)
+
+    # 3) OCR fallback for scanned PDFs (no extractable text) — render + OCR pages.
+    ocr_pages: dict[int, str] = {}
+    if not has_text and have("pdftoppm") and have("tesseract"):
+        limit = min(total_pages or 1, max_pages)
+        for pg in range(1, limit + 1):
+            base = out_dir / f"page-{pg:03d}"
+            run_cmd(["pdftoppm", "-png", "-r", "150", "-f", str(pg), "-l", str(pg),
+                     str(path), str(base)], timeout=60)
+            rendered = sorted(out_dir.glob(f"page-{pg:03d}*.png"))
+            if not rendered:
+                continue
+            page_img = rendered[0]
+            img_by_page.setdefault(pg, []).append(page_img)
+            rc2, oout, _ = run_cmd(["tesseract", str(page_img), "stdout", "-l", "eng+ita"], timeout=60)
+            if rc2 == 0:
+                ocr_pages[pg] = oout.decode(errors="replace").strip()
+
+    # 4) Assemble Markdown, interleaving each page's text with its images.
+    lines = [f"# {path.name}", ""]
+    n = min(total_pages, max_pages) if total_pages else 0
+    if total_pages > max_pages:
+        lines.append(f"_[Documento di {total_pages} pagine — mostrate le prime {max_pages}]_\n")
+    for pg in range(1, (n or 1) + 1):
+        lines.append(f"## Pagina {pg}\n")
+        body = ""
+        if pg - 1 < len(text_pages) and text_pages[pg - 1].strip():
+            body = text_pages[pg - 1]
+        elif pg in ocr_pages and ocr_pages[pg]:
+            body = ocr_pages[pg]
+        if body.strip():
+            lines.append(body.strip())
+            lines.append("")
+        for i, img in enumerate(img_by_page.get(pg, [])):
+            lines.append(f"![page {pg} · image {i}]({img})")
+        if img_by_page.get(pg):
+            lines.append("")
+    if not has_text and not ocr_pages:
+        lines.append("_[No extractable text — the PDF is probably scanned and no OCR is available]_")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+# -------------------------------------------------------------------------- HTML
+def _img_ext_from_mime(mime: str) -> str:
+    return {
+        "image/png": ".png", "image/jpeg": ".jpg", "image/jpg": ".jpg",
+        "image/gif": ".gif", "image/webp": ".webp", "image/svg+xml": ".svg",
+        "image/bmp": ".bmp",
+    }.get(mime.lower(), ".img")
+
+
+def extract_html(path: Path, out_dir: Path) -> str:
+    if not have("pandoc"):
+        err("pandoc is not installed")
+    rc, out, serr = run_cmd(["pandoc", "-f", "html", "-t", "gfm", str(path)], timeout=60)
+    if rc == 127:
+        err("pandoc is not installed")
+    if rc != 0:
+        err(f"pandoc failed: {serr.decode(errors='replace')[:200]}")
+    md = out.decode(errors="replace")
+
+    counter = {"n": 0}
+
+    def save_bytes(data: bytes, ext: str) -> Path:
+        counter["n"] += 1
+        dest = out_dir / f"img-{counter['n']:03d}{ext}"
+        dest.write_bytes(data)
+        return dest
+
+    def repl(m: re.Match) -> str:
+        alt, raw_url = m.group(1), m.group(2).strip()
+        url = raw_url[1:-1] if raw_url.startswith("<") and raw_url.endswith(">") else raw_url
+        # data: URI -> decode to a file
+        dm = re.match(r"data:([^;,]*)(;base64)?,(.*)$", url, re.DOTALL)
+        if dm:
+            mime, is_b64, payload = dm.group(1), dm.group(2), dm.group(3)
+            try:
+                data = base64.b64decode(payload) if is_b64 else payload.encode()
+            except Exception:
+                return m.group(0)
+            dest = save_bytes(data, _img_ext_from_mime(mime))
+            return f"![{alt}]({dest})"
+        # remote URL -> leave as-is (already a usable link)
+        if re.match(r"https?://", url):
+            return m.group(0)
+        # local/relative path -> copy next to the others
+        src = (path.parent / url).resolve()
+        if src.is_file():
+            dest = out_dir / f"img-{counter['n'] + 1:03d}{src.suffix or '.img'}"
+            try:
+                shutil.copyfile(src, dest)
+                counter["n"] += 1
+                return f"![{alt}]({dest})"
+            except OSError:
+                return m.group(0)
+        return m.group(0)
+
+    md = re.sub(r"!\[([^\]]*)\]\((<[^>]*>|[^)\s]+)(?:\s+\"[^\"]*\")?\)", repl, md)
+    return f"# {path.name}\n\n{md.strip()}\n"
+
+
+# ------------------------------------------------------------------------- image
+def extract_image(path: Path, out_dir: Path, ocr: bool) -> str:
+    # Ensure the image lives under out_dir so the link is stable.
+    if path.parent.resolve() == out_dir.resolve():
+        dest = path
+    else:
+        dest = out_dir / path.name
+        try:
+            shutil.copyfile(path, dest)
+        except OSError:
+            dest = path  # fall back to linking the original location
+
+    dims = ""
+    if have("identify"):
+        rc, out, _ = run_cmd(["identify", "-format", "%wx%h", str(dest)], timeout=20)
+        if rc == 0 and out.strip():
+            dims = out.decode(errors="replace").split()[0]
+
+    lines = [f"# {path.name}", ""]
+    lines.append(f"![{path.name}]({dest})")
+    if dims:
+        lines.append(f"\n_Dimensioni: {dims} px_")
+
+    if ocr and have("tesseract"):
+        rc, out, _ = run_cmd(["tesseract", str(dest), "stdout", "-l", "eng+ita"], timeout=60)
+        ocr_text = out.decode(errors="replace").strip() if rc == 0 else ""
+        lines.append("\n## Testo (OCR)\n")
+        lines.append(ocr_text if ocr_text else "_(nessun testo riconosciuto)_")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+# ------------------------------------------------------------------------- audio
+def extract_audio(path: Path, out_dir: Path, language: str | None) -> str:
+    """Transcribe an audio file to text with faster-whisper. Any codec is first
+    normalized to 16 kHz mono WAV via ffmpeg so we don't depend on the Whisper
+    decoder supporting every container (opus/oga/mp3/m4a/...)."""
+    audio_path = str(path)
+    if have("ffmpeg"):
+        safe = re.sub(r"[^A-Za-z0-9_.-]", "_", path.stem)[:40] or "audio"
+        wav = out_dir / f"{safe}.16k.wav"
+        rc, _, _ = run_cmd(["ffmpeg", "-nostdin", "-y", "-i", str(path),
+                            "-ar", "16000", "-ac", "1", str(wav)], timeout=120)
+        if rc == 0 and wav.exists():
+            audio_path = str(wav)
+
+    try:
+        from faster_whisper import WhisperModel
+    except Exception as e:
+        err(f"faster-whisper is not installed ({e}) — it is required to "
+            f"transcribe audio. It ships with the connectors plugin; to install "
+            f"it on its own: <app>/server/.venv/bin/pip install faster-whisper")
+
+    model_size = os.environ.get("MYAGENT_WHISPER_MODEL", "small")
+    model = WhisperModel(model_size, device="cpu", compute_type="int8")
+    segments, info = model.transcribe(audio_path, language=(language or None))
+    text = "".join(seg.text for seg in segments).strip()
+
+    header = f"# {path.name}\n\n_Audio transcription"
+    lang = getattr(info, "language", None)
+    if lang:
+        header += f" · detected language: {lang}"
+    header += "_\n"
+    return header + "\n" + (text if text else "_(no speech recognized)_") + "\n"
+
+
+def main():
+    try:
+        args = json.loads(sys.stdin.read() or "{}")
+    except json.JSONDecodeError:
+        err("invalid JSON input")
+    raw = args.get("path")
+    if not raw:
+        err("missing required parameter: path")
+    path = Path(raw).expanduser()
+    if not path.exists():
+        err(f"File not found: {path}")
+    if not path.is_file():
+        err(f"Not a file: {path}")
+
+    out_dir = Path(args["image_dir"]).expanduser() if args.get("image_dir") else default_image_dir(path)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    max_pages = int(args.get("max_pages") or 50)
+    ocr = args.get("ocr", True)
+
+    kind = detect_kind(path)
+    if kind == "pdf":
+        md = extract_pdf(path, out_dir, max_pages)
+    elif kind == "html":
+        md = extract_html(path, out_dir)
+    elif kind == "image":
+        md = extract_image(path, out_dir, bool(ocr))
+    elif kind == "audio":
+        md = extract_audio(path, out_dir, args.get("language"))
+    else:
+        err(f"Unsupported file type for '{path.name}'. Supported: PDF, HTML, images, audio.")
+
+    print(md, end="")
+
+
+if __name__ == "__main__":
+    main()

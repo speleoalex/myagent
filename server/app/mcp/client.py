@@ -23,9 +23,10 @@ import collections
 import json
 import logging
 import os
-import re
 
 import httpx
+
+from app.mcp.naming import CONTROL_CHARS
 
 log = logging.getLogger(__name__)
 
@@ -44,8 +45,6 @@ STREAM_LIMIT = 8 * 1024 * 1024
 # Never handed to an MCP server subprocess: it inherits our environment so that
 # `npx`/`uvx` keep working, but not the credentials protecting this API.
 _STRIPPED_ENV = {"MYAGENT_API_KEY", "MYAGENT_API_TOKEN"}
-
-_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 
 class McpError(Exception):
@@ -99,7 +98,7 @@ class BaseConnection:
         return self._id
 
     async def _handshake(self) -> dict:
-        timeout = max(5.0, float(self.cfg.connect_timeout or 20))
+        timeout = self.cfg.connect_budget
         result = await self._request(
             "initialize",
             {
@@ -124,7 +123,7 @@ class BaseConnection:
 
     async def list_tools(self) -> list[dict]:
         """Every tool the server exposes, following nextCursor pagination."""
-        timeout = max(5.0, float(self.cfg.connect_timeout or 20))
+        timeout = self.cfg.connect_budget
         tools: list[dict] = []
         cursor = None
         for _ in range(MAX_LIST_PAGES):
@@ -151,7 +150,7 @@ class BaseConnection:
         )
 
     async def ping(self) -> None:
-        await self._request("ping", {}, min(10.0, max(5.0, float(self.cfg.connect_timeout or 20))))
+        await self._request("ping", {}, min(10.0, self.cfg.connect_budget))
 
     # -- incoming messages ---------------------------------------------
 
@@ -440,10 +439,16 @@ class HttpConnection(BaseConnection):
         super().__init__(cfg)
         self._client: httpx.AsyncClient | None = None
         self._session_id: str | None = None
+        # Sticky endpoint-unreachable marker: parity with stdio's dead-process
+        # detection. Without it `alive` stayed True for a definitively
+        # unreachable endpoint until the tools TTL expired, so the manager kept
+        # treating the connection as fresh. Only CONNECT-level failures set it;
+        # a read timeout (slow tool) must not kill a valid session.
+        self._error: str | None = None
 
     @property
     def alive(self) -> bool:
-        return self._client is not None and not self._closed
+        return self._client is not None and not self._closed and self._error is None
 
     async def connect(self) -> dict:
         cfg = self.cfg
@@ -472,6 +477,11 @@ class HttpConnection(BaseConnection):
             msg = await self._post(
                 payload, timeout, want_id=rid, allow_reinit=(method != "initialize")
             )
+        except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+            # Before TimeoutException: ConnectTimeout subclasses it, and a
+            # failed CONNECT (unlike a slow read) means no session exists.
+            self._error = f"endpoint unreachable: {type(e).__name__}: {e}"
+            raise McpError(self._error) from e
         except httpx.TimeoutException:
             await self._cancel(rid, "timeout")
             raise McpError(f"'{method}' timed out after {timeout:g}s") from None
@@ -548,6 +558,22 @@ class HttpConnection(BaseConnection):
             return await self._post(payload, timeout, want_id=want_id, allow_reinit=False)
         return None
 
+    async def _reply_unsupported(self, request_id, method: str) -> None:
+        # Parity with stdio (the module docstring promises a -32601 reply on
+        # EVERY transport): over Streamable HTTP a client->server response
+        # travels as its own POST. Best-effort — a server that never asks
+        # never sees this.
+        payload = {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "error": {"code": -32601, "message": f"Method not found: {method}"},
+        }
+        try:
+            await self._post(payload, 10.0, want_id=None, allow_reinit=False)
+        except (httpx.HTTPError, McpError) as e:
+            log.debug("mcp[%s] could not answer server request '%s': %s",
+                      self.cfg.id, method, e)
+
     async def _read_sse(self, resp: httpx.Response, want_id) -> dict | None:
         """Read the reply out of an SSE body, dispatching interleaved messages."""
         data_lines: list[str] = []
@@ -619,7 +645,7 @@ def _clean_error_body(raw: bytes) -> str:
     collapse whitespace and keep it short.
     """
     text = raw.decode("utf-8", "replace")
-    text = _CONTROL.sub(" ", text)
+    text = CONTROL_CHARS.sub(" ", text)
     text = " ".join(text.split())
     return text[:200].strip()
 

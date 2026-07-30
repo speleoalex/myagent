@@ -1,0 +1,106 @@
+"""The seam between a connector and the agent engine.
+
+This replaces the HTTP client the connectors used when they were a separate
+server. It keeps the same shape on purpose — the connectors hold it as
+``self.client`` and call ``chat`` / ``reset_session`` — so the channel code did
+not have to change when the transport went away.
+
+Calling the engine directly rather than looping back over HTTP: a loopback
+request would have to carry MYAGENT_API_KEY to get past our own middleware (a
+secret the process already *is*), and would add a socket, a JSON round-trip and
+a second timeout for no isolation in return.
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+
+from app.engine.channel_turn import run_channel_turn
+from app.engine.executor import AgentExecutor
+from app.models import ChatRequest
+from app.storage.attachments import store_attachment
+
+from myagent_connectors import config
+
+log = logging.getLogger("connectors.core")
+
+
+class CoreClient:
+    """Drives agent turns on channel-scoped sessions.
+
+    ``state`` is the FastAPI ``app.state``: read at call time, never cached, so
+    it does not matter that the plugin is registered before some services are
+    put there.
+    """
+
+    def __init__(self, state, semaphore: asyncio.Semaphore | None = None):
+        self._state = state
+        # Shared across every binding: the point is to bound total load on the
+        # model, not per-bot fairness.
+        self._turns = semaphore or asyncio.Semaphore(config.MAX_CONCURRENT_TURNS)
+
+    async def chat(self, agent_id: str, message: str, session_id: str,
+                   attachments: list[dict] | None = None,
+                   source: str | None = None) -> str:
+        """Run one agent turn and return the reply text.
+
+        Raises on failure (a bad agent id, a model that is down, a turn that
+        exceeds CHAT_TIMEOUT); the caller turns that into a message to the user.
+        """
+        state = self._state
+        req = ChatRequest(
+            agent_id=agent_id,
+            message=message,
+            session_id=session_id,
+            attachments=attachments or [],
+            source=source,
+        )
+        async with self._turns:
+            executor = await AgentExecutor.create_for_agent(
+                agent_id, state.tool_registry, state.stores
+            )
+            response = await asyncio.wait_for(
+                run_channel_turn(req, state.named_sessions, executor),
+                timeout=config.CHAT_TIMEOUT,
+            )
+        return response.reply
+
+    async def transcribe(self, content: bytes, name: str,
+                         language: str | None = None) -> str:
+        """Transcribe a voice message, via the bundled document_extract tool.
+
+        The plugin used to carry its own faster-whisper wrapper. Running it here
+        would put a heavy native library (ctranslate2) inside the agent's own
+        process, where a segfault takes down every chat — precisely the isolation
+        a separate service used to provide for free. document_extract already
+        does the identical job (same ffmpeg normalization, same model, same
+        MYAGENT_WHISPER_MODEL) and the registry runs it as a subprocess with a
+        timeout and a guaranteed kill, so this both deletes a duplicate
+        implementation and buys the isolation back.
+
+        Called directly rather than through the agent's granted tools: this is
+        transport plumbing, like the executor writing attachments to disk, not
+        something the model decided to do.
+        """
+        path = store_attachment(content, name, "audio")
+        if not path:
+            raise RuntimeError("could not store the audio file")
+        args = {"path": path}
+        if language:
+            args["language"] = language
+        out = await self._state.tool_registry.execute("document_extract", args)
+        if out.startswith("ERROR"):
+            raise RuntimeError(out[:200])
+        # Output is "# <name>\n\n_Audio transcription…_\n\n<text>" — keep the text.
+        parts = out.split("\n\n", 2)
+        return (parts[2] if len(parts) > 2 else out).strip()
+
+    async def reset_session(self, session_id: str) -> bool:
+        """Clear a channel conversation, parking the old log in the web history
+        (same thing DELETE /api/chat/sessions/{id} does)."""
+        try:
+            await self._state.named_sessions.archive_and_reset(session_id)
+        except Exception as e:
+            log.warning("reset of session %s failed: %s", session_id, e)
+            return False
+        return True

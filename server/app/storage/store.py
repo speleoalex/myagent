@@ -1,11 +1,10 @@
 import json
-import os
-import re
 from pathlib import Path
 
 # Entity ids come from request bodies and become filenames: allow only a safe
 # charset (no path separators, no dot-dot) to prevent path traversal.
-_VALID_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+from app.ids import is_valid_id
+from app.storage.sessions import write_json
 
 
 class JsonStore:
@@ -16,9 +15,17 @@ class JsonStore:
         self.directory.mkdir(parents=True, exist_ok=True)
 
     def _path(self, entity_id: str) -> Path:
-        if not _VALID_ID.match(entity_id or "") or ".." in entity_id:
+        if not is_valid_id(entity_id):
             raise ValueError(f"Invalid id: {entity_id!r}")
         return self.directory / f"{entity_id}.json"
+
+    def mtime(self, entity_id: str) -> float:
+        """Last-modified time of an entity's file, 0.0 when unknown/invalid.
+        Public accessor so callers never need to touch ``_path`` directly."""
+        try:
+            return self._path(entity_id).stat().st_mtime
+        except (OSError, ValueError):
+            return 0.0
 
     def list_all(self) -> list[dict]:
         results = []
@@ -44,14 +51,9 @@ class JsonStore:
             return None
 
     def save(self, entity_id: str, data: dict) -> None:
-        path = self._path(entity_id)
         # Atomic write; restrictive perms since entities may hold secrets
         # (e.g. model API keys).
-        tmp = path.with_suffix(".tmp")
-        with open(tmp, "w") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-        os.chmod(tmp, 0o600)
-        tmp.replace(path)
+        write_json(self._path(entity_id), data, mode=0o600)
 
     def delete(self, entity_id: str) -> bool:
         try:

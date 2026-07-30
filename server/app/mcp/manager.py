@@ -39,7 +39,13 @@ FAILURE_COOLDOWN = 60.0
 
 
 def _now_iso() -> str:
+    # UTC on purpose (cache/status stamps may be compared across machines) —
+    # NOT the same format as storage.sessions.now_iso, which is local time.
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _err_msg(e: Exception) -> str:
+    return "connect timed out" if isinstance(e, asyncio.TimeoutError) else str(e)
 
 
 class McpManager:
@@ -49,6 +55,7 @@ class McpManager:
         self._workspace = workspace
 
         self._servers: dict[str, McpServer] = {}
+        self._invalid: dict[str, str] = {}  # sid -> why the stored config is unusable
         self._dir_mtime: float = -1.0
 
         self._conns: dict[str, mcp_client.BaseConnection] = {}
@@ -87,14 +94,22 @@ class McpManager:
 
     def reload(self) -> None:
         servers: dict[str, McpServer] = {}
+        invalid: dict[str, str] = {}
         for raw in self._store.list_all():
             try:
                 cfg = McpServer(**raw)
             except (ValidationError, TypeError) as e:
+                # Remember WHY, keyed by the file's claimed id: status() reports
+                # it as state "invalid" instead of an indistinguishable "idle"
+                # (the list shows the entry, so its status must explain it).
+                sid = raw.get("id") if isinstance(raw.get("id"), str) else ""
+                if sid:
+                    invalid[sid] = str(e).split("\n")[0][:200]
                 log.warning("invalid MCP server config skipped: %s", e)
                 continue
             servers[cfg.id] = cfg
         self._servers = servers
+        self._invalid = invalid
         self._dir_mtime = self._mtime()
         self._cached = {}
         for sid in servers:
@@ -104,8 +119,18 @@ class McpManager:
         self._reindex()
 
     def _mtime(self) -> float:
+        """Change stamp of the config dir: the directory's own mtime (entries
+        added/removed — every JsonStore write is a tmp+rename, so API writes
+        land here) PLUS the newest file mtime, so an in-place hand edit of an
+        existing file is seen too (the directory mtime alone misses those)."""
         try:
-            return self._store.directory.stat().st_mtime
+            stamp = self._store.directory.stat().st_mtime
+            for f in self._store.directory.glob("*.json"):
+                try:
+                    stamp = max(stamp, f.stat().st_mtime)
+                except OSError:
+                    continue
+            return stamp
         except OSError:
             return -1.0
 
@@ -155,6 +180,38 @@ class McpManager:
         self._maybe_reload()
         return set(self._servers)
 
+    def invalid_reason(self, server_id: str) -> str:
+        """Why a stored config was rejected at load ("" when it is valid)."""
+        self._maybe_reload()
+        return self._invalid.get(server_id, "")
+
+    # --- store facade -------------------------------------------------
+    # The manager owns the config store: every write goes through here so the
+    # reload (cache/index invalidation) can never be forgotten by a caller.
+    # The router used to hold its own store handle and sprinkle manager.reload()
+    # after each write — two sources of truth that had already drifted.
+
+    def raw_all(self) -> list[dict]:
+        """Stored configs as raw dicts (validation state via invalid_reason)."""
+        self._maybe_reload()
+        return self._store.list_all()
+
+    def raw_get(self, server_id: str) -> dict | None:
+        return self._store.get(server_id)
+
+    def exists(self, server_id: str) -> bool:
+        return self._store.exists(server_id)
+
+    def save_config(self, cfg: McpServer) -> None:
+        self._store.save(cfg.id, cfg.model_dump())
+        self.reload()
+
+    async def delete_config(self, server_id: str) -> None:
+        await self.forget(server_id)
+        self.drop_cache(server_id)
+        self._store.delete(server_id)
+        self.reload()
+
     # ------------------------------------------------------------------
     # tool catalogue
     # ------------------------------------------------------------------
@@ -176,7 +233,7 @@ class McpManager:
             if owner in known:
                 out.add(owner)
                 continue
-            rest = naming.server_of(entry)
+            rest = naming.after_prefix(entry)
             if not rest:
                 continue
             # Unknown tool id (never discovered yet): server ids may contain
@@ -216,30 +273,48 @@ class McpManager:
     def get_meta(self, tool_id: str) -> dict | None:
         return self._by_id.get(tool_id)
 
-    def catalogue(self, include_unavailable: bool = True) -> list[dict]:
+    def catalogue(self) -> list[dict]:
         """Every tool ever discovered, for pickers. No connection is opened.
 
         Live definitions are marked ``available: true``; ones only known from the
         on-disk cache are included as ``available: false`` so a selection is
-        never silently lost while a server is down.
+        never silently lost while a server is down. Cross-server id collisions
+        get the same rule execution uses (_reindex: first owner wins): the loser
+        appears as unavailable with the reason, instead of a second row with the
+        same id that would silently dispatch to the other server.
         """
         self._maybe_reload()
         out: list[dict] = []
         for sid in sorted(self._servers):
             live = self._defs.get(sid)
             if live:
-                out.extend({**meta, "available": True} for meta in live)
-            elif include_unavailable:
+                for meta in live:
+                    if self._by_id.get(meta["id"]) is meta:
+                        out.append({**meta, "available": True})
+                    else:
+                        out.append({
+                            **meta, "available": False,
+                            "unavailable_reason":
+                                f"id collides with server '{self._owner.get(meta['id'])}'",
+                        })
+            else:
                 for meta in (self._cached.get(sid) or {}).get("mapped") or []:
                     if isinstance(meta, dict) and meta.get("id"):
                         out.append({**meta, "available": False})
         return out
 
     def status(self, server_id: str) -> dict:
+        self._maybe_reload()  # the one public reader that skipped this
         cfg = self._servers.get(server_id)
         state = self._status.get(server_id) or {}
         conn = self._conns.get(server_id)
-        if cfg is not None and not cfg.enabled:
+        if cfg is None and server_id in self._invalid:
+            # A stored-but-unparseable config used to read as "idle" here while
+            # the list showed the entry and refresh answered 404 — three
+            # contradictory answers about the same file.
+            current = "invalid"
+            state = {**state, "last_error": self._invalid[server_id]}
+        elif cfg is not None and not cfg.enabled:
             current = "disabled"
         elif conn is not None and conn.alive:
             current = "ready"
@@ -305,14 +380,11 @@ class McpManager:
             # shield: give up WAITING after connect_timeout, but let the connect
             # finish in the background so the next turn finds it ready (a cold
             # `npx -y` can take 30s+ the first time).
-            await asyncio.wait_for(
-                asyncio.shield(task),
-                timeout=max(5.0, float(cfg.connect_timeout or 20)),
-            )
+            await asyncio.wait_for(asyncio.shield(task), timeout=cfg.connect_budget)
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            message = "connect timed out" if isinstance(e, asyncio.TimeoutError) else str(e)
+            message = _err_msg(e)
             self._mark_error(sid, message)
             log.warning("mcp[%s] unavailable: %s", sid, message)
             # NOTE: self._defs[sid] is deliberately left untouched — a failed
@@ -407,13 +479,12 @@ class McpManager:
             try:
                 await asyncio.wait_for(
                     self._connect_and_list(server_id, cfg),
-                    timeout=max(5.0, float(cfg.connect_timeout or 20)) * 2,
+                    timeout=cfg.connect_budget * 2,
                 )
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                message = "connect timed out" if isinstance(e, asyncio.TimeoutError) else str(e)
-                self._mark_error(server_id, message)
+                self._mark_error(server_id, _err_msg(e))
             return self.status(server_id)
 
     def schedule_refresh(self, server_id: str) -> None:
@@ -451,7 +522,7 @@ class McpManager:
         """
         conn = mcp_client.create_connection(cfg)
         started = time.monotonic()
-        budget = max(5.0, float(cfg.connect_timeout or 20))
+        budget = cfg.connect_budget
         try:
             try:
                 await asyncio.wait_for(conn.connect(), timeout=budget)
@@ -626,6 +697,7 @@ class McpManager:
         metas: list[dict] = []
         skipped: list[dict] = []
         used: set[str] = set()
+        overflow: list[str] = []
         for tool in tools:
             remote = tool.get("name")
             if not isinstance(remote, str) or not remote:
@@ -634,7 +706,9 @@ class McpManager:
                 skipped.append({"tool": remote, "reason": "filtered"})
                 continue
             if len(metas) >= max(1, int(cfg.max_tools or 32)):
-                skipped.append({"tool": remote, "reason": "max_tools reached"})
+                # One entry per dropped tool made a 500-tool server persist (and
+                # answer every status request with) hundreds of identical rows.
+                overflow.append(remote)
                 continue
             qualified = naming.qualify(cfg.id, remote)
             if qualified in used:
@@ -655,6 +729,14 @@ class McpManager:
                     "timeout": int(cfg.timeout or 60),
                     "max_output": int(cfg.max_output or 10000),
                 },
+            })
+        if overflow:
+            shown = ", ".join(overflow[:5])
+            more = f" (+{len(overflow) - 5} more)" if len(overflow) > 5 else ""
+            skipped.append({
+                "tool": shown + more,
+                "reason": f"max_tools ({int(cfg.max_tools or 32)}) reached — "
+                          f"{len(overflow)} tool(s) not exposed",
             })
         return metas, skipped
 
@@ -681,6 +763,9 @@ class McpManager:
         except (OSError, ValueError):
             pass
         self._cached.pop(sid, None)
+        # forget() reindexes and this must too: cached entries feed _owner, and
+        # stale owner rows would keep routing ids to a server that is gone.
+        self._reindex()
 
 
 def _tool_allowed(cfg: McpServer, remote_name: str) -> bool:

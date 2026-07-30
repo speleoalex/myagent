@@ -4,22 +4,15 @@ import re
 
 from pydantic import BaseModel, field_validator, model_validator
 
-# Entity ids become filenames (JsonStore) and URL path segments: restrict to a
-# safe charset so a crafted id can't traverse outside the data directories.
-_VALID_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+# Entity-id charset: single definition in app.ids (see its docstring).
+from app.ids import check_id as _check_id
 
 # MCP server ids are stricter: they are embedded in the tool names sent to the
 # LLM, so no dots (rejected by remote providers) and short enough to leave room
-# for the remote tool name inside the 64-char function-name budget.
-_VALID_MCP_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,23}$")
-
-
-def _check_id(v: str) -> str:
-    if not _VALID_ID.match(v or "") or ".." in v:
-        raise ValueError(
-            "id may only contain letters, digits, dots, hyphens and underscores"
-        )
-    return v
+# for the remote tool name inside the 64-char function-name budget
+# (MCP_ID_MAX_LEN is also what the mcp router's slugifier must respect).
+MCP_ID_MAX_LEN = 24
+_VALID_MCP_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,%d}$" % (MCP_ID_MAX_LEN - 1))
 
 
 class ModelConfig(BaseModel):
@@ -110,6 +103,12 @@ class McpServer(BaseModel):
     # limits
     connect_timeout: int = 20  # initialize + tools/list budget inside a chat turn
     timeout: int = 60          # per tools/call
+
+    @property
+    def connect_budget(self) -> float:
+        """The effective connect/handshake/list wait, floored at 5s. Used by
+        both the manager and the client — one clamp, not six copies."""
+        return max(5.0, float(self.connect_timeout or 20))
     max_output: int = 10000    # same semantics as tool.json max_output
     max_tools: int = 32        # guard against flooding a small model's context
     tools_ttl: int = 300       # discovery cache TTL (seconds)
@@ -270,8 +269,7 @@ class Settings(BaseModel):
     default_model_id: str | None = None
     ollama_base_url: str = "http://localhost:11434"
     llamacpp_base_url: str = "http://localhost:8080"
-    # Where the notify_user tool delivers messages: the standalone connectors
-    # server (POST /api/bindings/{id}/send) and its optional bearer key
-    # (MYAGENT_CONNECTORS_API_KEY on the connectors side).
-    connectors_base_url: str = "http://localhost:8899"
-    connectors_api_key: str = ""
+    # No connectors_base_url / connectors_api_key any more: notify_user reaches
+    # the connectors plugin in-process, so there is no URL or bearer key to
+    # configure. Pydantic ignores unknown keys, so an existing settings.json
+    # that still carries them loads fine — they are dropped on the next save.

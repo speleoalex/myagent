@@ -7,7 +7,11 @@ import logging
 import re
 from datetime import datetime, timedelta
 
-import httpx
+# Module-level on purpose (no import cycle: executor -> registry, and neither
+# imports this module; main.py wires the handlers after both are loaded).
+from app.engine.executor import AgentExecutor
+from app.models import AutonomousConfig
+from app.storage.sessions import now_iso
 
 log = logging.getLogger(__name__)
 
@@ -19,7 +23,7 @@ def _resolve_attachments(executor, indices) -> list[dict]:
     actual attachments. The tool-call only carries small integer indices, so the
     model never has to reproduce base64 blobs. Accepts an int, a list, or a
     loose string (e.g. "[0, 1]" / "0,1") since text-based tool calls vary."""
-    pool = getattr(executor, "_turn_attachments", None) or []
+    pool = executor.turn_attachments if executor is not None else []
     if not pool or indices is None:
         return []
     if isinstance(indices, str):
@@ -66,22 +70,19 @@ async def call_agent_handler(
             "Send the user's request as 'message', or answer the user yourself."
         )
 
-    depth = getattr(executor, "depth", 0)
+    depth = executor.depth
     if depth >= MAX_AGENT_DEPTH:
         return f"ERROR: Maximum agent chaining depth ({MAX_AGENT_DEPTH}) reached"
 
     try:
-        from app.engine.executor import AgentExecutor
-
         # Access gate: the caller may only delegate to agents it's allowed to
         # reach (target enabled + callable + in the caller's allowlist). This is
         # the real enforcement — the system-prompt directory is only advisory.
-        caller = getattr(executor, "agent", None)
         target = executor.stores.agents.get(agent_id)
         if target is None:
             return f"ERROR: agent '{agent_id}' not found"
-        if caller is not None and not AgentExecutor._agent_can_call(caller, target):
-            return f"ERROR: agent '{agent_id}' is not callable from '{caller.id}'"
+        if not executor.can_call(target):
+            return f"ERROR: agent '{agent_id}' is not callable from '{executor.agent.id}'"
 
         sub_executor = await AgentExecutor.create_for_agent(
             agent_id,
@@ -93,36 +94,17 @@ async def call_agent_handler(
         response = await sub_executor.run(message, attachments=forwarded or None)
 
         # Hand the sub-agent's full trace to the parent so the whole flow is
-        # persisted recursively. Queued in call order; the parent consumes it
-        # when building the call_agent step for this call.
-        if hasattr(executor, "_sub_traces"):
-            executor._sub_traces.append(
-                response.trace or {
-                    "agent_id": agent_id,
-                    "iterations": response.iterations,
-                    "reply": response.reply,
-                    "steps": [],
-                }
-            )
-
-        # Forward sub-agent tool events to parent for SSE streaming
-        if hasattr(executor, '_pending_sub_events') and response.tool_results:
-            for tr in response.tool_results:
-                executor._pending_sub_events.append({
-                    "type": "tool_start",
-                    "data": {
-                        "tool": f"{agent_id}/{tr['tool']}",
-                        "arguments": tr['arguments'],
-                    },
-                })
-                executor._pending_sub_events.append({
-                    "type": "tool_result",
-                    "data": {
-                        "tool": f"{agent_id}/{tr['tool']}",
-                        "arguments": tr['arguments'],
-                        "result_preview": tr.get('result_preview', ''),
-                    },
-                })
+        # persisted recursively (consumed by the parent's call_agent step), and
+        # forward its tool activity to the parent's SSE stream.
+        executor.record_sub_trace(
+            response.trace or {
+                "agent_id": agent_id,
+                "iterations": response.iterations,
+                "reply": response.reply,
+                "steps": [],
+            }
+        )
+        executor.emit_sub_events(agent_id, response.tool_results)
 
         return response.reply
     except Exception as e:
@@ -165,16 +147,34 @@ def _split_chat_ids(raw) -> list[str]:
     return out
 
 
+def _connector_for(state, binding_id: str):
+    """The running connector for a binding, or a message explaining why not.
+
+    Returns ``(connector, error)``. The plugin may not be installed at all —
+    which is a normal configuration, not a crash — so this has to read as an
+    instruction to the model rather than a traceback.
+    """
+    services = getattr(state, "connectors", None) if state is not None else None
+    if services is None:
+        return None, ("ERROR: the connectors plugin is not installed on this "
+                      "server, so there is no messaging channel to notify.")
+    connector = services.manager.get_connector(binding_id)
+    if connector is None:
+        return None, (f"ERROR: binding '{binding_id}' is not running. Check that "
+                      f"it exists, is enabled and has a valid token.")
+    return connector, ""
+
+
 async def notify_user_handler(
     text: str = "", binding_id: str = "", chat_id: str = "",
-    executor=None, _named=None, **kwargs,
+    executor=None, _named=None, _state=None, **kwargs,
 ) -> str:
-    """Push a message to the user through the connectors server (Telegram).
+    """Push a message to the user through a messaging channel (Telegram).
 
     The default target comes from the agent's ``autonomous.notify_binding_id``
-    / ``notify_chat_id``; explicit arguments override it. Settings are read
-    live (``config.settings`` is rebound on every save), so URL/key changes
-    need no restart."""
+    / ``notify_chat_id``; explicit arguments override it. The connector is
+    reached in-process — ``_state`` is the app state, read at call time, so the
+    plugin can be registered after this handler is bound."""
     if not (text or "").strip():
         return "ERROR: 'text' is required"
     cfg = getattr(getattr(executor, "agent", None), "autonomous", None)
@@ -186,47 +186,30 @@ async def notify_user_handler(
                 "or set notify_binding_id / notify_chat_id in the agent's "
                 "autonomous configuration.")
 
-    from app import config
-    base = (config.settings.connectors_base_url or "http://localhost:8899").rstrip("/")
-    headers = {}
-    if config.settings.connectors_api_key:
-        headers["Authorization"] = f"Bearer {config.settings.connectors_api_key}"
+    connector, error = _connector_for(_state, binding_id)
+    if connector is None:
+        return error
 
-    # One request per recipient. The fan-out lives HERE, not in the connectors
-    # server, whose /send stays "one message to one chat" — and each send answers
-    # with its own session id, which is what lets every recipient's conversation
-    # get the message appended.
-    #
-    # Never hand a comma-joined string to the transport: Telegram ACCEPTS
-    # "471091560,1489486090", parses the leading digits, delivers to the first
-    # chat only and returns ok:true. No error, no warning, second recipient
-    # silently dropped (verified against the live API).
+    # One send per recipient. Never hand a comma-joined string to the transport:
+    # Telegram ACCEPTS "471091560,1489486090", parses the leading digits,
+    # delivers to the first chat only and returns ok:true. No error, no warning,
+    # second recipient silently dropped (verified against the live API).
     sent, failed = [], []
-    try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            for one in recipients:
-                r = await client.post(
-                    f"{base}/api/bindings/{binding_id}/send",
-                    json={"chat_id": one, "text": text},
-                    headers=headers,
-                )
-                if r.status_code >= 400:
-                    try:
-                        detail = r.json().get("detail", "")
-                    except Exception:
-                        detail = r.text[:200]
-                    failed.append(f"{one} ({r.status_code}: {detail})")
-                    continue
-                try:
-                    sid = (r.json() or {}).get("session_id") or ""
-                except Exception:
-                    sid = ""
-                logged = await _log_to_channel(sid, text, executor, _named)
-                sent.append(one if logged else f"{one} (not added to its history)")
-    except Exception as e:
-        # A transport failure mid-fan-out: report what did go out, so the model
-        # does not retry the whole thing and double-message the first recipients.
-        failed.append(f"cannot reach the connectors server at {base}: {e}")
+    for one in recipients:
+        try:
+            await connector.send(one, text)
+        except Exception as e:
+            # Detail to the log, not to the model: a transport error can quote a
+            # URL that embeds the bot token.
+            log.warning("notify_user: send to %s failed: %s", one, e)
+            failed.append(f"{one} ({type(e).__name__})")
+            continue
+        # The session key is asked of the connector: it derives from the
+        # binding's session_prefix, and that connector is the only thing that
+        # knows how to build it.
+        logged = await _log_to_channel(
+            connector.session_id_for(one), text, executor, _named)
+        sent.append(one if logged else f"{one} (not added to its history)")
 
     if not sent:
         return f"ERROR: nothing was sent via binding '{binding_id}': {'; '.join(failed)}"
@@ -256,14 +239,16 @@ async def _log_to_channel(sid: str, text: str, executor, named) -> bool:
         agent_id = getattr(getattr(executor, "agent", None), "id", "") or ""
         async with named.lock(sid):
             session = await asyncio.to_thread(named.get, sid, agent_id)
-            ts = datetime.now().isoformat(timespec="seconds")
             # Marked so the UI (and a human reading the log) can tell an
             # unprompted push from a reply to something the user asked.
             session.setdefault("messages", []).append(
-                {"role": "assistant", "text": text, "ts": ts, "notification": True})
+                {"role": "assistant", "text": text, "ts": now_iso(),
+                 "notification": True})
             session.setdefault("conversation", []).append(
                 {"role": "assistant", "content": text})
-            await asyncio.to_thread(named.save, sid, session)
+            # save_rotating, not save: a notification-only channel never gets a
+            # normal chat turn, so this append is its ONLY chance to rotate.
+            await asyncio.to_thread(named.save_rotating, sid, session)
         return True
     except Exception as e:
         log.warning("notify_user: could not append to session %s: %s", sid, e)
@@ -320,7 +305,8 @@ async def autonomy_control_handler(
         # Clears any error-pause and kicks the scheduler for immediate pickup.
         await _autonomy.resume(aid)
         cfg = data.get("autonomous") or {}
-        interval = cfg.get("interval_s", 1800)
+        # The real default lives on the model — never restate the number here.
+        interval = cfg.get("interval_s", AutonomousConfig().interval_s)
         how = f"heartbeat every {interval}s" if interval > 0 else "wakes on events only"
         if already:
             return f"Autonomous mode was already ON ({how})."

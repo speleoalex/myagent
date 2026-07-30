@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import shutil
 from pathlib import Path
@@ -45,6 +46,13 @@ def ensure_config_dir() -> Path:
         if DEFAULT_CONFIG_DIR.is_dir() and DEFAULT_CONFIG_DIR.resolve() != CONFIG_DIR.resolve():
             shutil.copytree(DEFAULT_CONFIG_DIR, CONFIG_DIR)
             CONFIG_SEEDED = True
+            # copytree preserves the repo's file modes; settings.json may
+            # later hold secrets (model API keys), so normalize it to the
+            # same 0600 every save_settings() write uses.
+            try:
+                os.chmod(CONFIG_DIR / "settings.json", 0o600)
+            except OSError:
+                pass
         else:
             CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     return CONFIG_DIR
@@ -134,6 +142,20 @@ def ensure_autonomy() -> Path:
     return AUTONOMY_DIR
 
 
+# Optional plugins: one directory per plugin, each with a plugin.py exposing
+# register(app) (see docs/PLUGINS.md and app/plugins.py). Defaults to
+# ~/myagent/plugins; override with the MYAGENT_PLUGINS env var.
+#
+# There is deliberately NO bundled underlay here, unlike TOOLS_DIR: a plugin
+# shipped inside the app would be code for an optional online service sitting
+# in an install that is meant to work offline. Plugins are installed
+# separately, and an install without this directory is the normal case — the
+# loader treats it as "no plugins", not as an error, so nothing creates it.
+PLUGINS_DIR = Path(
+    os.environ.get("MYAGENT_PLUGINS") or (Path.home() / "myagent" / "plugins")
+).expanduser()
+
+
 # A channel (connector) session is one perpetual file — unlike web chats it is
 # never rotated by "new chat", and since it records the same full format
 # (traces, attachments) it would grow without bound. Once the file exceeds
@@ -171,16 +193,28 @@ if DEBUG:
 
 
 def load_settings() -> Settings:
+    """Load settings, degrading to defaults on ANY problem. This runs at
+    import time: a truncated/corrupt settings.json must never keep the whole
+    server from booting (every other JSON reader in the app is tolerant)."""
     if SETTINGS_FILE.exists():
-        with open(SETTINGS_FILE) as f:
-            return Settings(**json.load(f))
+        try:
+            with open(SETTINGS_FILE) as f:
+                return Settings(**json.load(f))
+        except Exception as e:
+            logging.getLogger(__name__).warning(
+                "settings.json unreadable (%s): starting with defaults", e)
     return Settings()
 
 
 def save_settings(s: Settings) -> None:
+    # Atomic + 0600, like JsonStore: settings may hold model API keys,
+    # and a crash mid-write must not leave a truncated file behind.
+    # Imported here so config keeps zero app imports at module-load time
+    # (everything imports config first; a future storage->config import
+    # must not become a cycle).
+    from app.storage.sessions import write_json
     SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(SETTINGS_FILE, "w") as f:
-        json.dump(s.model_dump(), f, indent=2)
+    write_json(SETTINGS_FILE, s.model_dump(), mode=0o600)
 
 
 # Seed the config dir from defaults on first run before loading settings.

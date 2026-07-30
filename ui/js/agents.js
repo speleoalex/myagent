@@ -6,17 +6,16 @@ const AgentsPage = {
     },
 
     async renderList() {
-        let agents = [];
-        try { agents = await App.api('GET', '/agents'); } catch (e) { /* empty */ }
-        let native = [];
-        try { native = await App.api('GET', '/agents/native'); } catch (e) { /* no catalog */ }
-        let tools = [];
-        try { tools = await App.api('GET', '/tools'); } catch (e) { /* empty */ }
-        let autoStatus = {};
-        try { autoStatus = await App.api('GET', '/autonomy/status'); } catch (e) { /* empty */ }
-        // Cache agents+tools so the preview tree can resolve delegation without refetching.
+        // Independent GETs: fetch them together, not one latency after the
+        // other. The tool catalog is NOT fetched here — the preview modal
+        // lazy-loads it on first open (ensurePreviewData).
+        const [agents, native, autoStatus] = await Promise.all([
+            App.api('GET', '/agents').catch(() => []),
+            App.api('GET', '/agents/native').catch(() => []),   // no catalog
+            App.api('GET', '/autonomy/status').catch(() => ({})),
+        ]);
+        // Cache agents so the preview tree can resolve delegation without refetching.
         this._allAgents = agents;
-        this._allTools = tools;
 
         // One grid, one place to act. The bundled catalog is not a separate
         // table: an agent shipped with the app that isn't installed (deleted,
@@ -61,18 +60,41 @@ const AgentsPage = {
         });
     },
 
+    /** Translated label of an autonomy state (the API's raw enum values were
+     *  reaching the screen untranslated). */
+    stateLabel(state) {
+        const keys = { running: 'agents.stateRunning', idle: 'agents.stateIdle',
+                       paused: 'agents.statePaused', error: 'agents.stateError',
+                       rate_limited: 'agents.stateRateLimited',
+                       disabled: 'agents.stateDisabled' };
+        return keys[state] ? i18n(keys[state]) : state;
+    },
+
+    /** The "last wake / next wake / pending" parts, shared by the card badge
+     *  tooltip and the form's wake-status line (the two copies had already
+     *  diverged on the '—' fallback). */
+    wakeSummary(status) {
+        if (!status) return [];
+        const bits = [];
+        if (status.last_wake) {
+            bits.push(`${i18n('agents.lastWake')}: ${status.last_wake} (${status.last_result || '—'})`);
+        }
+        if (status.next_wake) bits.push(`${i18n('agents.nextWake')}: ${status.next_wake}`);
+        if (status.pending_events) {
+            bits.push(i18n('agents.pendingEvents', { n: status.pending_events }));
+        }
+        return bits;
+    },
+
     liveBadge(agent, status) {
         if (!agent.live) return '';
         const state = (status && status.state) || 'idle';
         const color = { running: 'bg-primary', idle: 'bg-success', paused: 'bg-danger',
                         error: 'bg-danger', rate_limited: 'bg-warning text-dark' }[state] || 'bg-secondary';
-        const tip = status
-            ? `${i18n('agents.lastWake')}: ${status.last_wake || '—'} (${status.last_result || '—'})`
-              + (status.next_wake ? ` · ${i18n('agents.nextWake')}: ${status.next_wake}` : '')
-              + (status.pending_events ? ` · ${status.pending_events} ev.` : '')
-            : '';
+        const tip = this.wakeSummary(status).join(' · ');
+        const label = i18n('agents.liveBadge');
         return `<span class="badge ${color}" title="${App.escAttr(tip)}">` +
-               `<i class="bi bi-broadcast"></i> live${state !== 'idle' ? ': ' + state : ''}</span>`;
+               `<i class="bi bi-broadcast"></i> ${label}${state !== 'idle' ? ': ' + this.stateLabel(state) : ''}</span>`;
     },
 
     /** An installed agent. `nat` is its entry in the bundled catalog when it has
@@ -228,13 +250,15 @@ const AgentsPage = {
      *  so the emitted JSON keeps its key order and saving an unchanged agent
      *  produces no diff. `group` is where the field is laid out, not what it
      *  means. */
+    // Label/min/step of the numeric ones live in numSpecs() (RangeField), the
+    // single authority — stale copies here once looked authoritative and were not.
     AUTO_FIELDS: [
-        { key: 'interval_s',             el: 'f-auto-interval',     type: 'int',  dflt: 1800, group: 'grid', labelKey: 'agents.autoInterval',  min: 0,  step: 60 },
+        { key: 'interval_s',             el: 'f-auto-interval',     type: 'int',  dflt: 1800, group: 'grid' },
         { key: 'instructions',           el: 'f-auto-instructions', type: 'text', dflt: '',   group: 'text' },
-        { key: 'max_wakes_per_hour',     el: 'f-auto-maxwakes',     type: 'int',  dflt: 12,   group: 'grid', labelKey: 'agents.autoMaxWakes',  min: 1 },
-        { key: 'max_consecutive_errors', el: 'f-auto-maxerrors',    type: 'int',  dflt: 5,    group: 'grid', labelKey: 'agents.autoMaxErrors', min: 1 },
-        { key: 'wake_timeout_s',         el: 'f-auto-timeout',      type: 'int',  dflt: 600,  group: 'grid', labelKey: 'agents.autoTimeout',   min: 30 },
-        { key: 'history_messages',       el: 'f-auto-history',      type: 'int',  dflt: 0,    group: 'grid', labelKey: 'agents.autoHistory',   min: 0 },
+        { key: 'max_wakes_per_hour',     el: 'f-auto-maxwakes',     type: 'int',  dflt: 12,   group: 'grid' },
+        { key: 'max_consecutive_errors', el: 'f-auto-maxerrors',    type: 'int',  dflt: 5,    group: 'grid' },
+        { key: 'wake_timeout_s',         el: 'f-auto-timeout',      type: 'int',  dflt: 600,  group: 'grid' },
+        { key: 'history_messages',       el: 'f-auto-history',      type: 'int',  dflt: 0,    group: 'grid' },
         { key: 'notify_binding_id',      el: 'f-auto-binding',      type: 'text', dflt: '',   group: 'notify' },
         { key: 'notify_chat_id',         el: 'f-auto-chat',         type: 'text', dflt: '',   group: 'notify' },
     ],
@@ -455,15 +479,14 @@ const AgentsPage = {
 
     /** The notify target picker.
      *
-     *  Bindings live on the connectors server, not here, so they are fetched
-     *  through the read-only proxy at GET /api/connectors/bindings. When the list
-     *  is available this is a real <select> — the set is closed (you can only
-     *  send through a configured binding) and the NAME is what the user knows,
-     *  not the id.
+     *  Bots are configured by the connectors plugin (GET /api/connectors/bindings,
+     *  managed at #/connectors). When the list is available this is a real
+     *  <select> — the set is closed (you can only send through a configured
+     *  binding) and the NAME is what the user knows, not the id.
      *
-     *  When it is not available — connectors server down, or simply not used by
-     *  this install — it falls back to a free-text input. A <select> would make
-     *  the field impossible to fill in that state, which is worse than typing.
+     *  When it is not available — the plugin isn't installed, or simply not used
+     *  by this install — it falls back to a free-text input. A <select> would
+     *  make the field impossible to fill in that state, which is worse than typing.
      *  Same reason a stored id missing from the list is kept as its own option
      *  rather than silently reset (as with a deleted model). */
     bindingField(bindings, current) {
@@ -480,7 +503,7 @@ const AgentsPage = {
                             data-allowed="${App.escAttr((b.allowed_ids || []).join(','))}">
                         ${App.esc(b.name || b.id)} (${App.esc(b.id)})${b.enabled === false ? ' — ' + i18n('mcp.stateDisabled') : ''}
                     </option>`).join('')}
-                ${current && !known ? `<option value="${App.escAttr(current)}" selected>${App.esc(current)} — ${i18n('agents.modelMissing')}</option>` : ''}
+                ${current && !known ? `<option value="${App.escAttr(current)}" selected>${App.esc(current)} — ${i18n('agents.bindingMissing')}</option>` : ''}
             </select>`;
     },
 
@@ -710,23 +733,31 @@ const AgentsPage = {
             }
         }
 
-        let models = [], tools = [], agents = [], mcpStatus = {};
-        try { models = await App.api('GET', '/models'); } catch (e) { /* empty */ }
-        try { tools = await App.api('GET', '/tools'); } catch (e) { /* empty */ }
-        try { agents = await App.api('GET', '/agents'); } catch (e) { /* empty */ }
-        // Autonomy status, so the "wake now" button has something to report into.
-        let autoStatus = {};
-        try { autoStatus = await App.api('GET', '/autonomy/status'); } catch (e) { /* empty */ }
-        // Notify targets: the connectors server owns them, so this is a proxy and
-        // an install that doesn't use connectors legitimately gets nothing back.
-        let bindings = [], bindingsAvailable = false;
-        try {
-            const res = await App.api('GET', '/connectors/bindings');
-            bindings = res.bindings || [];
-            bindingsAvailable = !!res.available;
-        } catch (e) { /* connectors not configured */ }
-        // Per-server state, so a broken MCP server is visible in the tool picker.
-        try { mcpStatus = await App.api('GET', '/mcp/status'); } catch (e) { /* empty */ }
+        // Six independent GETs (two of them — connectors proxy and MCP status —
+        // can be slow): fetched together instead of paying the sum of their
+        // latencies on every form open. Each degrades on its own.
+        const [models, tools, agents, autoStatus, bindingsRes, mcpStatus] =
+            await Promise.all([
+                App.api('GET', '/models').catch(() => []),
+                App.api('GET', '/tools').catch(() => []),
+                App.api('GET', '/agents').catch(() => []),
+                // Autonomy status, so "wake now" has something to report into.
+                App.api('GET', '/autonomy/status').catch(() => ({})),
+                // Notify targets, owned by the connectors plugin. Asked for only
+                // when the plugin is actually loaded: without it the route does
+                // not exist, and calling it anyway would log a 404 in the console
+                // on every form open of a perfectly healthy install. The probe is
+                // cached per page load, so this costs no extra request.
+                (async () => (await App.plugin('connectors'))?.loaded
+                    ? App.api('GET', '/connectors/bindings').catch(() => null)
+                    : null)(),
+                // Per-server state: a broken MCP server shows in the tool picker.
+                App.api('GET', '/mcp/status').catch(() => ({})),
+            ]);
+        // The plugin answers with a plain array; a failed fetch gives null, and
+        // that IS the "not available" signal — no separate flag needed.
+        const bindings = Array.isArray(bindingsRes) ? bindingsRes : [];
+        const bindingsAvailable = Array.isArray(bindingsRes);
         // Cache for the preview tree (opened from this form with unsaved values).
         this._allAgents = agents;
         this._allTools = tools;
@@ -857,7 +888,7 @@ const AgentsPage = {
                                          either — there is nothing invalid left to pick. -->
                                     <select class="form-select" id="f-model">
                                         <option value="default" ${modelIsDefault ? 'selected' : ''}>${i18n('agents.defaultModel')}</option>
-                                        ${models.map(m => `<option value="${m.id}" ${m.id === agent.model_id ? 'selected' : ''}>${App.esc(m.name)} (${m.provider})</option>`).join('')}
+                                        ${models.map(m => `<option value="${App.escAttr(m.id)}" ${m.id === agent.model_id ? 'selected' : ''}>${App.esc(m.name)} (${App.esc(m.provider)})</option>`).join('')}
                                         ${modelMissing ? `<option value="${App.escAttr(agent.model_id)}" selected>${App.esc(agent.model_id)} — ${i18n('agents.modelMissing')}</option>` : ''}
                                     </select>
                                     ${modelMissing ? `<div class="form-text text-warning-emphasis"><i class="bi bi-exclamation-triangle"></i> ${i18n('agents.modelMissingHint')}</div>` : ''}
@@ -892,10 +923,10 @@ const AgentsPage = {
                                             <div id="callable-list" class="ms-3 mt-1" style="max-height:160px;overflow-y:auto">
                                                 ${otherAgents.map(a => `
                                                     <div class="form-check">
-                                                        <input class="form-check-input agent-check" type="checkbox" value="${a.id}" id="ca-${a.id}"
+                                                        <input class="form-check-input agent-check" type="checkbox" value="${App.escAttr(a.id)}" id="ca-${App.escAttr(a.id)}"
                                                             ${callableAll || callableList.includes(a.id) ? 'checked' : ''}>
-                                                        <label class="form-check-label" for="ca-${a.id}">
-                                                            <strong>${App.esc(a.name)}</strong> <small class="text-secondary">(${a.id})</small>
+                                                        <label class="form-check-label" for="ca-${App.escAttr(a.id)}">
+                                                            <strong>${App.esc(a.name)}</strong> <small class="text-secondary">(${App.esc(a.id)})</small>
                                                         </label>
                                                     </div>
                                                 `).join('')}
@@ -985,7 +1016,12 @@ const AgentsPage = {
                                         <datalist id="chat-id-options"></datalist>
                                     </div>
                                 </div>
-                                <div class="form-text">${i18n('agents.autoNotifyHint')}</div>
+                                <div class="form-text">${i18n('agents.autoNotifyHint')}
+                                    <a href="#/connectors">${i18n('agents.autoBindingManage')}</a></div>
+                                <!-- Filled by syncNotifyTargets(): either the chat-id
+                                     suggestions or the "plugin not active" warning. It is
+                                     written with textContent, so the link above cannot
+                                     live in here. -->
                                 <div class="form-text" id="notify-hint"></div>`)}
                             ${pane('advanced', `
                                 <div class="row g-3">
@@ -1154,9 +1190,7 @@ const AgentsPage = {
             const wakeOut = document.getElementById('wake-status');
             const showStatus = (st) => {
                 if (!st) { wakeOut.textContent = ''; return; }
-                const bits = [st.state];
-                if (st.last_wake) bits.push(`${i18n('agents.lastWake')}: ${st.last_wake} (${st.last_result || '—'})`);
-                if (st.next_wake) bits.push(`${i18n('agents.nextWake')}: ${st.next_wake}`);
+                const bits = [this.stateLabel(st.state), ...this.wakeSummary(st)];
                 wakeOut.textContent = bits.filter(Boolean).join(' · ');
             };
             showStatus(autoStatus[agentId]);
@@ -1243,7 +1277,7 @@ const AgentsPage = {
 
         document.getElementById('btn-preview').onclick = () => {
             const draft = readForm();
-            draft.id = draft.id || '(new)';
+            draft.id = draft.id || i18n('agents.previewNewId');
             draft.name = draft.name || draft.id;
             this.openPreview(draft);
         };

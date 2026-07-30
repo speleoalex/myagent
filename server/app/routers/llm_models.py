@@ -6,13 +6,15 @@ from pydantic import BaseModel
 
 from app.engine import model_probe
 from app.models import ModelConfig
+from app.routers.crud import get_or_404, require_absent, require_exists
+from app.routers.secrets import SECRET_MASK
 from app import config
 
 router = APIRouter()
 
-# Sentinel returned to the frontend in place of a stored API key. Keys are
-# write-only: a PUT that sends the sentinel back keeps the saved key.
-API_KEY_MASK = "********"
+# Stored API keys are write-only: GET returns the shared sentinel and a PUT
+# that sends it back keeps the saved key (see app.routers.secrets).
+API_KEY_MASK = SECRET_MASK
 
 
 def _store(request: Request):
@@ -149,9 +151,7 @@ async def probe_model(model_id: str, request: Request, refresh: bool = False):
     a request will actually get) and the `context_source` that produced it —
     that is what the model form shows next to the context field.
     """
-    cfg = _store(request).get(model_id)
-    if cfg is None:
-        raise HTTPException(404, f"Model not found: {model_id}")
+    cfg = get_or_404(_store(request), model_id, "Model")
     cfg = ModelConfig(**cfg).model_dump()  # migrate legacy options.num_ctx
 
     info = await model_probe.probe(cfg, force=refresh)
@@ -163,17 +163,13 @@ async def probe_model(model_id: str, request: Request, refresh: bool = False):
 
 @router.get("/{model_id}")
 async def get_model(model_id: str, request: Request):
-    data = _store(request).get(model_id)
-    if data is None:
-        raise HTTPException(404, f"Model not found: {model_id}")
-    return _public(data)
+    return _public(get_or_404(_store(request), model_id, "Model"))
 
 
 @router.post("", status_code=201)
 async def create_model(model: ModelConfig, request: Request):
     store = _store(request)
-    if store.exists(model.id):
-        raise HTTPException(409, f"Model already exists: {model.id}")
+    require_absent(store, model.id, "Model")
     store.save(model.id, model.model_dump())
     return _masked(model.model_dump())
 
@@ -189,9 +185,10 @@ def _forget_probe(*cfgs: dict | None) -> None:
 @router.put("/{model_id}")
 async def update_model(model_id: str, model: ModelConfig, request: Request):
     store = _store(request)
-    existing = store.get(model_id)
-    if existing is None:
-        raise HTTPException(404, f"Model not found: {model_id}")
+    # exists(), not get(): a corrupt stored file must stay repairable by
+    # overwriting it (its unreadable content simply has no key to keep).
+    require_exists(store, model_id, "Model")
+    existing = store.get(model_id) or {}
     model.id = model_id
     # API key handling (write-only — the frontend only ever holds the mask):
     #  - a non-remote provider never keeps a key;

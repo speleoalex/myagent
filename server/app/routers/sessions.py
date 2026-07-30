@@ -3,6 +3,7 @@ import asyncio
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from app.engine.autonomy import AUTONOMOUS_PREFIX, is_autonomous_session
 from app.engine.executor import AgentExecutor
 
 router = APIRouter()
@@ -44,7 +45,8 @@ async def list_sessions(request: Request):
     sessions — they never pass through "new chat", so they would otherwise be
     invisible until rotated into the history."""
     out = request.app.state.sessions.list_history()
-    out.extend(request.app.state.named_sessions.list_summaries(prefix="autonomous_"))
+    out.extend(request.app.state.named_sessions.list_summaries(
+        prefix=AUTONOMOUS_PREFIX))
     out.sort(key=lambda x: x.get("updated_at", ""), reverse=True)
     return out
 
@@ -124,9 +126,9 @@ async def resume_session(session_id: str, request: Request):
 @router.get("/{session_id}")
 async def get_session(session_id: str, request: Request):
     s = request.app.state.sessions.get(session_id)
-    if s is None and session_id.startswith("autonomous_"):
+    if s is None and is_autonomous_session(session_id):
         named = request.app.state.named_sessions
-        if named._path(session_id).exists():
+        if named.exists(session_id):
             s = await asyncio.to_thread(named.get, session_id)
     if s is None:
         raise HTTPException(404, "Session not found")
@@ -137,18 +139,13 @@ async def get_session(session_id: str, request: Request):
 async def delete_session(session_id: str, request: Request):
     if request.app.state.sessions.delete(session_id):
         return {"ok": True}
-    if session_id.startswith("autonomous_"):
+    if is_autonomous_session(session_id):
         # An autonomous session is a living channel file: deleting it means
         # archiving the log into the regular history first (same flow as a
         # connector /reset), serialized on the session lock so it can't race
         # an in-flight wake.
-        named = request.app.state.named_sessions
-        session_store = request.app.state.sessions
-        async with named.lock(session_id):
-            if named._path(session_id).exists():
-                session = await asyncio.to_thread(named.get, session_id)
-                archived = await asyncio.to_thread(
-                    session_store.archive_session, session)
-                named.delete(session_id)
-                return {"ok": True, "archived": archived}
+        existed, archived = await request.app.state.named_sessions \
+            .archive_and_reset(session_id)
+        if existed:
+            return {"ok": True, "archived": archived}
     raise HTTPException(404, "Session not found")

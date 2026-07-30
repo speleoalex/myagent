@@ -14,11 +14,19 @@ connector chats stay format-compatible.
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 
+# Ids arriving from URL path segments become filenames here: same guard as
+# JsonStore (ids.py is the single definition of the charset).
+from app.ids import is_valid_id
+
 
 def now_iso() -> str:
+    """Timestamps in one canonical shape. The format is load-bearing, not
+    cosmetic: sessions sort on ``updated_at`` and the event store compares
+    ``due_at`` lexicographically — every producer must emit exactly this."""
     return datetime.now().isoformat(timespec="seconds")
 
 
@@ -29,9 +37,13 @@ def read_json(path: Path) -> dict | None:
         return None
 
 
-def write_json(path: Path, session: dict) -> None:
+def write_json(path: Path, data: dict, mode: int | None = None) -> None:
+    """Atomic JSON write (tmp + rename). ``mode`` sets restrictive permissions
+    on the temp file BEFORE the rename, for files that may hold secrets."""
     tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(session, ensure_ascii=False, indent=2))
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+    if mode is not None:
+        os.chmod(tmp, mode)
     tmp.replace(path)  # atomic
 
 
@@ -47,6 +59,104 @@ def new_session(session_id: str, agent_id: str = "", **extra) -> dict:
         "messages": [],       # rich event log for display
         "conversation": [],   # compact history for the LLM
         **extra,
+    }
+
+
+# --------------------------------------------------------------- turn format
+# How a chat turn is recorded INTO a session dict. These used to be private
+# helpers of the chat router, which forced the autonomy engine to import from
+# a FastAPI router (an inverted dependency); they live here because they are
+# the other half of the on-disk format that new_session() starts.
+
+def title_from(message: str, attachments=None) -> str:
+    """A chat's title from its first user message (60 chars, single line)."""
+    t = (message or "").strip().replace("\n", " ")
+    if t:
+        return t[:60] + ("…" if len(t) > 60 else "")
+    return "(attachment)" if attachments else "New chat"
+
+
+def memory_context(session: dict) -> list | None:
+    """This session's archived-turn summaries (injected at prompt build)."""
+    return (session.get("memory") or {}).get("context")
+
+
+def record_user_turn(session: dict, message: str, attachments: list[dict],
+                     agent_id: str) -> None:
+    """Append the user turn to the session and set the title on first message."""
+    session.setdefault("messages", []).append({
+        "role": "user",
+        "text": message,
+        "attachments": attachments or [],
+        "agent_id": agent_id,
+        "ts": now_iso(),
+    })
+    session["agent_id"] = agent_id
+    if not session.get("title"):
+        session["title"] = title_from(message, attachments)
+
+
+def tool_message_from_step(step: dict) -> dict:
+    """Turn one executor trace step into a stored 'tool' message. Keeps the full
+    result and — for call_agent — the nested sub_trace, so the archived session
+    holds the complete recursive flow (sub-agent calls, results and tools)."""
+    msg = {
+        "role": "tool",
+        "tool": step.get("tool"),
+        "arguments": step.get("arguments"),
+        "result_preview": step.get("result_preview"),
+        "result": step.get("result"),
+        "ts": step.get("ts") or now_iso(),
+    }
+    if step.get("sub_trace"):
+        msg["sub_trace"] = step["sub_trace"]
+    return msg
+
+
+def steps_from(trace, tool_events: list[dict] | None) -> list[dict]:
+    """Prefer the rich recursive trace; fall back to flat tool summaries
+    (older path / no trace available)."""
+    if trace and trace.get("steps"):
+        return trace["steps"]
+    return [
+        {
+            "tool": t.get("tool"),
+            "arguments": t.get("arguments"),
+            "result_preview": t.get("result_preview"),
+            "result": t.get("result") or t.get("result_preview"),
+        }
+        for t in (tool_events or [])
+    ]
+
+
+def record_turn(session: dict, steps: list[dict], reply: str, conversation) -> None:
+    """Append the tool calls (recursive trace) and assistant reply, and update
+    the compact LLM history."""
+    for step in steps:
+        session["messages"].append(tool_message_from_step(step))
+    session["messages"].append({"role": "assistant", "text": reply, "ts": now_iso()})
+    if conversation is not None:
+        session["conversation"] = [
+            m for m in conversation
+            if (m.get("role") if isinstance(m, dict) else m.role) != "system"
+        ]
+
+
+def session_summary(s: dict, fallback_id: str = "") -> dict:
+    """The listing projection of a session — ONE shape for both the web
+    history and the channel store, so the sessions list never shows two
+    different summaries for the same format."""
+    return {
+        "id": s.get("id") or fallback_id,
+        "title": s.get("title") or "(untitled)",
+        "agent_id": s.get("agent_id", ""),
+        "created_at": s.get("created_at", ""),
+        "updated_at": s.get("updated_at", ""),
+        "message_count": len(s.get("messages", [])),
+        # Provenance of archived connector chats ("channel_id" is the
+        # legacy spelling written by older archives).
+        "channel": s.get("channel") or s.get("channel_id") or "",
+        "source": s.get("source", ""),
     }
 
 
@@ -134,8 +244,7 @@ class SessionStore:
             # first user message, then to the channel key.
             first = next((m.get("text", "") for m in s.get("messages", [])
                           if m.get("role") == "user" and m.get("text")), "")
-            base = first.strip().replace("\n", " ")
-            title = base[:60] + ("…" if len(base) > 60 else "")
+            title = title_from(first) if first.strip() else ""
             s["title"] = title or s.get("channel") or "(channel)"
         write_json(self.history_dir / f"{sid}.json", s)
         return sid
@@ -151,6 +260,8 @@ class SessionStore:
         """Reopen an archived chat as the active one (archiving the current
         chat first). The resumed session keeps its original agent_id, so the
         caller can restore the agent it was held with."""
+        if not is_valid_id(session_id):
+            return None
         src = self.history_dir / f"{session_id}.json"
         if not src.exists():
             cur = self.get_current()
@@ -181,18 +292,7 @@ class SessionStore:
             s = read_json(f)
             if s is None:
                 continue
-            summary = {
-                "id": s.get("id", f.stem),
-                "title": s.get("title") or "(untitled)",
-                "agent_id": s.get("agent_id", ""),
-                "created_at": s.get("created_at", ""),
-                "updated_at": s.get("updated_at", ""),
-                "message_count": len(s.get("messages", [])),
-                # Provenance of archived connector chats ("channel_id" is the
-                # legacy spelling written by older archives).
-                "channel": s.get("channel") or s.get("channel_id") or "",
-                "source": s.get("source", ""),
-            }
+            summary = session_summary(s, fallback_id=f.stem)
             self._summaries[key] = (mtime, summary)
             out.append(summary)
         # Drop cache entries for deleted files
@@ -203,6 +303,8 @@ class SessionStore:
         return out
 
     def get(self, session_id: str) -> dict | None:
+        if not is_valid_id(session_id):
+            return None
         f = self.history_dir / f"{session_id}.json"
         if f.exists():
             return read_json(f)
@@ -210,6 +312,8 @@ class SessionStore:
         return cur if cur.get("id") == session_id else None
 
     def delete(self, session_id: str) -> bool:
+        if not is_valid_id(session_id):
+            return False
         f = self.history_dir / f"{session_id}.json"
         if f.exists():
             f.unlink()
