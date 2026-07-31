@@ -22,8 +22,39 @@ const App = {
         // Pages that need it await pluginsReady(), sharing this same promise.
         this.pluginsReady();
         window.addEventListener('hashchange', () => this.route());
+        this._wireReveal();
         this.route();
         this.updateActiveNav();
+    },
+
+    /** Markup for the "show it" button beside a secret input. A password field
+     * you cannot read is a field you cannot check for a typo, and these are
+     * pasted values (API keys, bearer tokens, a device's shared key) where one
+     * wrong character produces an authentication error that names nothing.
+     *
+     * Put it inside a Bootstrap .input-group with the input. */
+    revealButton(inputId) {
+        return `<button type="button" class="btn btn-outline-secondary" tabindex="-1"
+                data-reveal="${this.escAttr(inputId)}" aria-pressed="false"
+                title="${this.escAttr(i18n('common.reveal'))}"
+                aria-label="${this.escAttr(i18n('common.reveal'))}"><i class="bi bi-eye"></i></button>`;
+    },
+
+    /** One delegated listener, installed once. The SPA re-renders whole forms,
+     * so per-button wiring would have to be redone by every page that grows a
+     * secret field — and the one that forgets ships a dead button. */
+    _wireReveal() {
+        document.addEventListener('click', (event) => {
+            const btn = event.target.closest?.('[data-reveal]');
+            if (!btn) return;
+            const input = document.getElementById(btn.dataset.reveal);
+            if (!input) return;
+            const show = input.type === 'password';
+            input.type = show ? 'text' : 'password';
+            btn.setAttribute('aria-pressed', String(show));
+            btn.title = btn.ariaLabel = i18n(show ? 'common.hide' : 'common.reveal');
+            btn.innerHTML = `<i class="bi bi-eye${show ? '-slash' : ''}"></i>`;
+        });
     },
 
     /** Which optional plugins this server has, probed once per page load.
@@ -201,9 +232,25 @@ const App = {
         if (res.status === 401) this._handleUnauthorized();
         if (!res.ok) {
             const text = await res.text();
-            throw new Error(text || `HTTP ${res.status}`);
+            throw new Error(this.errorText(text) || `HTTP ${res.status}`);
         }
         return res.json();
+    },
+
+    /** The human part of a failed response. FastAPI answers `{"detail": …}`, and
+     * throwing the raw body meant every form showed the user a JSON blob
+     * ('{"detail":"Invalid credentials: …"}' — screenshotted). Unwrapped here,
+     * once, because every caller renders err.message. `detail` is a string for
+     * an HTTPException and a list of {msg, loc} for a validation error. */
+    errorText(body) {
+        try {
+            const detail = JSON.parse(body).detail;
+            if (typeof detail === 'string') return detail;
+            if (Array.isArray(detail)) {
+                return detail.map(e => e.msg || JSON.stringify(e)).join('; ');
+            }
+        } catch (e) { /* not JSON (a proxy error page, a stack): show as it came */ }
+        return body;
     },
 
     toast(message, type = 'success') {

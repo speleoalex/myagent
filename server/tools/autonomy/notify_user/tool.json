@@ -1,6 +1,6 @@
 {
   "name": "Notify User",
-  "description": "Send a message to a person on their messaging channel (e.g. Telegram). Use it to tell someone something proactively - when you run autonomously your normal reply text is NOT delivered anywhere. To reach a person, pass 'to' with their name and optionally 'channel': the name is looked up in the address book. NEVER invent a numeric id.",
+  "description": "Send a message to an entry in the address book: a person on their messaging channel (e.g. Telegram), or a device that speaks it out loud (e.g. a voice satellite). Use it to tell someone something proactively - when you run autonomously your normal reply text is NOT delivered anywhere. To reach a recipient, pass 'to' with its name and optionally 'channel': the name is looked up in the address book. Every listed name is reachable, devices included. NEVER invent a numeric id.",
   "internal": true,
   "parameters": {
     "type": "object",
@@ -11,7 +11,7 @@
       },
       "to": {
         "type": "string",
-        "description": "Who to send it to: a person's name from the address book — pick one of the listed values when this parameter has them, otherwise write the name and the error will list who exists. \"all\" sends to every contact on that channel: use it only when you were asked to tell everyone. Omit to use the agent's configured target."
+        "description": "Who to send it to: a name from the address book — a person, or a device such as a speaker. Pick one of the listed values when this parameter has them (all of them are valid recipients), otherwise write the name and the error will list who exists. \"all\" sends to every contact on that channel: use it only when you were asked to tell everyone. Omit to use the agent's configured target."
       },
       "channel": {
         "type": "string",

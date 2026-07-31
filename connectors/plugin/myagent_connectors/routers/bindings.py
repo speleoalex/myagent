@@ -15,6 +15,7 @@ from pydantic import BaseModel
 
 from app.routers.secrets import SECRET_MASK
 
+from myagent_connectors.channels.base import Unreachable
 from myagent_connectors.channels.registry import available_types, create_connector
 from myagent_connectors.models import Binding
 from myagent_connectors.services import services
@@ -142,6 +143,11 @@ async def _verify(binding: Binding, request: Request) -> dict:
         return {"ok": True, **(await connector.verify() or {})}
     except NotImplementedError as e:
         raise HTTPException(400, str(e))
+    except Unreachable as e:
+        # Verbatim: it already names the address that was tried. Prefixing this
+        # with "Invalid credentials" is what sent a user hunting for a wrong
+        # token while the device was simply switched off.
+        raise HTTPException(400, str(e))
     except Exception as e:
         raise HTTPException(400, f"Invalid credentials: {e}")
 
@@ -163,3 +169,61 @@ async def test_binding(binding_id: str, request: Request):
     if data is None:
         raise HTTPException(404, "Binding not found")
     return await _verify(Binding(**data), request)
+
+
+# ------------------------------------------------------- device configuration
+# Some channels are a DEVICE we can configure back (the voice satellite: its
+# language, voice and microphone thresholds live in a file on the device). These
+# three routes are deliberately generic — no channel type is named, exactly as
+# in _verify: a channel either offers the methods or the route reports 501. That
+# way a second device channel needs no route of its own.
+def _device_connector(binding_id: str, request: Request, method: str):
+    svc = services(request)
+    data = svc.bindings.get(binding_id)
+    if data is None:
+        raise HTTPException(404, "Binding not found")
+    try:
+        connector = create_connector(Binding(**data), svc.core, svc.grants)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    fn = getattr(connector, method, None)
+    if fn is None:
+        raise HTTPException(501, "This channel has no device to configure")
+    return fn
+
+
+async def _device_call(fn, *args, **kwargs) -> dict:
+    """A device is a thing on a LAN: unplugged, moved, asleep. That is normal
+    operation, not a server fault, so it answers 400 with the device's own
+    message for the form to show — never a 500."""
+    try:
+        return await fn(*args, **kwargs)
+    except Exception as e:
+        raise HTTPException(400, str(e) or e.__class__.__name__)
+
+
+@router.get("/{binding_id}/device")
+async def get_device_config(binding_id: str, request: Request):
+    return await _device_call(
+        _device_connector(binding_id, request, "device_config"))
+
+
+@router.put("/{binding_id}/device")
+async def put_device_config(binding_id: str, patch: dict, request: Request):
+    """The patch is passed through as-is: the DEVICE owns the writable list
+    (its pairing fields are refused there, next to the file), so duplicating it
+    here would be a second definition free to drift from the first."""
+    return await _device_call(
+        _device_connector(binding_id, request, "device_config_update"), patch)
+
+
+class VoiceReq(BaseModel):
+    name: str
+    use: bool = True    # speak with it once installed — the reason to install
+
+
+@router.post("/{binding_id}/device/voices")
+async def install_device_voice(binding_id: str, req: VoiceReq, request: Request):
+    return await _device_call(
+        _device_connector(binding_id, request, "install_voice"),
+        req.name, req.use)

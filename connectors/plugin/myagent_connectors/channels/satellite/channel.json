@@ -14,5 +14,9 @@
   "handle": {
     "label": "Satellite binding id",
     "example": "cucina"
+  },
+  "device": {
+    "config": true,
+    "voices": true
   }
 }

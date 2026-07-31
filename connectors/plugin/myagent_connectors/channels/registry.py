@@ -4,7 +4,8 @@ A channel is a directory beside this file holding a ``channel.json`` manifest an
 the module it names:
 
     channels/<type>/
-        channel.json     {"type","label","module","class","hints":{…},"handle":{…},"url":{…}}
+        channel.json     {"type","label","module","class","hints":{…},"handle":{…},
+                          "url":{…},"device":{…}}
         channel.py       a BaseConnector subclass
         requirements.txt optional, installed by connectors/install.sh
 
@@ -54,6 +55,11 @@ class Channel:
     # Shape of Binding.url for channels where WE call the device (label +
     # example, like `handle`). Missing/empty = the UI hides the URL field.
     url: dict = field(default_factory=dict)
+    # Declares that the far end is a DEVICE holding its own settings, which
+    # /bindings/{id}/device can read and write ({"config": true, "voices":
+    # true}). A flag rather than a form schema: the UI renders whatever the
+    # device's own answer contains, so no channel type is named anywhere.
+    device: dict = field(default_factory=dict)
     connector: type[BaseConnector] | None = None
     error: str = ""
 
@@ -72,6 +78,7 @@ class Channel:
             # None, not {}: the UI gates the URL field on this being truthy,
             # and an empty JS object is truthy.
             "url": self.url or None,
+            "device": self.device or None,
             "loaded": self.loaded,
             "error": self.error,
         }
@@ -99,6 +106,7 @@ def _load_one(directory: Path) -> Channel:
         hints=meta.get("hints") or {},
         handle=meta.get("handle") or {},
         url=meta.get("url") or {},
+        device=meta.get("device") or {},
     )
     try:
         entry = directory / (meta.get("module") or "channel.py")

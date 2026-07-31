@@ -1,11 +1,12 @@
 # MyAgent voice satellite — user unit (installed by install.sh, which
 # replaces @DIR@ with the folder's absolute path).
 #
-# As a service there is no terminal, so the satellite runs in speaker-only
-# mode: it announces what agents send to /say (notify_user), while
-# push-to-talk needs an interactive run (.venv/bin/python satellite.py).
+# As a service there is no terminal, so there is no Enter to press — but the
+# microphone is NOT lost: the device's own page (http://<device>:8899/) has a
+# Listen button that drives the same capture, plus a text box and the settings.
+# This is therefore the normal way to run it, including on a headless Pi.
 [Unit]
-Description=MyAgent voice satellite (speaker mode)
+Description=MyAgent voice satellite (page, speaker and microphone)
 After=network-online.target sound.target
 Wants=network-online.target
 

@@ -194,6 +194,81 @@ class Connectors:
                     f"{', '.join(skipped[:MAX_LISTED])}")
         return out, "", note
 
+    def _recipient(self, binding: Binding, contact: Contact) -> Recipient:
+        return Recipient(binding.id, contact.handle_for(binding.type),
+                         f"{contact.name or contact.id} "
+                         f"on {self._channel_label(binding.type)}")
+
+    def _reach(self, contact: Contact, channel_type: str,
+               binding_id: str) -> tuple[list[Recipient], str, str]:
+        """Which bot can actually reach this contact.
+
+        The bot is picked AFTER the person, never before: a contact's handles are
+        the statement of which channels they exist on, and an unrelated default
+        bot must not decide that for them. Picking first is what made *"greet
+        Notebook HP"* fail with "has no Telegram handle" — the agent's configured
+        ``notify_binding_id`` (a Telegram bot) had already fixed the channel, so
+        the satellite the contact actually lives on was never considered.
+
+        ``binding_id`` therefore ranks as a preference, not a constraint: a name
+        the caller chose is the intent, the transport is a detail. When the asked
+        bot cannot reach that name and exactly one other can, it goes through the
+        other and SAYS SO in the note — the alternative is a hard failure, and a
+        silent substitution is exactly what the note exists to prevent.
+        """
+        who = contact.name or contact.id
+        candidates = [b for b in self._bindings_of(channel_type)
+                      if contact.handle_for(b.type)]
+        # WITHIN one channel, a handle that IS a binding id names its own bot, so
+        # there is nothing left to disambiguate. That is how device channels work
+        # — one binding is one device and the address book stores exactly that id
+        # (satellite: chat_id ≡ binding id) — and filtering by TYPE alone left
+        # both devices as candidates, so with two satellites every device
+        # notification failed as "ambiguous". Inert for a chat channel, where a
+        # handle is a chat id that cannot collide with a binding id.
+        #
+        # Per type, never across: a contact on Telegram AND on a speaker is a
+        # genuine question ("which one?"), and answering it by coin flip is what
+        # the ambiguity error below exists to prevent.
+        by_type: dict[str, list[Binding]] = {}
+        for b in candidates:
+            by_type.setdefault(b.type, []).append(b)
+        candidates = []
+        for channel, bindings in by_type.items():
+            named = [b for b in bindings if b.id == contact.handle_for(channel)]
+            candidates += named or bindings
+        if not candidates:
+            if channel_type:
+                # Deliberately distinct from "not found": the fix is to add a
+                # handle, not to try another name.
+                return [], (f"{who} has no {self._channel_label(channel_type)} "
+                            f"handle. Add one in the address book, or pass "
+                            f"chat_id explicitly"), ""
+            if not contact.handles:
+                return [], (f"{who} has no messaging handle in the address book. "
+                            f"Add one, or pass chat_id explicitly"), ""
+            listed = ", ".join(self._channel_label(t) for t in sorted(contact.handles))
+            return [], (f"no enabled bot can reach {who}, who is only on: {listed}. "
+                        f"Enable a bot there, or pass chat_id explicitly"), ""
+
+        if binding_id:
+            exact = next((b for b in candidates if b.id == binding_id), None)
+            if exact:
+                return [self._recipient(exact, contact)], "", ""
+            if len(candidates) == 1:
+                chosen = candidates[0]
+                return [self._recipient(chosen, contact)], "", (
+                    f"'{binding_id}' has no handle for {who}, so it went through "
+                    f"'{chosen.id}' ({self._channel_label(chosen.type)}) instead")
+            listed = ", ".join(f"{b.id} ({b.type})" for b in candidates[:MAX_LISTED])
+            return [], (f"'{binding_id}' cannot reach {who}, but others can — "
+                        f"pass binding_id to choose: {listed}"), ""
+        if len(candidates) > 1:
+            listed = ", ".join(f"{b.id} ({b.type})" for b in candidates[:MAX_LISTED])
+            return [], (f"several bots could reach {who} — pass binding_id or "
+                        f"channel to choose: {listed}"), ""
+        return [self._recipient(candidates[0], contact)], "", ""
+
     def resolve_recipients(self, name: str = "", channel: str = "",
                            binding_id: str = "") -> tuple[list[Recipient], str, str]:
         """Turn a person's name (and optionally a channel) into destinations.
@@ -203,6 +278,10 @@ class Connectors:
         caller's next move is to pick one. Nothing raises — an exception here
         would surface as a tool crash instead of a correctable answer. The note is
         for a send that only partly matched the ask — see ``_broadcast``.
+
+        A named contact is resolved BEFORE any bot is chosen (``_reach``); the
+        paths that have no name to go on — a broadcast, a raw id, nothing at all —
+        still need a bot up front, and pick one with ``_pick_binding``.
         """
         channel_type = ""
         if channel:
@@ -211,48 +290,40 @@ class Connectors:
                 return [], (f"unknown channel '{channel}'. Available: "
                             f"{', '.join(self.channel_labels()) or 'none'}"), ""
 
-        binding, error = self._pick_binding(channel_type, binding_id)
-        if binding is None:
-            return [], error, ""
-
         target = (name or "").strip()
-        if not target:
-            return [], ("no recipient. Pass 'to' with a name from the address book "
-                        f"({', '.join(self.contact_names()[:MAX_LISTED]) or 'empty'}) "
-                        "or an explicit chat_id"), ""
-
         contacts = self._contacts()
 
         # "everyone". Only when no contact answers to that name: explicit data
         # beats a reserved word, so an address book holding an "All" (or an
         # "Allison", which prefix-matches) keeps addressing the person.
-        if (target.lower() in BROADCAST_WORDS
-                and not any(_name_matches(target, c.name or c.id) for c in contacts)):
-            return self._broadcast(binding, contacts)
+        is_broadcast = (target.lower() in BROADCAST_WORDS
+                        and not any(_name_matches(target, c.name or c.id)
+                                    for c in contacts))
 
         # An id or @username goes through untouched: the address book is a
         # convenience, not a gate.
-        if _looks_like_handle(target):
-            return [Recipient(binding.id, target, target)], "", ""
+        if target and not is_broadcast and not _looks_like_handle(target):
+            matches = [c for c in contacts if _name_matches(target, c.name or c.id)]
+            if not matches:
+                known = (", ".join(self.contact_names()[:MAX_LISTED])
+                         or "the address book is empty")
+                return [], f"no contact matches '{target}'. Known contacts: {known}", ""
+            if len(matches) > 1:
+                listed = ", ".join((c.name or c.id) for c in matches[:MAX_LISTED])
+                return [], (f"'{target}' matches several contacts — be more "
+                            f"specific: {listed}"), ""
+            return self._reach(matches[0], channel_type, binding_id)
 
-        matches = [c for c in contacts if _name_matches(target, c.name or c.id)]
-        if not matches:
-            known = ", ".join(self.contact_names()[:MAX_LISTED]) or "the address book is empty"
-            return [], f"no contact matches '{target}'. Known contacts: {known}", ""
-        if len(matches) > 1:
-            listed = ", ".join((c.name or c.id) for c in matches[:MAX_LISTED])
-            return [], f"'{target}' matches several contacts — be more specific: {listed}", ""
-
-        contact = matches[0]
-        label = self._channel_label(binding.type)
-        handle = contact.handle_for(binding.type)
-        if not handle:
-            # Deliberately distinct from "not found": the fix is to add a handle,
-            # not to try another name.
-            return [], (f"{contact.name or contact.id} has no {label} handle. "
-                        f"Add one in the address book, or pass chat_id explicitly"), ""
-        return [Recipient(binding.id, handle,
-                          f"{contact.name or contact.id} on {label}")], "", ""
+        binding, error = self._pick_binding(channel_type, binding_id)
+        if binding is None:
+            return [], error, ""
+        if not target:
+            return [], ("no recipient. Pass 'to' with a name from the address book "
+                        f"({', '.join(self.contact_names()[:MAX_LISTED]) or 'empty'}) "
+                        "or an explicit chat_id"), ""
+        if is_broadcast:
+            return self._broadcast(binding, contacts)
+        return [Recipient(binding.id, target, target)], "", ""
 
 
 def services(request: Request) -> Connectors:

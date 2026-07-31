@@ -38,6 +38,12 @@ class InboundReq(BaseModel):
     audio_b64: str = ""
     filename: str = "speech.wav"   # extension drives the transcoder
     sender_name: str = ""          # who spoke, when the device knows
+    # What is spoken at that device, e.g. "it". Sent per request rather than
+    # stored on the binding because the device already holds it (in its own
+    # config.json, which is where it is edited) and mirroring it here would be a
+    # second copy free to disagree with the one the microphone actually uses.
+    # Empty = let whisper detect, which is what happened before this existed.
+    language: str = ""
 
 
 def _authorize(request: Request, binding: Binding) -> None:
@@ -79,7 +85,8 @@ async def inbound(binding_id: str, req: InboundReq, request: Request):
         if len(content) > MAX_AUDIO:
             raise HTTPException(400, "audio too large")
         try:
-            text = await svc.core.transcribe(content, req.filename)
+            text = await svc.core.transcribe(content, req.filename,
+                                             req.language.strip()[:8] or None)
         except Exception as e:
             # The device shows/logs this; keep it readable and specific.
             raise HTTPException(502, f"transcription failed: {e}")

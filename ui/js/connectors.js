@@ -247,6 +247,8 @@ const ConnectorsPage = {
                     <div class="form-text" id="url-hint">${i18n(this._hint('url', 'connectors.urlHint', b.type))}</div>
                 </div>
 
+                <div class="mb-4 d-none" id="block-device"></div>
+
                 <div class="row g-3 mb-3">
                     <div class="col-12 col-md-6">
                         <label class="form-label" for="f-access">${i18n('connectors.access')}</label>
@@ -320,12 +322,215 @@ const ConnectorsPage = {
             const uh = document.getElementById('url-hint');
             if (uh) uh.textContent = i18n(this._hint('url', 'connectors.urlHint'));
             this._renderChips();
+            this._loadDevice(isEdit ? b.id : '');
         };
         document.getElementById('f-allowed').oninput = () => this._renderChips();
         document.getElementById('btn-test').onclick = (e) => this._testToken(e.currentTarget, isEdit, b.id);
         document.getElementById('binding-form').onsubmit = (e) => this._save(e, isEdit, bindingId);
         const del = document.getElementById('btn-delete');
         if (del) del.onclick = () => this._delete(bindingId);
+        this._loadDevice(isEdit ? b.id : '');
+    },
+
+    // ------------------------------------------------------------- device box
+    // Settings that live ON the far end, for channels whose manifest declares
+    // `device` (the voice satellite). Its own file remains the source of truth
+    // and stays hand-editable — this is a second door onto it, for the values
+    // that can only be found by trial (the silence threshold of THAT room).
+    //
+    // Nothing here names a channel type, and nothing hardcodes the field list:
+    // the box renders what the device answered. A device that grows a knob
+    // grows a control, and one that has no microphone shows no thresholds.
+    async _loadDevice(savedId) {
+        const box = document.getElementById('block-device');
+        if (!box) return;
+        clearTimeout(this._devicePoll);
+        const spec = this._channel().device;
+        box.classList.toggle('d-none', !spec?.config);
+        if (!spec?.config) return;
+        if (!savedId) {
+            // The device is reached with the STORED token, which does not exist
+            // before the first save. Say so instead of failing a fetch.
+            box.innerHTML = `<div class="border rounded p-3">
+                <div class="fw-semibold mb-1">${i18n('connectors.deviceTitle')}</div>
+                <div class="form-text">${i18n('connectors.deviceSaveFirst')}</div></div>`;
+            return;
+        }
+        box.innerHTML = `<div class="border rounded p-3">
+            <div class="fw-semibold mb-1">${i18n('connectors.deviceTitle')}</div>
+            <div class="form-text"><span class="spinner-border spinner-border-sm"></span>
+                ${i18n('connectors.deviceLoading')}</div></div>`;
+        try {
+            this._device = await App.api('GET', `/connectors/bindings/${encodeURIComponent(savedId)}/device`);
+        } catch (err) {
+            // Off, moved, asleep: normal for a device, so it is a state with a
+            // retry, never an error banner over the whole form.
+            box.innerHTML = `<div class="border rounded p-3">
+                <div class="fw-semibold mb-1">${i18n('connectors.deviceTitle')}</div>
+                <div class="alert alert-warning mb-2">${App.esc(err.message)}</div>
+                <button type="button" class="btn btn-sm btn-outline-secondary" id="btn-device-retry">
+                    <i class="bi bi-arrow-clockwise"></i> ${i18n('connectors.deviceRetry')}</button></div>`;
+            document.getElementById('btn-device-retry').onclick = () => this._loadDevice(savedId);
+            return;
+        }
+        this._renderDevice(savedId);
+    },
+
+    _renderDevice(savedId) {
+        const box = document.getElementById('block-device');
+        const d = this._device || {};
+        const info = d.device || {};
+        const spec = this._channel().device || {};
+        const install = d.voice_install || {};
+        const busy = install.state === 'downloading';
+        const voices = info.voices || [];
+        // The current voice may be a path (voices/x.onnx) while the list holds
+        // bare names: match on the stem so the select shows what is in use.
+        const stem = p => String(p || '').split('/').pop().replace(/\.onnx$/, '');
+        const current = stem(d.voice);
+        // The device serves its own page (type / Talk / settings) on the same
+        // address we reach it at. Read from the FORM field, not from the stored
+        // binding: someone editing the URL is about to open the new one.
+        const deviceUrl = (document.getElementById('f-url')?.value || '').trim();
+        const audio = d.audio || {};
+        box.innerHTML = `<div class="border rounded p-3">
+            <div class="d-flex align-items-center mb-2">
+                <span class="fw-semibold">${i18n('connectors.deviceTitle')}</span>
+                <span class="badge bg-${info.mic ? 'success' : 'secondary'} ms-2">
+                    ${i18n(info.mic ? 'connectors.deviceMic' : 'connectors.deviceNoMic')}</span>
+                <span class="badge bg-${info.tts ? 'success' : 'warning'} ms-1">
+                    ${i18n(info.tts ? 'connectors.deviceTts' : 'connectors.deviceNoTts')}</span>
+                ${deviceUrl ? `<a class="btn btn-sm btn-outline-secondary ms-auto"
+                        href="${App.escAttr(deviceUrl)}" target="_blank" rel="noopener">
+                    <i class="bi bi-box-arrow-up-right"></i> ${i18n('connectors.deviceOpen')}</a>` : ''}
+                <button type="button" class="btn btn-sm btn-outline-secondary ${deviceUrl ? 'ms-1' : 'ms-auto'}"
+                        id="btn-device-retry" title="${App.escAttr(i18n('connectors.deviceRetry'))}">
+                    <i class="bi bi-arrow-clockwise"></i></button>
+            </div>
+            <div class="row g-3">
+                ${'language' in d ? `<div class="col-12 col-md-6">
+                    <label class="form-label" for="d-language">${i18n('connectors.deviceLanguage')}</label>
+                    <input type="text" class="form-control" id="d-language" list="d-languages"
+                           value="${App.escAttr(d.language || '')}" placeholder="it">
+                    <datalist id="d-languages">
+                        ${['it', 'en', 'fr', 'de', 'es', 'pt', 'nl'].map(c => `<option value="${c}">`).join('')}
+                    </datalist>
+                    <div class="form-text">${i18n('connectors.deviceLanguageHint')}</div>
+                </div>` : ''}
+                ${'voice' in d ? `<div class="col-12 col-md-6">
+                    <label class="form-label" for="d-voice">${i18n('connectors.deviceVoice')}</label>
+                    <select class="form-select" id="d-voice">
+                        ${voices.map(v => `<option value="voices/${App.escAttr(v)}.onnx"
+                            ${v === current ? 'selected' : ''}>${App.esc(v)}</option>`).join('')}
+                        ${(!voices.length || !voices.includes(current)) ? `<option value="${App.escAttr(d.voice || '')}" selected>
+                            ${App.esc(d.voice || i18n('connectors.deviceNoVoice'))}</option>` : ''}
+                    </select>
+                    <div class="form-text">${i18n('connectors.deviceVoiceHint')}</div>
+                </div>` : ''}
+            </div>
+            ${Object.keys(audio).length ? `<div class="row g-3 mt-1">
+                ${Object.entries(audio).map(([k, v]) => `<div class="col-6 col-md-3">
+                    <label class="form-label small" for="d-audio-${k}">${App.esc(this._audioLabel(k))}</label>
+                    <input type="number" class="form-control form-control-sm" id="d-audio-${k}"
+                           data-audio="${App.escAttr(k)}" value="${App.escAttr(v)}">
+                </div>`).join('')}
+            </div>` : ''}
+            ${spec.voices ? `<div class="mt-3">
+                <label class="form-label" for="d-newvoice">${i18n('connectors.deviceInstallVoice')}</label>
+                <div class="input-group">
+                    <input type="text" class="form-control font-monospace" id="d-newvoice" list="d-voicelist"
+                           placeholder="it_IT-paola-medium" ${busy ? 'disabled' : ''}>
+                    <button type="button" class="btn btn-outline-info" id="btn-device-voice" ${busy ? 'disabled' : ''}>
+                        <i class="bi bi-download"></i> ${i18n('connectors.deviceInstall')}</button>
+                </div>
+                <datalist id="d-voicelist">
+                    ${['it_IT-paola-medium', 'it_IT-riccardo-x_low', 'en_US-lessac-medium',
+                       'en_GB-alba-medium', 'fr_FR-siwis-medium', 'de_DE-thorsten-medium',
+                       'es_ES-davefx-medium'].map(v => `<option value="${v}">`).join('')}
+                </datalist>
+                <div class="form-text" id="d-voice-state">${this._installText(install)}</div>
+            </div>` : ''}
+            <div class="d-flex flex-wrap gap-2 align-items-center mt-3">
+                <button type="button" class="btn btn-sm btn-primary" id="btn-device-apply">
+                    ${i18n('connectors.deviceApply')}</button>
+                <span class="form-text mb-0" id="d-apply-state"></span>
+            </div>
+            <div class="form-text mt-2">${i18n('connectors.deviceFile', { path: App.esc(info.config_file || '') })}</div>
+        </div>`;
+        document.getElementById('btn-device-retry').onclick = () => this._loadDevice(savedId);
+        document.getElementById('btn-device-apply').onclick = (e) => this._applyDevice(e.currentTarget, savedId);
+        const vb = document.getElementById('btn-device-voice');
+        if (vb) vb.onclick = (e) => this._installVoice(e.currentTarget, savedId);
+        // A voice is tens of MB: the device downloads in the background and
+        // publishes the state, so the box follows it instead of blocking.
+        if (busy) this._devicePoll = setTimeout(() => this._loadDevice(savedId), 2500);
+    },
+
+    /** A knob's label, falling back to its own name. The field list comes from
+     * the device, so a firmware that adds one must not render "connectors.
+     * audio.newthing" — I18n.t() returns the key when there is no translation. */
+    _audioLabel(key) {
+        const label = i18n('connectors.audio.' + key);
+        return label.startsWith('connectors.') ? key : label;
+    },
+
+    _installText(install) {
+        if (install.state === 'downloading') return i18n('connectors.deviceDownloading', { name: App.esc(install.name || '') });
+        if (install.state === 'error') return `<span class="text-danger">${App.esc(install.error || 'error')}</span>`;
+        if (install.state === 'done') return i18n('connectors.deviceDownloaded', { name: App.esc(install.name || '') });
+        return i18n('connectors.deviceInstallHint');
+    },
+
+    /** What the form is asking the device to become. Sent whole rather than as a
+     * diff: the DEVICE reports which fields actually changed, and duplicating
+     * that comparison here would be a second opinion free to disagree. */
+    _readDevice() {
+        const patch = {};
+        const lang = document.getElementById('d-language');
+        if (lang) patch.language = lang.value.trim();
+        const voice = document.getElementById('d-voice');
+        if (voice) patch.voice = voice.value;
+        const audio = {};
+        document.querySelectorAll('[data-audio]').forEach(el => {
+            const n = Number(el.value);
+            if (Number.isFinite(n)) audio[el.dataset.audio] = n;
+        });
+        if (Object.keys(audio).length) patch.audio = audio;
+        return patch;
+    },
+
+    async _applyDevice(btn, savedId) {
+        const out = document.getElementById('d-apply-state');
+        btn.disabled = true;
+        try {
+            const res = await App.api('PUT', `/connectors/bindings/${encodeURIComponent(savedId)}/device`,
+                                      this._readDevice());
+            this._device = res;
+            const changed = res.changed || [];
+            out.innerHTML = changed.length
+                ? `<span class="text-success">${i18n('connectors.deviceSaved', { fields: App.esc(changed.join(', ')) })}</span>`
+                : `<span class="text-secondary">${i18n('connectors.deviceUnchanged')}</span>`;
+        } catch (err) {
+            out.innerHTML = `<span class="text-danger">${App.esc(err.message)}</span>`;
+        } finally {
+            btn.disabled = false;
+        }
+    },
+
+    async _installVoice(btn, savedId) {
+        const name = document.getElementById('d-newvoice').value.trim();
+        if (!name) return;
+        const out = document.getElementById('d-voice-state');
+        btn.disabled = true;
+        try {
+            const res = await App.api('POST', `/connectors/bindings/${encodeURIComponent(savedId)}/device/voices`,
+                                      { name, use: true });
+            out.innerHTML = this._installText(res.voice_install || {});
+            this._devicePoll = setTimeout(() => this._loadDevice(savedId), 2500);
+        } catch (err) {
+            out.innerHTML = `<span class="text-danger">${App.esc(err.message)}</span>`;
+            btn.disabled = false;
+        }
     },
 
     _syncAccess() {

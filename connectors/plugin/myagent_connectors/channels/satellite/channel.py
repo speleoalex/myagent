@@ -21,7 +21,7 @@ from datetime import datetime
 
 import httpx
 
-from myagent_connectors.channels.base import BaseConnector, redact
+from myagent_connectors.channels.base import BaseConnector, Unreachable, redact
 
 log = logging.getLogger("connectors.satellite")
 
@@ -50,6 +50,15 @@ class SatelliteConnector(BaseConnector):
 
     def _auth(self) -> dict:
         return {"Authorization": f"Bearer {self.binding.token}"}
+
+    def _unreachable(self, e: Exception) -> Unreachable:
+        """A device on a LAN is off, moved or asleep more often than it is
+        misconfigured, so the message leads with the address that was tried —
+        httpx's own text ("All connection attempts failed") names neither the
+        host nor the port."""
+        detail = redact(str(e), self.binding.token) or type(e).__name__
+        return Unreachable(f"cannot reach the device at {self.binding.url}: "
+                           f"{detail}")
 
     async def send(self, chat_id, text: str) -> bool:
         """Speak ``text`` on the device (notify_user's delivery path).
@@ -88,6 +97,8 @@ class SatelliteConnector(BaseConnector):
             async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
                 r = await client.get(self._device_url("/health"),
                                      headers=self._auth())
+        except httpx.TransportError as e:
+            raise self._unreachable(e)
         except Exception as e:
             raise RuntimeError(redact(str(e), self.binding.token))
         if r.status_code != 200:
@@ -97,6 +108,57 @@ class SatelliteConnector(BaseConnector):
         except ValueError:
             data = {}
         return {"name": (data or {}).get("name", "")}
+
+    # ------------------------------------------------- remote configuration
+    # A voice device has settings only it can know are wrong — the silence
+    # threshold against this room, which voice, which language is spoken here —
+    # and they used to be reachable only by ssh'ing to the device and editing
+    # config.json. These three methods put that file behind the binding form.
+    # They are a second door onto it, not a replacement: the device reads the
+    # same file at startup and runs on it with no server in sight.
+    async def device_config(self) -> dict:
+        """The device's current settings (GET /config). The device never
+        returns the shared key, so nothing here needs masking."""
+        return await self._device_call("GET", "/config")
+
+    async def device_config_update(self, patch: dict) -> dict:
+        """Write settings to the device (PUT /config). Only what the device
+        declares writable is applied — it enforces that, not us: the pairing
+        fields are refused there, where the file is."""
+        return await self._device_call("PUT", "/config", patch)
+
+    async def install_voice(self, name: str, use: bool = True) -> dict:
+        """Ask the device to download a Piper voice. Returns as soon as the
+        download STARTS (a voice is tens of MB): the caller polls
+        ``device_config()['voice_install']`` for the outcome."""
+        return await self._device_call("POST", "/voices/install",
+                                      {"name": name, "use": use})
+
+    async def _device_call(self, method: str, path: str,
+                           payload: dict | None = None) -> dict:
+        """One place for the device HTTP calls, so every one of them fails the
+        same legible way. Raises RuntimeError with the device's own message —
+        the caller is a router that turns it into a 400 for a form to show."""
+        if not self.binding.url:
+            raise RuntimeError("no device URL configured")
+        try:
+            async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+                r = await client.request(method, self._device_url(path),
+                                         json=payload, headers=self._auth())
+        except httpx.TransportError as e:
+            raise self._unreachable(e)
+        except Exception as e:
+            # The URL carries no secret, but the Authorization header does and
+            # httpx errors can quote the request: redact defensively.
+            raise RuntimeError(redact(str(e), self.binding.token))
+        try:
+            data = r.json()
+        except ValueError:
+            data = {}
+        if r.status_code >= 400:
+            detail = (data or {}).get("detail") or f"HTTP {r.status_code}"
+            raise RuntimeError(f"{path} answered {r.status_code}: {detail}")
+        return data or {}
 
     # --------------------------------------------------------------- inbound
     async def ask(self, text: str, sender_name: str = "") -> str:

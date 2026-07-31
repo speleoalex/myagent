@@ -172,7 +172,80 @@ CHANNEL_ROTATE_BYTES = int(
 # "api_key" query parameter (usable in plain GET links and by clients that
 # cannot set headers). The web UI accepts ?api_key=... in the page URL once
 # and stores it locally.
-API_KEY = os.environ.get("MYAGENT_API_KEY", "")
+#
+# TWO sources, because they answer different needs: MYAGENT_API_KEY is the
+# deployment-level pin (systemd drop-in, container env, read-only install) and
+# CONFIG_DIR/api_key is the runtime one, so the key can be created, rotated or
+# removed from the UI — no sudo, no restart (a restart would kill in-flight
+# turns), and it survives redeploys like the rest of CONFIG_DIR. The env var
+# WINS when set: whoever launched the process must be able to fix the
+# credential, and an API call that could overwrite it would be a way around
+# that decision — hence api_key_status()["editable"], which the UI honors by
+# showing the field read-only instead of offering a button that would 409.
+API_KEY_ENV = os.environ.get("MYAGENT_API_KEY", "")
+API_KEY_FILE = CONFIG_DIR / "api_key"
+
+# (mtime_ns, key) of the last read file, so the gate can resolve the key on
+# EVERY request without a read per request. Invalidated explicitly by
+# set_api_key(): mtime has finite resolution and two rotations inside one tick
+# would otherwise keep serving the old key.
+_api_key_cache: tuple[int, str] | None = None
+
+
+def get_api_key() -> str:
+    """The key the gate must compare against, right now ("" = no auth)."""
+    global _api_key_cache
+    if API_KEY_ENV:
+        return API_KEY_ENV
+    try:
+        mtime = API_KEY_FILE.stat().st_mtime_ns
+    except OSError:
+        _api_key_cache = None
+        return ""
+    cached = _api_key_cache
+    if cached is not None and cached[0] == mtime:
+        return cached[1]
+    try:
+        key = API_KEY_FILE.read_text(encoding="utf-8").strip()
+    except OSError as e:
+        # Present but unreadable: refusing every request would lock the user out
+        # of their own server with no way back through the UI, so fail open and
+        # say why (the same choice load_settings() makes for a corrupt file).
+        logging.getLogger(__name__).warning(
+            "api_key file unreadable (%s): API left unauthenticated", e)
+        return ""
+    _api_key_cache = (mtime, key)
+    return key
+
+
+def set_api_key(key: str) -> str:
+    """Store (or, with an empty key, remove) the runtime API key. Returns it."""
+    global _api_key_cache
+    key = (key or "").strip()
+    ensure_config_dir()
+    if key:
+        # 0600 from the moment it exists: O_CREAT's mode only applies when the
+        # file is created, so chmod covers a pre-existing looser one too.
+        fd = os.open(API_KEY_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(key + "\n")
+        os.chmod(API_KEY_FILE, 0o600)
+    else:
+        API_KEY_FILE.unlink(missing_ok=True)
+    _api_key_cache = None
+    return key
+
+
+def api_key_status() -> dict:
+    """What the UI needs to render the key box: value, origin, editability."""
+    key = get_api_key()
+    return {
+        "key": key,
+        "configured": bool(key),
+        "source": "env" if API_KEY_ENV else ("file" if key else None),
+        "editable": not API_KEY_ENV,
+        "env_var": "MYAGENT_API_KEY",
+    }
 
 # Browser origins allowed to call the API cross-origin (CORS), for when the
 # static UI is hosted by another web server (Apache, nginx — it is plain HTML)

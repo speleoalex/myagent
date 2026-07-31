@@ -78,7 +78,8 @@ import json, sys
 d, name, key, voice = sys.argv[1:5]
 cfg = json.loads(open(f"{d}/config.example.json").read())
 cfg.update({"name": name, "key": key,
-            "piper_voice": f"voices/{voice}.onnx",
+            "voice": f"voices/{voice}.onnx",
+            "language": voice.split("_", 1)[0],   # it_IT-paola-medium -> it
             "binding_id": name.lower()})
 open(f"{d}/config.json", "w").write(json.dumps(cfg, indent=2) + "\n")
 EOF
@@ -94,7 +95,7 @@ if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/d
     sed "s|@DIR@|$DIR|g" "$DIR/myagent-satellite.service" \
         > "$HOME/.config/systemd/user/myagent-satellite.service"
     systemctl --user daemon-reload
-    echo "Installed user unit. Speaker mode (announcements only):"
+    echo "Installed user unit (page + speaker + microphone):"
     echo "    systemctl --user enable --now myagent-satellite"
     echo "On a headless Pi, keep it running after logout:"
     echo "    sudo loginctl enable-linger $USER"
@@ -120,7 +121,11 @@ Done. Next steps:
 3. Optional: add an address-book contact with satellite handle "$BID"
    so agents can notify this device by name.
 
-Talk (push-to-talk, interactive):   $DIR/.venv/bin/python $DIR/satellite.py
-Speaker only (service):             systemctl --user enable --now myagent-satellite
+Open the device's own page (type, Listen, settings — the key is prefilled once):
+
+    http://$IP:8899/?key=$KEY_NOW
+
+Talk from a terminal instead:       $DIR/.venv/bin/python $DIR/satellite.py
+Run it as a service:                systemctl --user enable --now myagent-satellite
 Test from the server:               curl http://$IP:8899/health
 EOM

@@ -107,24 +107,29 @@ app = FastAPI(title="MyAgent", version="0.1.0", lifespan=lifespan)
 # handoff, never an auth exemption.
 app.state.self_authenticated_prefixes = set()
 
-# Optional API-key gate (MYAGENT_API_KEY). When set, it protects the API and
-# the OpenAPI docs; the static UI stays public (it holds no data — it prompts
-# for the key on the first 401). The key is accepted as a Bearer header or as
-# an ?api_key= query parameter (for plain GET links and header-less clients).
-if config.API_KEY:
-    @app.middleware("http")
-    async def require_api_key(request: Request, call_next):
-        path = request.url.path
+# Optional API-key gate. When a key is set, it protects the API and the OpenAPI
+# docs; the static UI stays public (it holds no data — it prompts for the key on
+# the first 401). The key is accepted as a Bearer header or as an ?api_key=
+# query parameter (for plain GET links and header-less clients).
+#
+# Registered UNCONDITIONALLY, and the key is resolved per request
+# (config.get_api_key(), mtime-cached): the key can be created, rotated or
+# removed at runtime from Settings, and middleware cannot be added once the app
+# is serving. No key = every request passes, i.e. today's open localhost install.
+@app.middleware("http")
+async def require_api_key(request: Request, call_next):
+    path = request.url.path
+    if path.startswith("/api/") or path in ("/docs", "/redoc", "/openapi.json"):
         self_auth = getattr(app.state, "self_authenticated_prefixes", ())
-        if any(path.startswith(p) for p in self_auth):
-            return await call_next(request)
-        if path.startswith("/api/") or path in ("/docs", "/redoc", "/openapi.json"):
-            auth = request.headers.get("authorization", "")
-            candidate = auth[7:] if auth.lower().startswith("bearer ") else \
-                request.query_params.get("api_key", "")
-            if not hmac.compare_digest(candidate.encode(), config.API_KEY.encode()):
-                return JSONResponse({"detail": "Invalid or missing API key"}, status_code=401)
-        return await call_next(request)
+        if not any(path.startswith(p) for p in self_auth):
+            key = config.get_api_key()
+            if key:
+                auth = request.headers.get("authorization", "")
+                candidate = auth[7:] if auth.lower().startswith("bearer ") else \
+                    request.query_params.get("api_key", "")
+                if not hmac.compare_digest(candidate.encode(), key.encode()):
+                    return JSONResponse({"detail": "Invalid or missing API key"}, status_code=401)
+    return await call_next(request)
 
 # Optional CORS consent (MYAGENT_CORS_ORIGINS) for a UI hosted off this server:
 # the frontend is static HTML, so Apache/nginx can carry it and point back here

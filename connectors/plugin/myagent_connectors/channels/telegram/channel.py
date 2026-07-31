@@ -16,7 +16,8 @@ from datetime import datetime
 import httpx
 
 from myagent_connectors import config
-from myagent_connectors.channels.base import BaseConnector, redact
+from myagent_connectors.channels.base import (BaseConnector, Unreachable,
+                                             redact)
 
 log = logging.getLogger("connectors.telegram")
 
@@ -102,7 +103,14 @@ class TelegramConnector(BaseConnector):
 
     async def verify(self) -> dict:
         """The shared 'test these credentials' hook: getMe, projected for the UI."""
-        me = await self.get_me()
+        try:
+            me = await self.get_me()
+        except httpx.TransportError as e:
+            # No network is not a bad token. Reframed HERE and not in get_me():
+            # start()'s boot-time retry catches httpx.TransportError by type,
+            # and a device that boots before the WiFi depends on it.
+            raise Unreachable(f"cannot reach Telegram: "
+                              f"{redact(str(e), self.binding.token) or type(e).__name__}")
         return {"bot": me.get("username"), "name": me.get("first_name")}
 
     async def get_me(self) -> dict:

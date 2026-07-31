@@ -21,6 +21,18 @@ log = logging.getLogger("connectors.channel")
 _UNSAFE = re.compile(r"[^A-Za-z0-9._-]")
 
 
+class Unreachable(RuntimeError):
+    """The far end could not be contacted at all.
+
+    A network fact, not a credential one, and worth its own type because the
+    caller renders it: a failed connection used to surface as *"Invalid
+    credentials: All connection attempts failed"* in the bot form — which sent
+    the reader looking for a wrong token while the real answer was that the
+    device was switched off. Whoever raises this has already put the address in
+    the message, so the router shows it verbatim.
+    """
+
+
 def _safe_session_id(prefix: str, chat_id) -> str:
     """Build a myagent-safe session key from a prefix and an external chat id.
 

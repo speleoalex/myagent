@@ -349,8 +349,11 @@ const ModelsPage = {
                         </div>
                         <div class="mb-3" id="api-key-group" ${model.provider === 'openai' ? '' : 'style="display:none"'}>
                             <label class="form-label">${i18n('models.apiKey')}</label>
-                            <input type="password" class="form-control" id="f-apikey" value="${keyInitial}" autocomplete="new-password"
-                                   placeholder="sk-...">
+                            <div class="input-group">
+                                <input type="password" class="form-control" id="f-apikey" value="${keyInitial}" autocomplete="new-password"
+                                       placeholder="sk-...">
+                                ${App.revealButton('f-apikey')}
+                            </div>
                             <small class="text-secondary">${i18n('models.apiKeyHint')}${isEdit && hasKey ? ' ' + i18n('models.apiKeyKeep') : ''}</small>
                         </div>
                         <div class="mb-3" id="model-name-group" ${model.provider === 'llamacpp' ? 'style="display:none"' : ''}>

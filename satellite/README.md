@@ -1,16 +1,22 @@
 # MyAgent voice satellite
 
-A small speaker/microphone client for a PC or Raspberry Pi. Press Enter,
-speak, pause — the audio goes to your MyAgent server (transcribed there, no ML
-on the device), the bound agent answers, and the reply is spoken back with
+A small speaker/microphone client for a PC or Raspberry Pi. Speak to it and the
+audio goes to your MyAgent server (transcribed there, no ML on the device), the
+bound agent answers, and the reply is spoken back with
 [Piper](https://github.com/rhasspy/piper). The device also exposes a tiny HTTP
 endpoint (`/say`) so agents can *send* it messages: add it to the address book
 and `notify_user` can make the kitchen speaker announce a reminder.
 
-```
+It serves **its own page** at `http://<device>:8899/` — type to the agent, press
+**Talk** to open the microphone, tune the settings. No app, no terminal: that
+page is how a headless device is actually used.
+
+```text
 [device]  mic → WAV ──────────▶  POST /api/connectors/inbound/<binding>   [myagent]
           speaker ◀─ reply ────  (same HTTP response)
           POST /say ◀──────────  notify_user ("tell Cucina …")
+
+[browser] ─ Talk / type ──────▶  http://<device>:8899/   (the device's own page)
 ```
 
 Requires the **connectors plugin** on the MyAgent side (`connectors/install.sh`),
@@ -45,6 +51,70 @@ sudo apt install libportaudio2 alsa-utils   # mic capture + playback
 One key, both directions: the device presents it to MyAgent's inbound
 endpoint, MyAgent presents it to the device's `/say`.
 
+## The device's page
+
+```text
+http://<device-ip>:8899/
+```
+
+- **Talk** opens the microphone ON THE DEVICE (not the browser's), records until
+  you stop speaking, and speaks the answer. This is the replacement for pressing
+  Enter in a terminal, and it works from a phone.
+- The **text box** sends a typed message through the same path — useful in a
+  quiet room, or to answer something the device just announced.
+- **Device settings** holds language, voice, voice install and the microphone
+  thresholds — the same values as the MyAgent form, since both write this
+  device's `config.json`.
+
+The page itself is public (it is only markup); every action carries the shared
+key, which you paste once and the browser keeps. `install.sh` prints a
+`?key=…` link that fills it in for you — the page then strips it from the
+address bar. Do not hand that link to anyone you would not give the key to: it
+also opens MyAgent's inbound endpoint for this binding.
+
+One capture at a time: if the terminal loop is recording, the button answers
+"already listening", and the other way round.
+
+## Configuration
+
+`config.json` next to `satellite.py` is the only configuration, and it is a
+plain file you can edit with any editor (`MYAGENT_SAT_CONFIG` moves it). It is
+read at startup, so restart after editing by hand.
+
+| key | what it does |
+| --- | --- |
+| `name` | how the device introduces itself, and the sender the agent sees |
+| `language` | what is SPOKEN here (`it`, `en`, …). Sent with the audio so the server transcribes in that language instead of guessing; empty = auto-detect |
+| `voice` | path to the Piper `.onnx` that speaks the replies; empty = replies are printed only |
+| `myagent_url`, `binding_id`, `key` | pairing: which server, which binding, the shared key |
+| `listen_host`, `listen_port` | where `/say`, `/health` and `/config` answer |
+| `request_timeout_s` | how long to wait for the agent's reply (a local model can take minutes) |
+| `audio.silence_threshold` | RMS level that counts as speech. **The one value that needs tuning against the room** — too low and the mic never stops, too high and it never starts |
+| `audio.silence_ms` | how much silence closes an utterance |
+| `audio.max_seconds`, `audio.wait_speech_s` | caps: recording length, and how long to wait for speech after Enter |
+
+### From MyAgent, without ssh
+
+The tuning fields are also editable from the binding's page in MyAgent
+(**Connectors → the device → *Device settings***), which reads and writes this
+same file — a second door onto it, not a replacement. Language, voice and the
+audio thresholds apply **immediately**, without a restart. Installing a voice
+from that box downloads it here into `voices/` and starts using it.
+
+What MyAgent may NOT write is the pairing: `key`, `binding_id`, `myagent_url`,
+`listen_host`, `listen_port`. Those are set on the device, once, by
+`install.sh` — a remote call able to repoint the device at another server, or
+move the port it is reached on, would cut the only wire it could be fixed over.
+
+### Installing another voice by hand
+
+```bash
+V=it_IT-paola-medium; L=${V%%-*}; L2=${L%%_*}; S=${V#*-}
+curl -fsSLO --output-dir voices \
+  "https://huggingface.co/rhasspy/piper-voices/resolve/main/$L2/$L/${S%%-*}/${S#*-}/$V.onnx"{,.json}
+# then point "voice" at voices/$V.onnx (or pick it in MyAgent)
+```
+
 ## Run
 
 ```bash
@@ -53,8 +123,9 @@ systemctl --user enable --now myagent-satellite      # speaker-only service
 sudo loginctl enable-linger $USER                    # keep it up after logout (headless Pi)
 ```
 
-Without a terminal (service mode) there is no push-to-talk: the device still
-speaks whatever agents send to `/say`. Run it interactively to talk.
+Without a terminal there is no Enter to press, but the microphone is **not**
+lost: use **Talk** on the device's page. That is why running it as a service is
+the normal setup, headless Pi included.
 
 ## Check it works
 
@@ -66,7 +137,8 @@ echo ciao | piper --model voices/*.onnx --output_raw \
 ```
 
 From MyAgent, the binding's **Test** button probes `/health`; `notify_user`
-to the device's contact makes it speak.
+to the device's contact makes it speak. From a browser, open
+`http://<device-ip>:8899/` and press **Talk**.
 
 ## Troubleshooting
 
@@ -79,4 +151,5 @@ to the device's contact makes it speak.
 - **No sound** — check `aplay -l`, and that the unit's user session owns the
   audio device (a user unit does; a system unit would not).
 - **Replies are printed but not spoken** — `piper` or the voice model is
-  missing; rerun `install.sh` or set `piper_voice` in `config.json`.
+  missing; rerun `install.sh`, set `voice` in `config.json`, or install one
+  from the device box in MyAgent.

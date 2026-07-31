@@ -251,13 +251,24 @@ stay on offer until a refresh succeeds. Notes and limits:
 
 > **MyAgent includes tools that execute shell commands as the server user.**
 > By default the API has no authentication and binds to `127.0.0.1` — keep it
-> that way unless the network is trusted. Before exposing it, set
-> `MYAGENT_API_KEY`: every `/api` request then requires the key, either as an
+> that way unless the network is trusted. Before exposing it, set an API key:
+> every `/api` request then requires it, either as an
 > `Authorization: Bearer <key>` header or as an `?api_key=<key>` query
 > parameter. The web UI asks for the key on first use (or open it once as
 > `http://host:8888/?api_key=<key>` — the key is stored in the browser and
 > stripped from the URL). For anything internet-facing, still prefer an
 > authenticating reverse proxy on top.
+>
+> Two ways to set it, and they are not interchangeable:
+>
+> - **Settings → API key** generates, changes or removes it from the UI. It is
+>   stored in `~/myagent/config/api_key` (`0600`) and takes effect on the next
+>   request — no restart, so in-flight turns survive. The page also shows the
+>   `?api_key=` link to open on another device.
+> - **`MYAGENT_API_KEY`** pins it at the deployment level (systemd drop-in,
+>   container env, read-only install). When set it **wins**, and the Settings
+>   box turns read-only: the process's own configuration is not something an
+>   API call gets to overwrite.
 >
 > Over plain http the key travels in clear on every request. Either keep the
 > traffic inside a VPN, or give MyAgent a certificate and let it serve HTTPS
@@ -366,7 +377,7 @@ Everything is configured via environment variables (none are required):
 |----------------------|------------------------|--------------------------------------------|
 | `MYAGENT_HOST`       | `127.0.0.1`            | bind address (see [Security](#security))   |
 | `MYAGENT_PORT`       | `8888`                 | bind port                                  |
-| `MYAGENT_API_KEY`    | *(unset = no auth)*    | require this key on every `/api` request (Bearer header or `?api_key=`) |
+| `MYAGENT_API_KEY`    | *(unset)*              | pin the API key (Bearer header or `?api_key=`); overrides — and makes read-only — the one managed in Settings → API key |
 | `MYAGENT_CORS_ORIGINS` | *(unset = same-origin only)* | comma-separated browser origins allowed to call the API (for a [UI hosted elsewhere](#hosting-the-ui-elsewhere)) |
 | `MYAGENT_SSL_CERTFILE` | *(unset = plain http)*  | TLS certificate — serve HTTPS directly, no reverse proxy (see [Install it as an app](#install-it-as-an-app)) |
 | `MYAGENT_SSL_KEYFILE` | *(unset)*               | TLS private key; omit if the certificate file is a combined PEM |

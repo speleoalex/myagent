@@ -440,6 +440,62 @@ answers exactly like a bad key. A satellite has one conversation
 is the binding id lets agents notify the device by name — the notification
 lands in the same session as the spoken turns.
 
+**A device can be configured back.** A voice device holds settings only it can
+know are wrong — which language is spoken in that room, which voice, the silence
+threshold against that room's noise floor — and they used to be reachable only
+by editing `config.json` over ssh. A channel whose manifest declares
+`"device": {"config": true, "voices": true}` gets three generic routes:
+`GET|PUT /api/connectors/bindings/{id}/device` reads and writes those settings,
+`POST .../device/voices` asks the device to download a Piper voice. No channel
+type is named in the routes — a channel either offers the connector methods or
+the route answers 501 — and the UI renders **whatever the device answered**, so
+a device that grows a knob grows a control and one without a microphone shows no
+thresholds. Three properties hold this together:
+
+- **The device's own file stays the source of truth.** `PUT /device` writes that
+  same `config.json`, which remains hand-editable; a device whose server is
+  unreachable keeps running on what it reads there. The remote form is a second
+  door, not a replacement.
+- **Tuning is remote, identity is local.** The device enforces its own writable
+  list: name, language, voice, timeouts, audio thresholds. The shared key,
+  `binding_id`, `myagent_url` and the listen host/port are pairing, set once by
+  the device's installer — a remote call able to repoint a device at another
+  server, or move the port it is reached on, would cut the only wire it could be
+  fixed over.
+- **The language is sent per request, not stored twice.** The device puts its
+  `language` in each inbound payload and the plugin passes it to
+  `CoreClient.transcribe` → `document_extract` → Whisper, which transcribes
+  measurably better told than guessing. Mirroring the value onto the binding
+  would create a second copy free to disagree with the one the microphone
+  actually uses.
+
+**The device serves its own page**, at `http://<device>:8899/` (`satellite/ui.html`,
+one dependency-free file — a CDN stylesheet would break it exactly where the
+device has no internet). It holds a text box that types to the agent, a Listen
+button that opens the device's microphone, and the same settings the MyAgent form
+writes. It exists because a satellite normally runs as a systemd service, where
+there is no terminal and therefore no Enter to press: before it, the microphone
+was unreachable in the setup the device is meant for. Three entry points —
+terminal Enter, the page's button, the page's text box — converge on one
+`run_turn()`, so a typed turn and a spoken one cannot drift apart. Capture is
+serialized by a lock and a second attempt is told "already listening" rather than
+queued behind a recording whose speaker has already finished. The page is public
+(it is markup) while every action carries the shared key: baking the key into the
+page would hand out the credential that also opens myagent's inbound route.
+
+Voices download **in the background on the device** (tens of MB: an HTTP call
+held open that long is one the caller has already timed out on, which would read
+as a failure while the download was fine). `POST .../device/voices` returns as
+soon as it starts, and the device publishes `voice_install: {name, state, error}`
+in `GET /device` for the form to poll.
+
+**A failure to reach the far end is not a credentials failure.** Channels raise
+`Unreachable` (in `channels/base.py`) for transport errors, with the address they
+tried in the message, and the router shows it verbatim instead of prefixing
+"Invalid credentials" — that prefix once sent a user hunting for a wrong token
+while the device was simply switched off. `App.api` also unwraps FastAPI's
+`{"detail": …}` now, so forms show the sentence rather than the JSON.
+
 **The address book reaches the model through the tool schema.** The plugin exposes
 `Connectors.notify_targets()` (contact names, channel labels, the broadcast word);
 the core reads it through a late-bound `ToolRegistry.notify_targets` callable and
@@ -475,6 +531,7 @@ Everything is plain JSON under `~/myagent/` (see `server/app/config.py`):
 | `~/myagent/config/agents/` | `MYAGENT_CONFIG` | one JSON per agent |
 | `~/myagent/config/models/` | `MYAGENT_CONFIG` | LLM configs; a remote `api_key` is stored 0600, masked in the API, and PUT treats mask/empty as "keep" |
 | `~/myagent/config/settings.json` | `MYAGENT_CONFIG` | default model, provider base URLs |
+| `~/myagent/config/api_key` | `MYAGENT_CONFIG` | the API key when managed at runtime (Settings → API key), 0600; absent = no auth. `MYAGENT_API_KEY` overrides it and makes it read-only |
 | `~/myagent/config/mcp/` | `MYAGENT_CONFIG` | one JSON per MCP server (0600: `env`/`headers` may hold secrets) + `cache/` with the discovered tool catalogue |
 | `~/myagent/config/tasks/` | `MYAGENT_CONFIG` | one JSON per scheduled task (agent + prompt + cron/`at`) — user intent, hence config and not runtime state |
 | `~/myagent/tools/` | `MYAGENT_TOOLS` | tool folders |
@@ -492,6 +549,20 @@ it is seeded by copying the bundled defaults; existing data is never
 overwritten. On later runs, bundled tools missing from `~/myagent/tools` are
 seeded individually (so upgrades deliver newly shipped tools), while existing
 tool folders are never touched.
+
+**The API key has two sources, and the env one wins.** `MYAGENT_API_KEY` is the
+deployment-level pin (systemd drop-in, container, read-only install);
+`config/api_key` is the runtime one, created/rotated/removed from Settings via
+`GET|PUT|DELETE /api/system/api-key`. Consequences, all deliberate: the gate
+middleware in `server/main.py` is registered **unconditionally** and resolves the
+key per request (`config.get_api_key()`, mtime-cached) — middleware cannot be
+added to a running app, and requiring a restart to enable auth would kill
+in-flight turns; the env var makes `api_key_status()["editable"]` false so the
+router answers 409 and the UI renders the field read-only, because an API call
+must not overwrite the decision of whoever launched the process; and the key is
+returned **in clear** by that GET, unlike every other stored secret (see
+`routers/secrets.py`) — it is this server's own credential, which the caller just
+presented, and hiding it would only prevent copying it to another device.
 
 Sessions store the full recursive execution trace (tool calls and responses
 of sub-agents included), so a chat can be archived, listed and resumed with

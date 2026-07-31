@@ -5,7 +5,8 @@
   "key": "REPLACE_WITH_SHARED_KEY",
   "listen_host": "0.0.0.0",
   "listen_port": 8899,
-  "piper_voice": "voices/it_IT-paola-medium.onnx",
+  "language": "it",
+  "voice": "voices/it_IT-paola-medium.onnx",
   "request_timeout_s": 180,
   "audio": {
     "samplerate": 16000,

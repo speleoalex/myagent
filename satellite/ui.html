@@ -1,0 +1,396 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>MyAgent satellite</title>
+<!--
+  The device's own page: type to the agent, open the microphone, tune the
+  settings. Served by satellite.py on the same port as /say and /health.
+
+  Deliberately one dependency-free file: this runs on a device that may have no
+  internet at all, so a CDN stylesheet would render it unusable exactly where it
+  is needed. Same reason there is no build step - it is edited in place and
+  reloaded with F5.
+
+  The page is public, its actions are not: every call carries the shared key,
+  which the visitor pastes once (or passes as ?key=). The key also opens
+  myagent's inbound route, so baking it into the markup would hand it to anyone
+  who can reach the port.
+-->
+<style>
+  :root {
+    --bg: #16181d; --panel: #1e2128; --line: #2e323c; --fg: #e8eaed;
+    --muted: #9aa0ac; --accent: #4c8dff; --ok: #3fb950; --warn: #d29922;
+    --err: #f85149;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f4f5f7; --panel: #fff; --line: #d8dbe0; --fg: #1c1e22;
+      --muted: #626875; --accent: #1b6ef3;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 1rem; background: var(--bg); color: var(--fg);
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 44rem; margin: 0 auto; }
+  h1 { font-size: 1.4rem; margin: 0 0 .25rem; }
+  .row { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--line); border-radius: .6rem;
+    padding: 1rem; margin: 1rem 0;
+  }
+  .badge {
+    font-size: .75rem; padding: .1rem .5rem; border-radius: 1rem;
+    border: 1px solid var(--line); color: var(--muted);
+  }
+  .badge.on { color: var(--ok); border-color: var(--ok); }
+  .badge.off { color: var(--warn); border-color: var(--warn); }
+  label { display: block; font-size: .8rem; color: var(--muted); margin: .6rem 0 .2rem; }
+  input, select, textarea, button {
+    font: inherit; color: var(--fg); background: var(--bg);
+    border: 1px solid var(--line); border-radius: .4rem; padding: .5rem .6rem;
+  }
+  input, select, textarea { width: 100%; }
+  button { background: var(--panel); cursor: pointer; white-space: nowrap; }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.big { font-size: 1.1rem; padding: .7rem 1.2rem; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr)); gap: .5rem; }
+  .msg { border-left: 3px solid var(--line); padding: .1rem .6rem; margin: .6rem 0; }
+  .msg .who { font-size: .72rem; color: var(--muted); text-transform: uppercase; }
+  .msg.you { border-color: var(--muted); }
+  .msg.agent { border-color: var(--accent); }
+  .hint { font-size: .8rem; color: var(--muted); margin-top: .3rem; }
+  .err { color: var(--err); }
+  .ok { color: var(--ok); }
+  #log:empty::after { content: attr(data-empty); color: var(--muted); font-size: .85rem; }
+  details summary { cursor: pointer; color: var(--muted); }
+  .spin { display: inline-block; animation: s 1s linear infinite; }
+  @keyframes s { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<main>
+  <div class="row">
+    <h1 id="title">…</h1>
+    <span class="badge" id="b-mic"></span>
+    <span class="badge" id="b-tts"></span>
+    <button id="btn-reload" title="reload" style="margin-left:auto">↻</button>
+  </div>
+  <div class="hint" id="subtitle"></div>
+
+  <section class="panel" id="p-key" hidden>
+    <label for="f-key" id="l-key"></label>
+    <div class="row">
+      <input type="password" id="f-key" autocomplete="current-password" style="flex:1 1 12rem">
+      <!-- A key you cannot read is a key you cannot check for a typo, and this
+           one is pasted: one wrong character gives "refused" and names nothing. -->
+      <button id="btn-eye" title="show" aria-pressed="false">👁</button>
+      <button class="primary" id="btn-key"></button>
+    </div>
+    <div class="hint" id="h-key"></div>
+  </section>
+
+  <section class="panel" id="p-talk" hidden>
+    <div class="row">
+      <button class="primary big" id="btn-listen"></button>
+      <span id="listen-state" class="hint"></span>
+    </div>
+    <label for="f-text" id="l-text"></label>
+    <div class="row">
+      <input type="text" id="f-text" style="flex:1 1 14rem" enterkeyhint="send">
+      <button id="btn-send"></button>
+    </div>
+    <div id="log" data-empty=""></div>
+  </section>
+
+  <section class="panel" id="p-cfg" hidden>
+    <details id="d-cfg">
+      <summary id="s-cfg"></summary>
+      <div class="grid">
+        <div>
+          <label for="f-lang" id="l-lang"></label>
+          <input type="text" id="f-lang" list="langs" placeholder="it">
+          <datalist id="langs">
+            <option value="it"><option value="en"><option value="fr">
+            <option value="de"><option value="es"><option value="pt">
+          </datalist>
+        </div>
+        <div>
+          <label for="f-voice" id="l-voice"></label>
+          <select id="f-voice"></select>
+        </div>
+      </div>
+      <div class="grid" id="audio-grid"></div>
+      <div class="row" style="margin-top:.8rem">
+        <button class="primary" id="btn-apply"></button>
+        <span id="apply-state" class="hint"></span>
+      </div>
+      <label for="f-newvoice" id="l-newvoice"></label>
+      <div class="row">
+        <input type="text" id="f-newvoice" list="voicelist" placeholder="it_IT-paola-medium" style="flex:1 1 14rem">
+        <datalist id="voicelist">
+          <option value="it_IT-paola-medium"><option value="it_IT-riccardo-x_low">
+          <option value="en_US-lessac-medium"><option value="en_GB-alba-medium">
+          <option value="fr_FR-siwis-medium"><option value="de_DE-thorsten-medium">
+        </datalist>
+        <button id="btn-voice"></button>
+      </div>
+      <div class="hint" id="voice-state"></div>
+      <div class="hint" id="cfg-file"></div>
+    </details>
+  </section>
+</main>
+
+<script>
+// ---------------------------------------------------------------- strings
+// Two languages inline. The page is small enough that a dictionary file would
+// be a second request to make offline-safe for no gain.
+const STR = {
+  en: {
+    mic: 'microphone', noMic: 'no microphone', tts: 'voice', noTts: 'no voice',
+    keyLabel: 'Shared key', keySave: 'Unlock',
+    reveal: 'Show', hide: 'Hide', keyStored: 'This is the key this browser is using. Wrong one? Fix it here.',
+    keyHint: 'The same key as the binding in MyAgent (config.json → "key"). Kept in this browser only.',
+    keyBad: 'That key was refused by the device.',
+    listen: '🎤 Talk', listening: 'listening…', thinking: 'the agent is thinking…',
+    heardNothing: 'nothing was heard.',
+    textLabel: 'Or type a message', send: 'Send',
+    logEmpty: 'Nothing yet. Press Talk, or type a message.',
+    you: 'you', agent: 'agent',
+    settings: 'Device settings', lang: 'Spoken language', voice: 'Voice',
+    apply: 'Apply', applied: 'saved: ', unchanged: 'nothing to change.',
+    newVoice: 'Install a voice', download: 'Download',
+    downloading: 'downloading ', installed: ' installed.',
+    file: 'Settings are stored on the device in ',
+    noVoices: 'none installed',
+    samplerate: 'Sample rate', silence_threshold: 'Silence threshold',
+    silence_ms: 'Silence (ms)', max_seconds: 'Max seconds',
+    wait_speech_s: 'Wait for speech (s)',
+    subtitle: 'Voice satellite — talk to the agent, or type.',
+  },
+  it: {
+    mic: 'microfono', noMic: 'nessun microfono', tts: 'voce', noTts: 'nessuna voce',
+    keyLabel: 'Chiave condivisa', keySave: 'Sblocca',
+    reveal: 'Mostra', hide: 'Nascondi', keyStored: 'È la chiave che questo browser sta usando. Sbagliata? Correggila qui.',
+    keyHint: 'La stessa chiave del binding in MyAgent (config.json → "key"). Resta solo in questo browser.',
+    keyBad: 'Chiave rifiutata dal dispositivo.',
+    listen: '🎤 Parla', listening: 'in ascolto…', thinking: "l'agente sta pensando…",
+    heardNothing: 'non ho sentito nulla.',
+    textLabel: 'Oppure scrivi un messaggio', send: 'Invia',
+    logEmpty: 'Ancora nulla. Premi Parla, o scrivi un messaggio.',
+    you: 'tu', agent: 'agente',
+    settings: 'Impostazioni del dispositivo', lang: 'Lingua parlata', voice: 'Voce',
+    apply: 'Applica', applied: 'salvato: ', unchanged: 'nulla da cambiare.',
+    newVoice: 'Installa una voce', download: 'Scarica',
+    downloading: 'scaricamento di ', installed: ' installata.',
+    file: 'Le impostazioni stanno sul dispositivo in ',
+    noVoices: 'nessuna installata',
+    samplerate: 'Campionamento', silence_threshold: 'Soglia di silenzio',
+    silence_ms: 'Silenzio (ms)', max_seconds: 'Durata massima (s)',
+    wait_speech_s: 'Attesa del parlato (s)',
+    subtitle: 'Satellite vocale — parla con l\'agente, o scrivi.',
+  },
+};
+const T = STR[(navigator.language || 'en').slice(0, 2).toLowerCase()] || STR.en;
+const $ = id => document.getElementById(id);
+
+// ------------------------------------------------------------------- key
+// ?key=… lets the installer print one clickable URL. Stripped from the address
+// bar right away so it does not sit in history or get copy-pasted onward.
+const KEY_STORE = 'myagent_satellite_key';
+let key = localStorage.getItem(KEY_STORE) || '';
+const fromUrl = new URLSearchParams(location.search).get('key');
+if (fromUrl) {
+  key = fromUrl;
+  localStorage.setItem(KEY_STORE, key);
+  history.replaceState(null, '', location.pathname + location.hash);
+}
+
+async function api(method, path, body) {
+  const res = await fetch(path, {
+    method,
+    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (res.status === 401) { askKey(T.keyBad); throw new Error(T.keyBad); }
+  if (!res.ok) throw new Error(data.detail || ('HTTP ' + res.status));
+  return data;
+}
+
+function askKey(message) {
+  $('p-key').hidden = false;
+  $('p-talk').hidden = true;
+  $('p-cfg').hidden = true;
+  // Prefilled with the key in use: when one was stored and got refused, an empty
+  // box hides the very thing that has to be compared with the device's file.
+  $('f-key').value = key || '';
+  $('h-key').innerHTML = (message ? '<span class="err">' + esc(message) + '</span><br>' : '')
+    + esc(key ? T.keyStored + ' ' + T.keyHint : T.keyHint);
+  $('f-key').focus();
+}
+
+const esc = s => String(s ?? '').replace(/[&<>"']/g,
+  c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+// ---------------------------------------------------------------- config
+let cfg = {};
+
+async function load() {
+  try {
+    cfg = await api('GET', '/config');
+  } catch (e) {
+    if (!key) askKey('');
+    return;
+  }
+  $('p-key').hidden = true;
+  $('p-talk').hidden = false;
+  $('p-cfg').hidden = false;
+  const d = cfg.device || {};
+  $('title').textContent = cfg.name || 'satellite';
+  $('b-mic').textContent = d.mic ? T.mic : T.noMic;
+  $('b-mic').className = 'badge ' + (d.mic ? 'on' : 'off');
+  $('b-tts').textContent = d.tts ? T.tts : T.noTts;
+  $('b-tts').className = 'badge ' + (d.tts ? 'on' : 'off');
+  $('btn-listen').disabled = !d.mic;
+  $('f-lang').value = cfg.language || '';
+  const stem = p => String(p || '').split('/').pop().replace(/\.onnx$/, '');
+  const cur = stem(cfg.voice);
+  const voices = d.voices || [];
+  $('f-voice').innerHTML = voices.length
+    ? voices.map(v => `<option value="voices/${esc(v)}.onnx" ${v === cur ? 'selected' : ''}>${esc(v)}</option>`).join('')
+    : `<option value="">${esc(T.noVoices)}</option>`;
+  // Rendered from what the device sent, so a knob it grows is a field here.
+  $('audio-grid').innerHTML = Object.entries(cfg.audio || {}).map(([k, v]) =>
+    `<div><label for="a-${k}">${esc(T[k] || k)}</label>
+     <input type="number" id="a-${k}" data-audio="${esc(k)}" value="${esc(v)}"></div>`).join('');
+  $('cfg-file').textContent = T.file + (d.config_file || '');
+  showInstall(cfg.voice_install || {});
+}
+
+function showInstall(st) {
+  const box = $('voice-state');
+  if (st.state === 'downloading') {
+    box.innerHTML = '<span class="spin">◐</span> ' + esc(T.downloading + (st.name || ''));
+    // A voice is tens of MB and the device fetches it in the background:
+    // follow it instead of freezing the page on a request.
+    clearTimeout(showInstall.t);
+    showInstall.t = setTimeout(load, 2500);
+  } else if (st.state === 'error') {
+    box.innerHTML = '<span class="err">' + esc(st.error || 'error') + '</span>';
+  } else if (st.state === 'done') {
+    box.innerHTML = '<span class="ok">' + esc((st.name || '') + T.installed) + '</span>';
+  } else {
+    box.textContent = '';
+  }
+}
+
+// ------------------------------------------------------------------ talk
+function say(who, text) {
+  const div = document.createElement('div');
+  div.className = 'msg ' + who;
+  div.innerHTML = `<div class="who">${esc(who === 'you' ? T.you : T.agent)}</div>${esc(text)}`;
+  $('log').prepend(div);
+}
+
+async function turn(path, body, state) {
+  const buttons = [$('btn-listen'), $('btn-send')];
+  buttons.forEach(b => b.disabled = true);
+  $('listen-state').innerHTML = '<span class="spin">◐</span> ' + esc(state);
+  try {
+    const res = await api('POST', path, body);
+    if (res.heard === false) { $('listen-state').textContent = T.heardNothing; return; }
+    $('listen-state').textContent = '';
+    if (res.text) say('you', res.text);
+    if (res.reply) say('agent', res.reply);
+  } catch (e) {
+    $('listen-state').innerHTML = '<span class="err">' + esc(e.message) + '</span>';
+  } finally {
+    buttons.forEach(b => b.disabled = false);
+    $('btn-listen').disabled = !(cfg.device || {}).mic;
+  }
+}
+
+// ---------------------------------------------------------------- wiring
+$('btn-key').onclick = () => {
+  key = $('f-key').value.trim();
+  localStorage.setItem(KEY_STORE, key);
+  load();
+};
+$('f-key').onkeydown = e => { if (e.key === 'Enter') $('btn-key').click(); };
+$('btn-eye').onclick = () => {
+  const input = $('f-key'), show = input.type === 'password';
+  input.type = show ? 'text' : 'password';
+  $('btn-eye').textContent = show ? '\u{1F648}' : '\u{1F441}';
+  $('btn-eye').title = show ? T.hide : T.reveal;
+  $('btn-eye').setAttribute('aria-pressed', String(show));
+};
+$('btn-reload').onclick = () => load();
+$('btn-listen').onclick = () => turn('/listen', {}, T.listening);
+$('btn-send').onclick = () => {
+  const text = $('f-text').value.trim();
+  if (!text) return;
+  $('f-text').value = '';
+  turn('/ask', { text }, T.thinking);
+};
+$('f-text').onkeydown = e => { if (e.key === 'Enter') $('btn-send').click(); };
+$('btn-apply').onclick = async (e) => {
+  e.target.disabled = true;
+  const patch = { language: $('f-lang').value.trim() };
+  if ($('f-voice').value) patch.voice = $('f-voice').value;
+  patch.audio = {};
+  document.querySelectorAll('[data-audio]').forEach(el => {
+    const n = Number(el.value);
+    if (Number.isFinite(n)) patch.audio[el.dataset.audio] = n;
+  });
+  try {
+    const res = await api('PUT', '/config', patch);
+    cfg = res;
+    $('apply-state').innerHTML = res.changed && res.changed.length
+      ? '<span class="ok">' + esc(T.applied + res.changed.join(', ')) + '</span>'
+      : esc(T.unchanged);
+  } catch (err) {
+    $('apply-state').innerHTML = '<span class="err">' + esc(err.message) + '</span>';
+  } finally {
+    e.target.disabled = false;
+  }
+};
+$('btn-voice').onclick = async (e) => {
+  const name = $('f-newvoice').value.trim();
+  if (!name) return;
+  e.target.disabled = true;
+  try {
+    showInstall((await api('POST', '/voices/install', { name, use: true })).voice_install || {});
+  } catch (err) {
+    $('voice-state').innerHTML = '<span class="err">' + esc(err.message) + '</span>';
+  } finally {
+    e.target.disabled = false;
+  }
+};
+
+// ------------------------------------------------------------------ boot
+document.documentElement.lang = T === STR.it ? 'it' : 'en';
+$('subtitle').textContent = T.subtitle;
+$('l-key').textContent = T.keyLabel;
+$('btn-key').textContent = T.keySave;
+$('btn-eye').title = T.reveal;
+$('btn-listen').textContent = T.listen;
+$('l-text').textContent = T.textLabel;
+$('btn-send').textContent = T.send;
+$('log').dataset.empty = T.logEmpty;
+$('s-cfg').textContent = T.settings;
+$('l-lang').textContent = T.lang;
+$('l-voice').textContent = T.voice;
+$('btn-apply').textContent = T.apply;
+$('l-newvoice').textContent = T.newVoice;
+$('btn-voice').textContent = T.download;
+if (key) load(); else askKey('');
+</script>
+</body>
+</html>

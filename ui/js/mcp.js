@@ -251,7 +251,10 @@ const McpPage = {
                             </div>
                             <div class="mb-3">
                                 <label class="form-label">${i18n('mcp.bearer')}</label>
-                                <input type="password" class="form-control" id="f-bearer" value="${App.escAttr(server.bearer || '')}" autocomplete="off">
+                                <div class="input-group">
+                                    <input type="password" class="form-control" id="f-bearer" value="${App.escAttr(server.bearer || '')}" autocomplete="off">
+                                    ${App.revealButton('f-bearer')}
+                                </div>
                                 <div class="form-text">${i18n('mcp.bearerHint')}</div>
                             </div>
                             <div class="mb-3">

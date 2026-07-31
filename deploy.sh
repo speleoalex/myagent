@@ -78,13 +78,16 @@ ExecStart=$INSTALL_DIR/server/.venv/bin/python server/main.py
 Restart=on-failure
 RestartSec=5
 Environment=PYTHONUNBUFFERED=1
-# The API has no authentication and ships shell-executing tools: keep it on
-# localhost unless you know what you are doing (or front it with an
+# The API has no authentication by default and ships shell-executing tools: keep
+# it on localhost unless you know what you are doing (or front it with an
 # authenticating reverse proxy).
 Environment=MYAGENT_HOST=127.0.0.1
 Environment=MYAGENT_PORT=8888
-# Require an API key on every /api request (Bearer header or ?api_key=).
-# Recommended if you expose the port beyond localhost:
+# An API key is required on every /api request (Bearer header or ?api_key=)
+# whenever one is set — recommended before exposing the port beyond localhost.
+# Normally you set it in the UI (Settings -> API key), which stores it in
+# ~/myagent/config/api_key and needs no restart. Uncomment the line below only to
+# PIN the key here: it then wins over the stored one and the UI turns read-only.
 #Environment=MYAGENT_API_KEY=change-me
 # Serve HTTPS directly, without a reverse proxy. Needed to install the UI as an
 # app from another device (browsers require a secure context; localhost already

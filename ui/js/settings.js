@@ -69,6 +69,16 @@ const SettingsPage = {
 
                     <hr class="my-4">
 
+                    <!-- API key: a SERVER setting, but with its own box because
+                         saving it also has to update this browser's stored copy
+                         (the next request would 401 otherwise). -->
+                    <h5>${i18n('settings.apiKey')}</h5>
+                    <div id="api-key-box" class="mb-3">
+                        <div class="spinner-border spinner-border-sm"></div>
+                    </div>
+
+                    <hr class="my-4">
+
                     <!-- Install the UI as an app. Client-side only: nothing
                          here touches the server's settings. -->
                     <h5>${i18n('settings.install')}</h5>
@@ -119,6 +129,8 @@ const SettingsPage = {
             }
         };
 
+        this.renderApiKey();
+
         this.renderInstall();
         // The install prompt often arrives after this page has rendered, and
         // installing/resetting changes what the box should say — re-render on
@@ -126,6 +138,125 @@ const SettingsPage = {
         PWA.onchange = () => this.renderInstall();
 
         this.checkStatus();
+    },
+
+    /** The API-key box. Re-rendered from the server's answer after every
+     *  action, so what is displayed is always what the gate now enforces. */
+    async renderApiKey() {
+        const box = document.getElementById('api-key-box');
+        if (!box) return;
+
+        let st;
+        try {
+            st = await App.api('GET', '/system/api-key');
+        } catch (e) {
+            // Older server without the endpoint, or an unreachable one: say so
+            // instead of drawing a form that cannot save.
+            box.innerHTML = `<div class="text-secondary"><i class="bi bi-dash-circle"></i> ${App.esc(e.message)}</div>`;
+            return;
+        }
+
+        let line, actions;
+        if (!st.editable) {
+            line = `<i class="bi bi-lock text-secondary"></i> ${i18n('settings.apiKeyEnv', { env: App.esc(st.env_var) })}`;
+            actions = '';
+        } else if (st.configured) {
+            line = `<i class="bi bi-shield-check text-success"></i> ${i18n('settings.apiKeyOn')}`;
+            actions = `<button type="button" class="btn btn-primary btn-sm" id="btn-key-save">${i18n('settings.apiKeySave')}</button>
+                       <button type="button" class="btn btn-outline-secondary btn-sm ms-2" id="btn-key-gen">
+                           <i class="bi bi-arrow-clockwise"></i> ${i18n('settings.apiKeyRotate')}
+                       </button>
+                       <button type="button" class="btn btn-outline-danger btn-sm ms-2" id="btn-key-off">${i18n('settings.apiKeyRemove')}</button>`;
+        } else {
+            line = `<i class="bi bi-shield-exclamation text-warning"></i> ${i18n('settings.apiKeyOff')}`;
+            actions = `<button type="button" class="btn btn-primary btn-sm" id="btn-key-gen">
+                           <i class="bi bi-shield-lock"></i> ${i18n('settings.apiKeyGenerate')}
+                       </button>
+                       <button type="button" class="btn btn-outline-secondary btn-sm ms-2" id="btn-key-save">${i18n('settings.apiKeySaveOwn')}</button>`;
+        }
+
+        // The key is shown in clear on purpose: the point of looking at it is
+        // to carry it to another device. Whoever sees this page already got
+        // past the gate with it.
+        const link = st.configured
+            ? `${location.origin}${location.pathname}?api_key=${encodeURIComponent(st.key)}`
+            : '';
+
+        box.innerHTML = `
+            <div class="mb-2">${line}</div>
+            <div class="input-group mb-1">
+                <input type="text" class="form-control font-monospace" id="f-api-key"
+                       value="${App.escAttr(st.key || '')}"
+                       placeholder="${i18n('settings.apiKeyPlaceholder')}"
+                       ${st.editable ? '' : 'readonly'}>
+                <button type="button" class="btn btn-outline-secondary" id="btn-key-copy"
+                        title="${i18n('settings.apiKeyCopy')}"><i class="bi bi-clipboard"></i></button>
+            </div>
+            <small class="text-secondary d-block mb-2">${i18n('settings.apiKeyHint')}</small>
+            ${actions}
+            ${link ? `<div class="mt-3">
+                <label class="form-label small mb-1">${i18n('settings.apiKeyLink')}</label>
+                <div class="input-group input-group-sm">
+                    <input type="text" class="form-control font-monospace" id="f-api-key-link" value="${App.escAttr(link)}" readonly>
+                    <button type="button" class="btn btn-outline-secondary" id="btn-link-copy"
+                            title="${i18n('settings.apiKeyCopy')}"><i class="bi bi-clipboard"></i></button>
+                </div>
+            </div>` : ''}`;
+
+        document.getElementById('btn-key-copy').onclick =
+            () => this.copyField('f-api-key');
+        const linkCopy = document.getElementById('btn-link-copy');
+        if (linkCopy) linkCopy.onclick = () => this.copyField('f-api-key-link');
+
+        const gen = document.getElementById('btn-key-gen');
+        if (gen) gen.onclick = () => {
+            // Rotating locks out every OTHER device that stored the old key.
+            if (st.configured && !confirm(i18n('settings.apiKeyRotateConfirm'))) return;
+            this.saveApiKey({ generate: true });
+        };
+        const save = document.getElementById('btn-key-save');
+        if (save) save.onclick = () => {
+            const key = document.getElementById('f-api-key').value.trim();
+            this.saveApiKey({ key });
+        };
+        const off = document.getElementById('btn-key-off');
+        if (off) off.onclick = () => {
+            if (!confirm(i18n('settings.apiKeyRemoveConfirm'))) return;
+            this.saveApiKey(null);
+        };
+    },
+
+    /** Write the key server-side (null = turn auth off) and, on success, adopt
+     *  it in THIS browser — the very next request already goes through the new
+     *  gate, so skipping this step would 401 the page we are standing on. */
+    async saveApiKey(payload) {
+        try {
+            const st = payload
+                ? await App.api('PUT', '/system/api-key', payload)
+                : await App.api('DELETE', '/system/api-key');
+            App.apiKey = st.key || null;
+            if (st.key) localStorage.setItem('myagent_api_key', st.key);
+            else localStorage.removeItem('myagent_api_key');
+            App.toast(i18n(st.key ? 'settings.apiKeySaved' : 'settings.apiKeyRemoved'));
+        } catch (e) {
+            App.toast(e.message, 'danger');
+        }
+        this.renderApiKey();
+    },
+
+    /** Copy an input's value. The clipboard API needs a secure context, which
+     *  is exactly what a LAN http install does not have — fall back to
+     *  selecting the text so the user can copy it by hand. */
+    async copyField(id) {
+        const input = document.getElementById(id);
+        if (!input) return;
+        try {
+            await navigator.clipboard.writeText(input.value);
+            App.toast(i18n('settings.apiKeyCopied'));
+        } catch (e) {
+            input.select();
+            App.toast(i18n('settings.apiKeyCopyManual'), 'warning');
+        }
     },
 
     /** The "Install app" box: one state at a time, never a dead button. */
