@@ -126,6 +126,7 @@ async def resume_binding(binding_id: str, request: Request):
 class TestReq(BaseModel):
     type: str = "telegram"
     token: str = ""
+    url: str = ""    # device URL, for channels verified by probing the device
 
 
 async def _verify(binding: Binding, request: Request) -> dict:
@@ -150,7 +151,8 @@ async def test_token(req: TestReq, request: Request):
     """Validate credentials before saving them."""
     if req.token in ("", SECRET_MASK):
         raise HTTPException(400, "Provide a token to test")
-    return await _verify(Binding(id="probe", type=req.type, token=req.token), request)
+    return await _verify(Binding(id="probe", type=req.type, token=req.token,
+                                 url=req.url), request)
 
 
 @router.post("/{binding_id}/test")

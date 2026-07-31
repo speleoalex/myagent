@@ -61,6 +61,15 @@ cat > "$PLIST" <<EOF
         <string>127.0.0.1</string>
         <key>MYAGENT_PORT</key>
         <string>8888</string>
+        <!-- Serve HTTPS directly, without a reverse proxy. Needed to install
+             the UI as an app from another device (browsers require a secure
+             context; localhost already is one). The certificate must be
+             TRUSTED. Omit MYAGENT_SSL_KEYFILE for a combined PEM.
+        <key>MYAGENT_SSL_CERTFILE</key>
+        <string>/usr/local/etc/myagent/fullchain.pem</string>
+        <key>MYAGENT_SSL_KEYFILE</key>
+        <string>/usr/local/etc/myagent/privkey.pem</string>
+        -->
     </dict>
     <key>RunAtLoad</key>
     <true/>

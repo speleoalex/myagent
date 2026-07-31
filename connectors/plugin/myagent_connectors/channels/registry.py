@@ -4,7 +4,7 @@ A channel is a directory beside this file holding a ``channel.json`` manifest an
 the module it names:
 
     channels/<type>/
-        channel.json     {"type","label","module","class","hints":{…},"handle":{…}}
+        channel.json     {"type","label","module","class","hints":{…},"handle":{…},"url":{…}}
         channel.py       a BaseConnector subclass
         requirements.txt optional, installed by connectors/install.sh
 
@@ -51,6 +51,9 @@ class Channel:
     label: str = ""
     hints: dict = field(default_factory=dict)
     handle: dict = field(default_factory=dict)
+    # Shape of Binding.url for channels where WE call the device (label +
+    # example, like `handle`). Missing/empty = the UI hides the URL field.
+    url: dict = field(default_factory=dict)
     connector: type[BaseConnector] | None = None
     error: str = ""
 
@@ -66,6 +69,9 @@ class Channel:
             "label": self.label or self.type,
             "hints": self.hints,
             "handle": self.handle,
+            # None, not {}: the UI gates the URL field on this being truthy,
+            # and an empty JS object is truthy.
+            "url": self.url or None,
             "loaded": self.loaded,
             "error": self.error,
         }
@@ -92,6 +98,7 @@ def _load_one(directory: Path) -> Channel:
         label=meta.get("label", ""),
         hints=meta.get("hints") or {},
         handle=meta.get("handle") or {},
+        url=meta.get("url") or {},
     )
     try:
         entry = directory / (meta.get("module") or "channel.py")

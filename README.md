@@ -59,6 +59,9 @@ had no internet access.*
   plugin, installed separately (see [connectors/](connectors/README.md))
 - **Optional online tools** — web search and page reading are there when you
   *do* have connectivity, in a separate agent
+- **Installable** — the UI installs as an app (own window, launcher/home-screen
+  icon) and its interface is cached, so it opens with the network down
+  (see [Install it as an app](#install-it-as-an-app))
 - **i18n UI** — English and Italian out of the box
 
 ## What's different
@@ -256,9 +259,83 @@ stay on offer until a refresh succeeds. Notes and limits:
 > stripped from the URL). For anything internet-facing, still prefer an
 > authenticating reverse proxy on top.
 >
+> Over plain http the key travels in clear on every request. Either keep the
+> traffic inside a VPN, or give MyAgent a certificate and let it serve HTTPS
+> itself (`MYAGENT_SSL_CERTFILE` / `MYAGENT_SSL_KEYFILE`, see
+> [Installing from another device](#installing-from-another-device)).
+>
 > The same applies to MCP servers: adding one with the `stdio` transport means
 > MyAgent runs that command locally, and its tool descriptions become part of
 > your agents' prompts — so only add servers you trust.
+
+## Install it as an app
+
+Open *Settings → Install app* and MyAgent installs like a native application:
+its own window, an icon in the launcher or on the home screen, no address bar.
+The interface is cached, so it opens even with the network down — the agents
+themselves keep needing the server, which is the point of running it on your
+own machine.
+
+On iPhone and iPad, Safari has no install button: use *Share → Add to Home
+Screen*.
+
+### Installing from another device
+
+Browsers only offer this over a **secure connection**. `http://localhost:8888`
+counts as one, so the default setup works as is — but a LAN or VPN address in
+plain http does not, and the browser withholds both the install prompt and the
+offline cache without explaining why (Settings says so, instead of showing a
+button that does nothing).
+
+MyAgent can serve HTTPS itself, no reverse proxy involved:
+
+```bash
+MYAGENT_SSL_CERTFILE=/path/fullchain.pem MYAGENT_SSL_KEYFILE=/path/privkey.pem \
+  server/.venv/bin/python server/main.py
+```
+
+(Omit `MYAGENT_SSL_KEYFILE` if the certificate file is a combined PEM.)
+
+What matters is that the certificate is **trusted**, not merely present: with a
+self-signed one you click through, the origin keeps a certificate error and
+Chrome refuses to register the service worker — no install, no offline. Three
+ways to get a trusted one for a private address:
+
+- **`tailscale cert`** — a real certificate for your `*.ts.net` name, renewed
+  automatically, trusted everywhere without touching any device.
+- **Let's Encrypt via DNS-01** — point a domain you own at the private IP
+  (`myagent.example.com` → `10.147.0.5`). The DNS challenge needs no inbound
+  reachability, so it works for an address only your VPN can reach.
+- **[mkcert](https://github.com/FiloSottile/mkcert)** — a local CA, quick on
+  your own machines, fiddly to install on a phone.
+
+If you are on Chrome and the traffic is already encrypted by a VPN
+(WireGuard, Tailscale, ZeroTier), there is a cheaper route: add the origin to
+`chrome://flags/#unsafely-treat-insecure-origin-as-secure`, once per browser.
+Safari has no such flag, so an iPhone needs a real certificate.
+
+## Hosting the UI elsewhere
+
+By default MyAgent serves its own UI, and the UI talks to the origin it was
+loaded from — nothing to configure. But the UI is plain static HTML (`ui/`),
+so any web server can host it, at any path (asset references are relative):
+copy the `ui/` folder to an Apache/nginx document root and tell it where the
+API lives.
+
+Two pieces make the split work:
+
+1. **Point the UI at the server** — in *Settings → MyAgent server*, or by
+   opening the UI once as `http://apache-host/myagent/?server=http://myagent-host:8888`
+   (stored in the browser and stripped from the URL, like `?api_key=`; an empty
+   `?server=` resets it to same-origin).
+2. **Let the browser through** — cross-origin calls need the server's CORS
+   consent: start MyAgent with
+   `MYAGENT_CORS_ORIGINS=http://apache-host` (comma-separated list, `*` for any).
+   Unset, the API stays same-origin only, which is the right default for the
+   classic single-server setup.
+
+Remember that the server must also be reachable from the browser's machine
+(`MYAGENT_HOST=0.0.0.0` + `MYAGENT_API_KEY`, see [Security](#security)).
 
 ## Runtime layout
 
@@ -290,6 +367,9 @@ Everything is configured via environment variables (none are required):
 | `MYAGENT_HOST`       | `127.0.0.1`            | bind address (see [Security](#security))   |
 | `MYAGENT_PORT`       | `8888`                 | bind port                                  |
 | `MYAGENT_API_KEY`    | *(unset = no auth)*    | require this key on every `/api` request (Bearer header or `?api_key=`) |
+| `MYAGENT_CORS_ORIGINS` | *(unset = same-origin only)* | comma-separated browser origins allowed to call the API (for a [UI hosted elsewhere](#hosting-the-ui-elsewhere)) |
+| `MYAGENT_SSL_CERTFILE` | *(unset = plain http)*  | TLS certificate — serve HTTPS directly, no reverse proxy (see [Install it as an app](#install-it-as-an-app)) |
+| `MYAGENT_SSL_KEYFILE` | *(unset)*               | TLS private key; omit if the certificate file is a combined PEM |
 | `MYAGENT_CONFIG`     | `~/myagent/config`     | agents, models, MCP servers, settings      |
 | `MYAGENT_TOOLS`      | `~/myagent/tools`      | tool folders                               |
 | `MYAGENT_WORKSPACE`  | `~/myagent/workspace`  | agents' file-operation root                |

@@ -1,0 +1,7 @@
+# Microphone capture (push-to-talk). Needs the PortAudio system library:
+# Debian/Raspbian: sudo apt install libportaudio2
+sounddevice
+# Text-to-speech CLI (`piper`). Voice models are downloaded by install.sh
+# into voices/. If pip has no wheel for your platform, install a binary
+# release from https://github.com/rhasspy/piper instead.
+piper-tts

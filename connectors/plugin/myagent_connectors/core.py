@@ -41,19 +41,37 @@ class CoreClient:
 
     async def chat(self, agent_id: str, message: str, session_id: str,
                    attachments: list[dict] | None = None,
-                   source: str | None = None) -> str:
+                   source: str | None = None,
+                   sender_id: str = "", sender_username: str = "",
+                   sender_name: str = "") -> str:
         """Run one agent turn and return the reply text.
+
+        ``sender_*`` is whatever the transport knows about who wrote (id,
+        @username, display name); it is resolved against the address book here
+        — the one place that has both the transport data and the services —
+        into the ``ChatRequest.sender`` provenance line the model sees.
 
         Raises on failure (a bad agent id, a model that is down, a turn that
         exceeds CHAT_TIMEOUT); the caller turns that into a message to the user.
         """
         state = self._state
+        sender = ""
+        # getattr, not an import: services.py imports this module, and the
+        # attribute is only there once register() completed.
+        svc = getattr(state, "connectors", None)
+        if svc is not None and (sender_id or sender_username or sender_name):
+            try:
+                sender = svc.sender_display(source or "", sender_id,
+                                            sender_username, sender_name)
+            except Exception as e:
+                log.warning("sender lookup failed: %s", e)  # provenance is best-effort
         req = ChatRequest(
             agent_id=agent_id,
             message=message,
             session_id=session_id,
             attachments=attachments or [],
             source=source,
+            sender=sender or None,
         )
         async with self._turns:
             executor = await AgentExecutor.create_for_agent(

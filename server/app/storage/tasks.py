@@ -53,9 +53,6 @@ class TaskStore:
     def get(self, task_id: str) -> dict | None:
         return self.store.get(task_id)
 
-    def exists(self, task_id: str) -> bool:
-        return self.store.exists(task_id)
-
     def due(self, agent_id: str, now: str | None = None) -> list[dict]:
         """Enabled tasks of one agent whose time has come, soonest first.
         String comparison on the now_iso() format, as everywhere else."""
@@ -63,13 +60,6 @@ class TaskStore:
         return [t for t in self.list_all(agent_id)
                 if t.get("enabled", True) and t.get("next_at")
                 and t["next_at"] <= now]
-
-    def next_at_for(self, agent_id: str) -> str:
-        """The agent's soonest scheduled moment, "" when it has none."""
-        for t in self.list_all(agent_id):
-            if t.get("enabled", True) and t.get("next_at"):
-                return t["next_at"]
-        return ""
 
     # ------------------------------------------------------------------ write
     def save(self, task: Task) -> dict:

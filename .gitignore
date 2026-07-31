@@ -26,7 +26,9 @@ server/config/mcp/
 # Local-only files (never shipped)
 docs_local/TODO-internal.md
 docs_local/
-
+satellite/config.json
+# Piper voices are ~60 MB binaries fetched by satellite/install.sh on demand.
+satellite/voices/
 .claude/
 CLAUDE.md
 

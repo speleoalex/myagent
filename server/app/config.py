@@ -174,6 +174,19 @@ CHANNEL_ROTATE_BYTES = int(
 # and stores it locally.
 API_KEY = os.environ.get("MYAGENT_API_KEY", "")
 
+# Browser origins allowed to call the API cross-origin (CORS), for when the
+# static UI is hosted by another web server (Apache, nginx — it is plain HTML)
+# and pointed back at this API via Settings → "MyAgent server". Comma-separated
+# origins, e.g. "https://intranet.example.com,http://pc2:8080"; "*" allows any.
+# Empty (default) adds no CORS layer at all: same-origin only, today's
+# behavior. Non-browser clients (curl, connectors) are never affected — CORS
+# is a browser rule, not authentication; that is what MYAGENT_API_KEY is for.
+CORS_ORIGINS = [
+    o.strip()
+    for o in os.environ.get("MYAGENT_CORS_ORIGINS", "").split(",")
+    if o.strip()
+]
+
 # Verbose per-iteration executor tracing (messages sent to the LLM, tool
 # results, dedup decisions). Off by default: it logs full chat content, so it
 # is opt-in via MYAGENT_DEBUG=1 and written under the user's home (not /tmp,

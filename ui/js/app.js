@@ -1,6 +1,10 @@
 const App = {
     container: null,
     apiKey: null,
+    // Base URL of the MyAgent server ('' = same origin as the page). The UI is
+    // static HTML, so it can be hosted by any web server (Apache, nginx, a file
+    // share) and pointed back at the API — this is that pointer, per browser.
+    serverBase: '',
     _authPrompting: false,
     // Installed plugins, keyed by id (null until the first probe resolves).
     plugins: null,
@@ -10,6 +14,7 @@ const App = {
 
     init() {
         this.container = document.getElementById('app');
+        this.serverBase = this._initServerBase();
         this.apiKey = this._initApiKey();
         I18n.init();
         this.applyStaticI18n();
@@ -121,6 +126,37 @@ const App = {
         });
     },
 
+    // Server address handling, same one-shot URL pattern as the API key below:
+    // ?server=http://host:8888 stores the address and is stripped from the URL;
+    // ?server= (empty) clears it back to same-origin. Persisted in localStorage
+    // (a browser preference, like theme and language — the server form in
+    // Settings edits the SERVER's settings, this decides which server that is).
+    _initServerBase() {
+        const url = new URL(location.href);
+        const fromUrl = url.searchParams.get('server');
+        if (fromUrl !== null) {
+            const clean = this.normalizeServerBase(fromUrl);
+            if (clean) localStorage.setItem('myagent_server', clean);
+            else localStorage.removeItem('myagent_server');
+            url.searchParams.delete('server');
+            history.replaceState(null, '', url);
+        }
+        return localStorage.getItem('myagent_server') || '';
+    },
+
+    /** '' for same-origin, otherwise the address without its trailing slash —
+     * apiUrl() glues '/api...' right after it. */
+    normalizeServerBase(raw) {
+        return String(raw || '').trim().replace(/\/+$/, '');
+    },
+
+    /** Absolute URL of an API endpoint on the configured server.
+     * EVERY request must be built here — a literal '/api/...' fetch would
+     * silently talk to whatever host serves the static files. */
+    apiUrl(path) {
+        return `${this.serverBase}/api${path}`;
+    },
+
     // API key handling (only enforced when the server sets MYAGENT_API_KEY):
     // accept ?api_key=... in the page URL once — stored locally, then stripped
     // from the address bar so it doesn't linger in bookmarks/history.
@@ -161,7 +197,7 @@ const App = {
             headers: { 'Content-Type': 'application/json', ...this.authHeaders() },
         };
         if (body) opts.body = JSON.stringify(body);
-        const res = await fetch(`/api${path}`, opts);
+        const res = await fetch(this.apiUrl(path), opts);
         if (res.status === 401) this._handleUnauthorized();
         if (!res.ok) {
             const text = await res.text();

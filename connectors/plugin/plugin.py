@@ -18,7 +18,7 @@ from app.storage.store import JsonStore
 from myagent_connectors import config
 from myagent_connectors.channels.manager import ConnectorManager
 from myagent_connectors.core import CoreClient
-from myagent_connectors.routers import bindings, contacts, status
+from myagent_connectors.routers import bindings, contacts, inbound, status
 from myagent_connectors.services import STATE_KEY, Connectors
 from myagent_connectors.storage import GrantStore
 
@@ -52,6 +52,16 @@ def register(app) -> None:
                        tags=["connectors"])
     app.include_router(contacts.router, prefix="/api/connectors/contacts",
                        tags=["connectors"])
+    app.include_router(inbound.router, prefix="/api/connectors/inbound",
+                       tags=["connectors"])
+    # Devices authenticate with their binding's own shared key, so the global
+    # MYAGENT_API_KEY middleware must step aside for this prefix (the route
+    # enforces its credential itself — see routers/inbound.py). getattr: the
+    # set exists on any core that has the handoff mechanism; on an older core
+    # the route simply stays behind the global key.
+    prefixes = getattr(app.state, "self_authenticated_prefixes", None)
+    if prefixes is not None:
+        prefixes.add("/api/connectors/inbound/")
 
 
 async def startup(app) -> None:

@@ -90,14 +90,6 @@ def parse(expr: str) -> tuple[set[int], set[int], set[int], set[int], set[int]]:
     return tuple(fields)  # type: ignore[return-value]
 
 
-def is_valid(expr: str) -> bool:
-    try:
-        parse(expr)
-        return True
-    except ValueError:
-        return False
-
-
 def next_after(expr: str, after: datetime | None = None) -> datetime | None:
     """First occurrence strictly after ``after`` (default: now), or None when
     the expression has none within ~13 months (e.g. February 30th).

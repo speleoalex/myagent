@@ -37,7 +37,7 @@ echo "[1/4] Copying files..."
 mkdir -p "$INSTALL_DIR"
 
 # Sync files (exclude dev/local stuff; node_modules is reinstalled by setup.sh;
-# connectors/ has its own deploy script)
+# connectors/ has its own deploy script; satellite/ installs on ANOTHER device)
 rsync -a --delete \
     --exclude='.venv' \
     --exclude='__pycache__' \
@@ -49,6 +49,7 @@ rsync -a --delete \
     --exclude='CLAUDE.md' \
     --exclude='TODO-internal.md' \
     --exclude='connectors' \
+    --exclude='satellite' \
     "$SOURCE_DIR/" "$INSTALL_DIR/"
 
 # Venv, web-tool deps, permissions — one code path shared with the dev setup
@@ -85,6 +86,12 @@ Environment=MYAGENT_PORT=8888
 # Require an API key on every /api request (Bearer header or ?api_key=).
 # Recommended if you expose the port beyond localhost:
 #Environment=MYAGENT_API_KEY=change-me
+# Serve HTTPS directly, without a reverse proxy. Needed to install the UI as an
+# app from another device (browsers require a secure context; localhost already
+# is one). The certificate must be TRUSTED — a self-signed one you click through
+# still blocks the service worker. Omit the key file for a combined PEM:
+#Environment=MYAGENT_SSL_CERTFILE=/etc/myagent/fullchain.pem
+#Environment=MYAGENT_SSL_KEYFILE=/etc/myagent/privkey.pem
 # Trace every executor turn (messages sent to the LLM, raw replies, parsed tool
 # calls) to ~/myagent/logs/debug.log. Logs full chat content — enable it while
 # debugging an agent, not permanently:

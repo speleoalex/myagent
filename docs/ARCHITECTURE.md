@@ -402,6 +402,15 @@ asked of the connector (`session_id_for`): it derives from the binding's
 at all by default (`AutonomousConfig.history_messages: 0`); continuity comes from
 long-term memory instead.
 
+Inbound provenance is the reverse path: the transport hands
+`process_message` the sender's id / @username / display name, `CoreClient.chat`
+resolves them against the address book (`Connectors.sender_display`, the mirror
+of `resolve_recipients`) and the turn prefixes the MODEL-visible message with
+`[Message from Alessandro via Telegram]` (`ChatRequest.sender`,
+`run_channel_turn`). Per message, not per session — in a group the sender
+changes at every turn — and only on the model's copy: the stored display
+message stays exactly what the person typed.
+
 `GET /api/connectors/bindings` is served by the plugin and lets the agent form
 offer a real picker for `autonomous.notify_binding_id` instead of a free-text id;
 `GET /api/connectors/contacts` fills the suggestions for `autonomous.notify_to`,
@@ -411,6 +420,25 @@ id changing. A raw id still works (a group's is negative and no address book can
 hold it). Secrets are masked, never forwarded. Without the plugin the routes do not exist, so the fetches fail and the
 form falls back to a text input — which is the right control in that state, since
 the id must still be typeable.
+
+**The `satellite` channel** is a voice device (PC/Raspberry) running the
+standalone client in the repo's `satellite/` folder — installed on the device
+by its own `install.sh`, not inside myagent. The transport is inverted: the
+device calls us. Speech (or text) arrives on
+`POST /api/connectors/inbound/{binding_id}`, audio is transcribed server-side
+by the same Whisper path Telegram voice notes use, and the agent's reply
+travels back **in the same HTTP response** (a voice exchange must not race a
+push); the device's `/say` endpoint stays reserved for unsolicited messages —
+what `notify_user` delivers — and `/health` answers the UI's test button. One
+shared key works in both directions: the binding's token. That inbound route
+authenticates itself, so the plugin registers its prefix in
+`app.state.self_authenticated_prefixes` and the global MYAGENT_API_KEY
+middleware steps aside for it — a handoff, never an exemption: the route
+enforces the per-binding key with a constant-time compare, and an unknown id
+answers exactly like a bad key. A satellite has one conversation
+(chat id ≡ binding id), and an address-book contact whose `satellite` handle
+is the binding id lets agents notify the device by name — the notification
+lands in the same session as the spoken turns.
 
 **The address book reaches the model through the tool schema.** The plugin exposes
 `Connectors.notify_targets()` (contact names, channel labels, the broadcast word);
@@ -485,10 +513,63 @@ compact LLM conversation, so the bot keeps its context.
 
 Static SPA in `ui/`, served by FastAPI at `/` (mounted after the `/api/*`
 routers). Hash routing and the `App.api(method, path, body)` helper live in
-`ui/js/app.js`; chat streaming uses `EventSource` on `/api/chat/stream`.
+`ui/js/app.js`; chat streaming uses `fetch` on `/api/chat/stream`.
 UI strings go through `i18n('key')` with dictionaries in `ui/js/i18n/en.js`
 and `it.js` (both must be kept in sync). No build step; Bootstrap is vendored
 under `ui/vendor/`.
+
+The UI does not have to be served by MyAgent: it is plain static HTML with
+relative asset paths, so any web server can host it, and `App.serverBase`
+(Settings → *MyAgent server*, or a one-shot `?server=` URL parameter; stored
+in `localStorage`, empty = same origin) points it at the API. Every request —
+including the two streaming `fetch`es in `chat.js` — is built through
+`App.apiUrl(path)`; a literal `/api/...` URL would silently talk to the host
+serving the static files. The server side of the split is
+`MYAGENT_CORS_ORIGINS` (comma-separated origins; unset = no CORS layer,
+same-origin only). The CORS middleware is added AFTER the API-key middleware,
+which makes it the outer layer: a CORS preflight carries no `Authorization`
+header, so the key check must not see it first.
+
+### Installable (PWA)
+
+`ui/manifest.webmanifest` + `ui/sw.js` + `ui/js/pwa.js` make the UI installable
+as an app, with the shell available offline. Everything is relative
+(`start_url` and `scope` are `"."`), so it also installs from a subpath. The
+manifest needs its MIME type registered (`mimetypes.add_type` in
+`server/main.py`) — Python's table does not know `.webmanifest` and browsers
+reject a manifest served as `text/plain`.
+
+Three properties of the service worker are load-bearing:
+
+- **Nothing under `/api/` is ever cached.** The shell is static and versioned;
+  API answers are live state, and a stale agent list or a replayed chat turn is
+  worse than an error. Requests to a *remote* server (`App.serverBase`) are
+  cross-origin, which the worker already skips.
+- **`index.html` is network-first**, everything else cache-first. Every asset in
+  it carries a `?v=N` buster, making the HTML the only unversioned file — served
+  from cache first, an upgrade would never be seen. Offline, the cached copy
+  answers.
+- **The precache list is derived from `index.html`**, not written out in
+  `sw.js`. Duplicating the `?v=N` stamps across two files means one of them
+  rots. Each navigation re-derives the list from the HTML it just fetched,
+  caches what is missing and deletes superseded `?v=` copies, so a version bump
+  needs no worker change.
+
+Install and worker both require a **secure context**: `localhost` qualifies,
+a plain-http LAN address does not, and browsers offer neither without saying
+why — Settings → *Install app* reports that case explicitly, alongside the
+install button and a "clear cache and reload" escape hatch. For the LAN/VPN
+case, `MYAGENT_SSL_CERTFILE` / `MYAGENT_SSL_KEYFILE` (`_tls_files()` in
+`server/main.py`) hand a certificate to uvicorn, so HTTPS needs no reverse
+proxy. The key is optional — `ssl.load_cert_chain` reads it out of a combined
+PEM — but the paths are validated up front, because uvicorn surfaces a typo as
+a bare `FileNotFoundError` from inside the `ssl` module. Note that the
+certificate must be *trusted*: on an origin with a certificate error Chrome
+still refuses to register a service worker, so clicking through a self-signed
+warning buys nothing.
+
+Icons in `ui/icons/` are the bootstrap-icons `bi-robot` glyph (U+F6B1, the same
+one the navbar shows) rendered white on a blue gradient.
 
 ## Key files
 
@@ -515,3 +596,4 @@ under `ui/vendor/`.
 | Paths and env vars | `server/app/config.py` |
 | API endpoints | `server/app/routers/` |
 | Frontend JS | `ui/js/` |
+| Installable app (manifest, offline shell) | `ui/manifest.webmanifest`, `ui/sw.js`, `ui/js/pwa.js` |

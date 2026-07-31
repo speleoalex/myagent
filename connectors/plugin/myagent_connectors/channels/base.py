@@ -195,11 +195,16 @@ class BaseConnector:
     # ------------------------------------------------------------- main flow
     async def process_message(self, chat_id, user_id, text: str,
                               username: str | None = None,
-                              attachments: list[dict] | None = None) -> None:
+                              attachments: list[dict] | None = None,
+                              sender_name: str | None = None) -> None:
         """Full inbound pipeline: access → commands → agent → reply.
 
         ``attachments`` is a list of Attachment dicts (image/text) the transport
         already downloaded and prepared for the agent.
+
+        ``sender_name`` is the transport's display name for the sender (e.g.
+        Telegram first/last name) — a fallback for the provenance line when the
+        address book doesn't know this id.
 
         ``user_id`` is normalized to a string HERE, at the one entry point, so a
         transport may hand over whatever its API gives it (Telegram: an int) and
@@ -250,7 +255,10 @@ class BaseConnector:
         try:
             reply = await self.client.chat(self.binding.agent_id, text, sid,
                                            attachments=attachments,
-                                           source=self.type)
+                                           source=self.type,
+                                           sender_id=user_id,
+                                           sender_username=username or "",
+                                           sender_name=sender_name or "")
         except Exception as e:
             log.exception("agent call failed (%s): %s", self.binding.id, e)
             await self.send(chat_id, "⚠️ Error generating the reply. Please try again later.")

@@ -2,11 +2,13 @@ import asyncio
 import functools
 import hmac
 import logging
+import mimetypes
 import os
 from contextlib import asynccontextmanager
 
 import uvicorn
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -97,6 +99,14 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="MyAgent", version="0.1.0", lifespan=lifespan)
 
+# API paths that carry their OWN authentication (e.g. the connectors plugin's
+# device inbound, gated by a per-binding shared key): the global API-key
+# middleware skips them. A plugin adds its prefix in register(); the set is
+# read at request time, so registration order does not matter. INVARIANT: a
+# prefix listed here MUST enforce its own credential — this is an auth
+# handoff, never an auth exemption.
+app.state.self_authenticated_prefixes = set()
+
 # Optional API-key gate (MYAGENT_API_KEY). When set, it protects the API and
 # the OpenAPI docs; the static UI stays public (it holds no data — it prompts
 # for the key on the first 401). The key is accepted as a Bearer header or as
@@ -105,6 +115,9 @@ if config.API_KEY:
     @app.middleware("http")
     async def require_api_key(request: Request, call_next):
         path = request.url.path
+        self_auth = getattr(app.state, "self_authenticated_prefixes", ())
+        if any(path.startswith(p) for p in self_auth):
+            return await call_next(request)
         if path.startswith("/api/") or path in ("/docs", "/redoc", "/openapi.json"):
             auth = request.headers.get("authorization", "")
             candidate = auth[7:] if auth.lower().startswith("bearer ") else \
@@ -112,6 +125,23 @@ if config.API_KEY:
             if not hmac.compare_digest(candidate.encode(), config.API_KEY.encode()):
                 return JSONResponse({"detail": "Invalid or missing API key"}, status_code=401)
         return await call_next(request)
+
+# Optional CORS consent (MYAGENT_CORS_ORIGINS) for a UI hosted off this server:
+# the frontend is static HTML, so Apache/nginx can carry it and point back here
+# (Settings → "MyAgent server"), but the browser only allows that cross-origin
+# traffic if we say so. Unset = no CORS layer, same-origin only. Added AFTER the
+# API-key middleware on purpose: Starlette runs the last-added middleware
+# OUTERMOST, and the preflight OPTIONS carries no Authorization header — the
+# key check would 401 it before CORS could answer. allow_headers covers the
+# Bearer header, so key auth and CORS compose.
+if config.CORS_ORIGINS:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=config.CORS_ORIGINS,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    log.info("CORS enabled for origins: %s", ", ".join(config.CORS_ORIGINS))
 
 # Initialize stores (config lives under the user's home, see config.CONFIG_DIR)
 if CONFIG_SEEDED:
@@ -245,9 +275,37 @@ if app.state.plugins:
     ))
 
 # Serve the frontend (static UI lives in <root>/ui, separate from the server).
+# The web-app manifest makes the UI installable; Python's mimetypes table does
+# not know the extension, so StaticFiles would guess and browsers reject a
+# manifest served as text/plain.
+mimetypes.add_type("application/manifest+json", ".webmanifest")
 STATIC_DIR = PROJECT_ROOT / "ui"
 STATIC_DIR.mkdir(exist_ok=True)
 app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
+
+def _tls_files():
+    """(certfile, keyfile) for uvicorn, validated — or (None, None) for plain http.
+
+    Serving TLS here removes the need for a reverse proxy, and the reason to
+    want it is usually the browser rather than the wire: an installable UI
+    (see ui/js/pwa.js) requires a secure context, which localhost satisfies but
+    a LAN or VPN address in plain http does not.
+
+    The key is optional: ssl.load_cert_chain reads it from the certificate file
+    when that file is a combined PEM, which is what several ACME clients emit.
+    """
+    certfile = os.environ.get("MYAGENT_SSL_CERTFILE", "").strip() or None
+    keyfile = os.environ.get("MYAGENT_SSL_KEYFILE", "").strip() or None
+    if keyfile and not certfile:
+        raise SystemExit("MYAGENT_SSL_KEYFILE is set without MYAGENT_SSL_CERTFILE")
+    # Checked here rather than left to uvicorn: a typo in a path surfaces as a
+    # bare FileNotFoundError from inside the ssl module, at which point it is
+    # not obvious which of the two settings is wrong.
+    for var, path in (("MYAGENT_SSL_CERTFILE", certfile), ("MYAGENT_SSL_KEYFILE", keyfile)):
+        if path and not os.path.isfile(path):
+            raise SystemExit(f"{var}: no such file: {path}")
+    return certfile, keyfile
+
 
 if __name__ == "__main__":
     # Bind to localhost by default: the API has no authentication and ships
@@ -255,5 +313,8 @@ if __name__ == "__main__":
     # trusted network (or put an authenticating reverse proxy in front).
     host = os.environ.get("MYAGENT_HOST", "127.0.0.1")
     port = int(os.environ.get("MYAGENT_PORT", "8888"))
-    log.info("Starting MyAgent on http://%s:%d", host, port)
-    uvicorn.run(app, host=host, port=port)
+    ssl_certfile, ssl_keyfile = _tls_files()
+    log.info("Starting MyAgent on %s://%s:%d",
+             "https" if ssl_certfile else "http", host, port)
+    uvicorn.run(app, host=host, port=port,
+                ssl_certfile=ssl_certfile, ssl_keyfile=ssl_keyfile)

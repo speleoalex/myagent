@@ -324,6 +324,12 @@ class ChatRequest(BaseModel):
     # "telegram"). Stored on the session so the history UI can show where the
     # chat came from. Ignored for regular web chats.
     source: str | None = None
+    # Optional display of who sent this channel message (e.g. "Alessandro via
+    # Telegram"), resolved by the connector against its address book. Injected
+    # as a provenance line on the MODEL-visible user message only — the stored
+    # display message stays exactly what the person typed. Per message, not per
+    # session, because in a group chat the sender changes at every turn.
+    sender: str | None = None
 
     @field_validator("session_id")
     @classmethod
@@ -336,6 +342,16 @@ class ChatRequest(BaseModel):
     @classmethod
     def validate_source(cls, v: str | None) -> str | None:
         return None if not v else _check_id(v)
+
+    @field_validator("sender")
+    @classmethod
+    def validate_sender(cls, v: str | None) -> str | None:
+        # Free text from an external transport (a Telegram first_name is
+        # user-chosen): keep it one collapsed line and short, so it cannot
+        # smuggle extra prompt lines into the provenance marker.
+        if not v:
+            return None
+        return " ".join(str(v).split())[:120] or None
 
 
 class ChatResponse(BaseModel):

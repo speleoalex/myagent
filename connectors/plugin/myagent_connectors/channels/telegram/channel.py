@@ -384,6 +384,11 @@ class TelegramConnector(BaseConnector):
         if not chat:
             return
         chat_id, user_id, username = chat.get("id"), frm.get("id"), frm.get("username")
+        # Telegram's display name — many users have no @username, and this is
+        # what the provenance line falls back to when the address book has no
+        # contact for the id.
+        sender_name = " ".join(
+            p for p in (frm.get("first_name"), frm.get("last_name")) if p)
         text = msg.get("text")
         # A tapped reply-keyboard button arrives as its label text — map it back
         # to the command it stands for so the shared pipeline handles it.
@@ -424,7 +429,7 @@ class TelegramConnector(BaseConnector):
                 text = caption
 
         await self.process_message(chat_id, user_id, text or "", username=username,
-                                   attachments=attachments)
+                                   attachments=attachments, sender_name=sender_name)
 
     async def _transcribe_voice(self, chat_id, msg: dict):
         """Download a voice note and transcribe it locally to text. Returns

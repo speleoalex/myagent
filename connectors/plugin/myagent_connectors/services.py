@@ -117,6 +117,33 @@ class Connectors:
             "broadcast": BROADCAST_WORD,
         }
 
+    def sender_display(self, channel_type: str, user_id: str = "",
+                       username: str = "", name: str = "") -> str:
+        """Who sent an inbound message, written for the agent's eyes.
+
+        The reverse of ``resolve_recipients``: an id arrives from the transport
+        and the address book turns it back into a person. Preference order —
+        contact name (matched on the channel handle, id or @username), then the
+        transport's own display name / @username, then the raw id, so the agent
+        always gets SOMETHING it can repeat to notify_user or store in memory.
+        Returns "" when there is nothing to say (no sender data at all).
+        """
+        handle = (user_id or "").strip()
+        uname = (username or "").lstrip("@").strip().lower()
+        who = ""
+        for c in self._contacts():
+            h = (c.handle_for(channel_type) or "").strip()
+            if h and (h == handle or (uname and h.lstrip("@").lower() == uname)):
+                who = c.name or c.id
+                break
+        if not who:
+            who = ((name or "").strip()
+                   or (f"@{uname}" if uname else "")
+                   or (f"id {handle}" if handle else ""))
+        if not who:
+            return ""
+        return f"{who} via {self._channel_label(channel_type)}"
+
     def _pick_binding(self, channel_type: str,
                       binding_id: str) -> tuple[Binding | None, str]:
         """Which bot sends. ``binding_id`` wins when given — without it there is no

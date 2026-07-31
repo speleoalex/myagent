@@ -42,7 +42,15 @@ async def run_channel_turn(req: ChatRequest, named, executor) -> ChatResponse:
         prior = [ChatMessage(**m) for m in session.get("conversation", [])]
         attachments = [a.model_dump() for a in req.attachments] or None
 
-        response = await executor.run(req.message, prior, attachments,
+        # Provenance the MODEL sees: who wrote this, on which channel. Prefixed
+        # to the message (so a group chat, where the sender changes at every
+        # turn, stays attributable in the conversation history) and kept out of
+        # the display record below — the UI shows what the person typed.
+        model_message = req.message
+        if req.sender:
+            model_message = f"[Message from {req.sender}]\n{req.message}"
+
+        response = await executor.run(model_message, prior, attachments,
                                       memory_context=memory_context(session))
 
         conv = [m.model_dump(exclude_none=True) for m in response.conversation]

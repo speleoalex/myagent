@@ -37,6 +37,11 @@ class Binding(BaseModel):
 
     token: str = ""                 # bot credentials (secret)
 
+    # Base URL of the device, for channels where WE call THEM (e.g. a voice
+    # satellite's /say + /health). Empty for polled channels like Telegram.
+    # Not a secret: no masking.
+    url: str = ""
+
     # Access control
     # Messaging user ids allowed in allowlist mode. Strings: see _as_handle.
     allowed_ids: list[str] = []

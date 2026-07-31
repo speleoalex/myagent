@@ -57,8 +57,8 @@ log = logging.getLogger(__name__)
 # window opening is noticed within this many seconds (a queued event kicks the
 # loop immediately instead).
 SCAN_INTERVAL = 5.0
-# Conversation cap for autonomous sessions of agents WITHOUT memory: the
-# heartbeat would otherwise grow the compact history without bound. Agents with
+# Conversation cap for autonomous sessions of agents WITHOUT memory: recurring
+# wakes would otherwise grow the compact history without bound. Agents with
 # memory_enabled get real continuity from the compactor instead.
 NO_MEMORY_CONV_CAP = 40
 
@@ -92,7 +92,7 @@ def _when(task: dict) -> str:
                         if task.get("next_at") else "")
 
 
-def build_wake_prompt(agent: Agent, cfg: AutonomousConfig, tasks: list[dict],
+def build_wake_prompt(agent: Agent, tasks: list[dict],
                       granted_tools: set[str] | None = None,
                       next_task: dict | None = None) -> str:
     # Group wildcards (<category>/*) in agent.tools hide the concrete ids, so
@@ -152,7 +152,7 @@ def build_wake_prompt(agent: Agent, cfg: AutonomousConfig, tasks: list[dict],
         # ONLY way to learn a fact. And its system prompt is written for
         # interactive use — "the user's current request", "ask the user for
         # clarification" — which describes nothing that exists during a
-        # heartbeat. Without this line the model reliably skips call_agent and
+        # wake. Without this line the model reliably skips call_agent and
         # invents the answer instead, while happily using the two tools named
         # above. Keep it symmetrical with them.
         lines.append("To find something out, delegate with call_agent to one of "
@@ -311,7 +311,7 @@ class AutonomyService:
             executor = await AgentExecutor.create_for_agent(
                 aid, self.tool_registry, self.stores)
             prompt = build_wake_prompt(
-                agent, cfg, wake_tasks,
+                agent, wake_tasks,
                 set(self.tool_registry.expand_tool_ids(agent.tools)),
                 next_task=upcoming)
             drive = self._make_autonomous_drive(agent, executor, sid, prompt, result)

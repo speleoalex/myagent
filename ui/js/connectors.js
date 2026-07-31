@@ -158,7 +158,7 @@ const ConnectorsPage = {
         const isEdit = !!bindingId;
         let b = {
             id: '', name: '', type: 'telegram', enabled: true, agent_id: '',
-            token: '', access_mode: 'allowlist', allowed_ids: [],
+            token: '', url: '', access_mode: 'allowlist', allowed_ids: [],
             allowed_usernames: [], password: '', session_prefix: '',
             welcome: '', help_text: '',
         };
@@ -236,8 +236,15 @@ const ConnectorsPage = {
                             <i class="bi bi-plug"></i> ${i18n('connectors.test')}
                         </button>
                     </div>
-                    <div class="form-text" id="token-hint">${i18n(this._hint('token', 'connectors.tokenHint'))}</div>
+                    <div class="form-text" id="token-hint">${i18n(this._hint('token', 'connectors.tokenHint', b.type))}</div>
                     <div id="test-result" class="mt-2"></div>
+                </div>
+
+                <div class="mb-3 ${this._channel(b.type).url ? '' : 'd-none'}" id="block-url">
+                    <label class="form-label" for="f-url">${i18n('connectors.url')}</label>
+                    <input type="text" class="form-control" id="f-url" value="${App.escAttr(b.url || '')}"
+                           placeholder="${App.escAttr(this._channel(b.type).url?.example || '')}">
+                    <div class="form-text" id="url-hint">${i18n(this._hint('url', 'connectors.urlHint', b.type))}</div>
                 </div>
 
                 <div class="row g-3 mb-3">
@@ -259,7 +266,7 @@ const ConnectorsPage = {
                 <div class="mb-3" id="block-allowed">
                     <label class="form-label" for="f-allowed">${i18n('connectors.allowed')}</label>
                     <input type="text" class="form-control" id="f-allowed" value="${App.escAttr(allowed)}">
-                    <div class="form-text" id="allowed-hint">${i18n(this._hint('allowed', 'connectors.allowedHint'))}</div>
+                    <div class="form-text" id="allowed-hint">${i18n(this._hint('allowed', 'connectors.allowedHint', b.type))}</div>
                     <div id="allowed-chips" class="d-flex flex-wrap gap-2 mt-2"></div>
                 </div>
 
@@ -305,6 +312,13 @@ const ConnectorsPage = {
             if (tok) tok.textContent = i18n(this._hint('token', 'connectors.tokenHint'));
             const allow = document.getElementById('allowed-hint');
             if (allow) allow.textContent = i18n(this._hint('allowed', 'connectors.allowedHint'));
+            // The device-URL field only exists for channels whose manifest
+            // declares a `url` shape (e.g. satellite) — mirror of `handle`.
+            const urlSpec = this._channel().url;
+            document.getElementById('block-url').classList.toggle('d-none', !urlSpec);
+            document.getElementById('f-url').placeholder = urlSpec?.example || '';
+            const uh = document.getElementById('url-hint');
+            if (uh) uh.textContent = i18n(this._hint('url', 'connectors.urlHint'));
             this._renderChips();
         };
         document.getElementById('f-allowed').oninput = () => this._renderChips();
@@ -348,9 +362,12 @@ const ConnectorsPage = {
 
     /** A channel's hint key for one field, falling back to the generic one.
      * I18n.t() degrades to the key itself when a translation is missing, so a
-     * channel may ship a key the dictionaries don't have yet without breaking. */
-    _hint(field, fallback) {
-        return this._channel().hints?.[field] || fallback;
+     * channel may ship a key the dictionaries don't have yet without breaking.
+     * `type` matters during the FIRST render: the type <select> is not in the
+     * DOM yet, so _channelType() would fall back to the first discovered
+     * channel — which showed the satellite hints on a telegram form. */
+    _hint(field, fallback, type) {
+        return this._channel(type).hints?.[field] || fallback;
     },
 
     _matches(token, contact) {
@@ -404,6 +421,7 @@ const ConnectorsPage = {
             enabled: document.getElementById('f-enabled').checked,
             agent_id: val('f-agent'),
             token: document.getElementById('f-token').value.trim(),
+            url: val('f-url'),
             access_mode: val('f-access'),
             allowed_ids: ids,
             allowed_usernames: usernames,
@@ -426,9 +444,13 @@ const ConnectorsPage = {
             const res = (isEdit && (token === '********' || !token))
                 ? await App.api('POST', `/connectors/bindings/${encodeURIComponent(savedId)}/test`)
                 : await App.api('POST', '/connectors/bindings/test',
-                                { type: document.getElementById('f-type').value, token });
-            out.innerHTML = `<div class="alert alert-success mb-0">
-                ${i18n('connectors.testOk', { bot: App.esc(res.bot || '?'), name: App.esc(res.name || '') })}</div>`;
+                                { type: document.getElementById('f-type').value, token,
+                                  url: document.getElementById('f-url').value.trim() });
+            // A bot answers with its @handle; a device (satellite) only has a name.
+            const okMsg = res.bot
+                ? i18n('connectors.testOk', { bot: App.esc(res.bot), name: App.esc(res.name || '') })
+                : i18n('connectors.testOkDevice', { name: App.esc(res.name || '?') });
+            out.innerHTML = `<div class="alert alert-success mb-0">${okMsg}</div>`;
         } catch (err) {
             out.innerHTML = `<div class="alert alert-danger mb-0">${App.esc(err.message)}</div>`;
         } finally {

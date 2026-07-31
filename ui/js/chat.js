@@ -485,7 +485,7 @@ const ChatPage = {
 
         try {
             this.abortController = new AbortController();
-            const resp = await fetch('/api/chat/stream', {
+            const resp = await fetch(App.apiUrl('/chat/stream'), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', ...App.authHeaders() },
                 body: JSON.stringify({
@@ -522,7 +522,7 @@ const ChatPage = {
         const ui = this._newAssistantBubble();
         try {
             this.abortController = new AbortController();
-            const resp = await fetch('/api/chat/stream/attach', {
+            const resp = await fetch(App.apiUrl('/chat/stream/attach'), {
                 signal: this.abortController.signal,
                 headers: App.authHeaders(),
             });

@@ -252,6 +252,7 @@ const AgentsPage = {
      *  means. */
     // Label/min/step of the numeric ones live in numSpecs() (RangeField), the
     // single authority — stale copies here once looked authoritative and were not.
+    // Defaults flow the other way: numSpecs() reads its dflt from this table.
     AUTO_FIELDS: [
         { key: 'max_wakes_per_hour',     el: 'f-auto-maxwakes',     type: 'int',  dflt: 12,   group: 'grid' },
         { key: 'max_consecutive_errors', el: 'f-auto-maxerrors',    type: 'int',  dflt: 5,    group: 'grid' },
@@ -275,6 +276,9 @@ const AgentsPage = {
     numSpecs() {
         const F = RangeField.fmt;
         const K = 'agents.f.';
+        // Autonomy defaults come from AUTO_FIELDS — the same values
+        // readAutoConfig() compares against, so the two cannot drift.
+        const A = Object.fromEntries(this.AUTO_FIELDS.map(f => [f.el, f.dflt]));
         return {
             'f-maxiter': {
                 id: 'f-maxiter', int: true, dflt: 10, min: 1, max: 50,
@@ -356,7 +360,7 @@ const AgentsPage = {
                 },
             },
             'f-auto-maxwakes': {
-                id: 'f-auto-maxwakes', int: true, dflt: 12, min: 1, max: 120,
+                id: 'f-auto-maxwakes', int: true, dflt: A['f-auto-maxwakes'], min: 1, max: 120,
                 steps: [1, 2, 3, 4, 6, 12, 20, 30, 60, 120],
                 label: i18n('agents.autoMaxWakes'),
                 help: i18n(K + 'maxwakes.help'),
@@ -371,7 +375,7 @@ const AgentsPage = {
                 // 0 is a footgun, not "unlimited" (1 >= 0 pauses on the first
                 // failure), so the slider starts at 1. A stored 0 is still shown —
                 // spliced in — with a sentence that says what it really does.
-                id: 'f-auto-maxerrors', int: true, dflt: 5, min: 1, max: 20,
+                id: 'f-auto-maxerrors', int: true, dflt: A['f-auto-maxerrors'], min: 1, max: 20,
                 steps: [1, 2, 3, 5, 8, 10, 20],
                 label: i18n('agents.autoMaxErrors'),
                 help: i18n(K + 'maxerrors.help'),
@@ -384,7 +388,7 @@ const AgentsPage = {
             'f-auto-history': {
                 // 0 is a real, useful setting here (rely on memory alone), not a
                 // footgun — so unlike max-errors the scale starts at it.
-                id: 'f-auto-history', int: true, dflt: 0, min: 0, max: 40, sentinel: 0,
+                id: 'f-auto-history', int: true, dflt: A['f-auto-history'], min: 0, max: 40, sentinel: 0,
                 steps: [0, 2, 4, 8, 16, 40],
                 label: i18n('agents.autoHistory'),
                 help: i18n(K + 'history.help'),
@@ -403,7 +407,7 @@ const AgentsPage = {
                 },
             },
             'f-auto-timeout': {
-                id: 'f-auto-timeout', int: true, dflt: 600, min: 30, max: 3600,
+                id: 'f-auto-timeout', int: true, dflt: A['f-auto-timeout'], min: 30, max: 3600,
                 steps: [60, 120, 300, 600, 900, 1800, 3600],
                 label: i18n('agents.autoTimeout'),
                 help: i18n(K + 'timeout.help'),

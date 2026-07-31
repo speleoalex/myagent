@@ -1,0 +1,20 @@
+# MyAgent voice satellite — user unit (installed by install.sh, which
+# replaces @DIR@ with the folder's absolute path).
+#
+# As a service there is no terminal, so the satellite runs in speaker-only
+# mode: it announces what agents send to /say (notify_user), while
+# push-to-talk needs an interactive run (.venv/bin/python satellite.py).
+[Unit]
+Description=MyAgent voice satellite (speaker mode)
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=@DIR@
+Environment=PYTHONUNBUFFERED=1
+ExecStart=@DIR@/.venv/bin/python @DIR@/satellite.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
