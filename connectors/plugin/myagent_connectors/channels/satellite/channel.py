@@ -66,22 +66,13 @@ class SatelliteConnector(BaseConnector):
         ``chat_id`` is part of the BaseConnector contract but the device IS
         the chat — one satellite, one conversation (chat_id ≡ binding id, see
         ``ask()``) — so it plays no routing role here."""
-        if not self.binding.url:
-            self.status.detail = "no device URL configured"
-            return False
         try:
-            async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-                r = await client.post(self._device_url("/say"),
-                                      json={"text": text}, headers=self._auth())
-            if r.status_code != 200:
-                self.status.errors += 1
-                self.status.detail = f"/say answered {r.status_code}"
-                return False
+            await self._device_call("POST", "/say", {"text": text})
         except Exception as e:
-            # Redacted defensively: an httpx failure can quote the request,
-            # and the Authorization header carries the shared key.
+            # Already redacted by _device_call; best-effort by contract, so a
+            # failure is recorded in the status, never raised.
             self.status.errors += 1
-            self.status.detail = redact(str(e), self.binding.token)
+            self.status.detail = str(e)
             log.warning("say failed (%s): %s", self.binding.id, self.status.detail)
             return False
         self.status.errors = 0
@@ -91,23 +82,8 @@ class SatelliteConnector(BaseConnector):
 
     async def verify(self) -> dict:
         """Probe the device's /health — what the UI's test button calls."""
-        if not self.binding.url:
-            raise RuntimeError("no device URL configured")
-        try:
-            async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-                r = await client.get(self._device_url("/health"),
-                                     headers=self._auth())
-        except httpx.TransportError as e:
-            raise self._unreachable(e)
-        except Exception as e:
-            raise RuntimeError(redact(str(e), self.binding.token))
-        if r.status_code != 200:
-            raise RuntimeError(f"/health answered {r.status_code}")
-        try:
-            data = r.json()
-        except ValueError:
-            data = {}
-        return {"name": (data or {}).get("name", "")}
+        data = await self._device_call("GET", "/health")
+        return {"name": data.get("name", "")}
 
     # ------------------------------------------------- remote configuration
     # A voice device has settings only it can know are wrong — the silence
@@ -177,6 +153,13 @@ class SatelliteConnector(BaseConnector):
             return "⏳ Still working on your previous message…"
         self._busy.add(chat_key)
         try:
+            # The built-in commands too (/reset, /help): they are the same
+            # conversation, and the device's Reset button sends "/reset" here
+            # exactly as a Telegram user types it. Inside the busy guard so a
+            # reset cannot land in the middle of a turn it would half-erase.
+            handled = await self._handle_command(chat_key, text)
+            if handled is not None:
+                return handled
             sid = self.session_id_for(chat_key)
             reply = await self.client.chat(
                 self.binding.agent_id, text, sid,

@@ -7,12 +7,14 @@
   "listen_port": 8899,
   "language": "it",
   "voice": "voices/it_IT-paola-medium.onnx",
+  "volume": 80,
   "request_timeout_s": 180,
   "audio": {
     "samplerate": 16000,
-    "silence_threshold": 500,
+    "silence_threshold": 250,
     "silence_ms": 700,
     "max_seconds": 30,
-    "wait_speech_s": 10
+    "wait_speech_s": 10,
+    "max_gain": 8
   }
 }

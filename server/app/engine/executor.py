@@ -13,6 +13,7 @@ from app import config
 from app.engine import prompts
 from app.models import Agent, ChatMessage, ChatResponse, ModelConfig
 from app.engine.llm_provider import LLMProvider
+from app.engine.reasoning import ReasoningSplitter
 from app.engine.toolcall_parser import parse_tool_calls_from_text
 from app.tools.registry import ToolRegistry
 from app.storage.attachments import store_attachment
@@ -140,9 +141,12 @@ class AgentExecutor:
 
     def _build_trace(self, reply: str, iterations: int, steps: list[dict]) -> dict:
         """Assemble this agent's full execution trace."""
+        # The RESOLVED model, not agent.model_id: every seed agent ships with
+        # the "default" sentinel, so recording the agent's field would tell
+        # the reader of a trace nothing about what actually served the turn.
         return {
             "agent_id": self.agent.id,
-            "model_id": self.agent.model_id,
+            "model_id": self.model_config.id,
             "iterations": iterations,
             "reply": reply,
             "steps": steps,
@@ -157,6 +161,32 @@ class AgentExecutor:
         path writes; both read them from app.engine.prompts."""
         t = (text or "").strip()
         return (not t) or t.startswith(prompts.ASSISTANT_MARKER_PREFIXES)
+
+    @staticmethod
+    def _reasoning_events(pieces: tuple[str, str, bool], answer: str, sep: str):
+        """Turn one ReasoningSplitter output into SSE events.
+
+        Returns ``(events, answer, reasoning_added, sep)``. Shared by the two
+        streaming loops (a normal round and the forced synthesis) so they can't
+        drift apart. ``sep`` separates the thinking of consecutive rounds, and
+        is consumed by the first reasoning piece that actually appears."""
+        answer_piece, reason_piece, reclassify = pieces
+        events: list[dict] = []
+        if reclassify and answer:
+            # The chat template prefilled `<think>`: what we already streamed as
+            # the answer was the model still thinking. Take it back.
+            events.append({"type": "clear_tokens"})
+            reason_piece = answer + reason_piece
+            answer = ""
+        added = ""
+        if reason_piece:
+            added = sep + reason_piece
+            sep = ""
+            events.append({"type": "reasoning", "data": added})
+        if answer_piece:
+            answer += answer_piece
+            events.append({"type": "token", "data": answer_piece})
+        return events, answer, added, sep
 
     def _synthesis_messages(self, messages: list[dict]) -> list[dict]:
         """Messages for a forced, no-tool answer: drop empty/dangling turns and
@@ -982,6 +1012,7 @@ class AgentExecutor:
         trace_steps: list[dict] = []  # rich recursive trace (full results + sub-agents)
         executed_calls: set[tuple] = set()  # (name, args) keys already run
         malformed_retries = 0  # text-mode tool calls we asked the model to resend
+        full_reasoning = ""  # chain-of-thought of every round, kept out of the answer
         tools_downgrade_retried = False  # one free redo when the endpoint rejects `tools` mid-run
         use_response_temp = False  # switch to response_temperature after tool results
         stream_error: str | None = None  # last LLM failure, surfaced if no reply
@@ -1017,6 +1048,13 @@ class AgentExecutor:
             try:
                 full_content = ""
                 tool_calls_accum: dict[int, dict] = {}
+                # Chain-of-thought is a SEPARATE channel: it never enters
+                # full_content, so it reaches neither conversation[] (and thus
+                # the next round's prompt) nor the reply the channels deliver
+                # and a satellite speaks. One splitter per LLM call.
+                splitter = ReasoningSplitter()
+                # Rounds are concatenated into one block; separate them.
+                pending_sep = "\n\n" if full_reasoning else ""
 
                 async for chunk in self.provider.chat_completion_stream(
                     messages=messages,
@@ -1024,10 +1062,11 @@ class AgentExecutor:
                     temperature=current_temp,
                 ):
                     delta = chunk.get("choices", [{}])[0].get("delta", {})
-
-                    if delta.get("content"):
-                        full_content += delta["content"]
-                        yield {"type": "token", "data": delta["content"]}
+                    events, full_content, added, pending_sep = self._reasoning_events(
+                        splitter.feed(delta), full_content, pending_sep)
+                    full_reasoning += added
+                    for ev in events:
+                        yield ev
 
                     if delta.get("tool_calls"):
                         for tc_delta in delta["tool_calls"]:
@@ -1045,6 +1084,13 @@ class AgentExecutor:
                                 tool_calls_accum[idx]["function"]["name"] += func["name"]
                             if func.get("arguments"):
                                 tool_calls_accum[idx]["function"]["arguments"] += func["arguments"]
+
+                # Release whatever was held back as a possibly-cut-off tag.
+                events, full_content, added, pending_sep = self._reasoning_events(
+                    (*splitter.finish(), False), full_content, pending_sep)
+                full_reasoning += added
+                for ev in events:
+                    yield ev
 
             except Exception as e:
                 err_msg = str(e) or type(e).__name__
@@ -1252,6 +1298,8 @@ class AgentExecutor:
         if self._is_degenerate_reply(final_text) and trace_steps:
             yield {"type": "clear_tokens"}
             forced = ""
+            splitter = ReasoningSplitter()
+            pending_sep = "\n\n" if full_reasoning else ""
             try:
                 async for chunk in self.provider.chat_completion_stream(
                     messages=self._synthesis_messages(messages),
@@ -1259,9 +1307,16 @@ class AgentExecutor:
                     temperature=self._synthesis_temp(),
                 ):
                     delta = chunk.get("choices", [{}])[0].get("delta", {})
-                    if delta.get("content"):
-                        forced += delta["content"]
-                        yield {"type": "token", "data": delta["content"]}
+                    events, forced, added, pending_sep = self._reasoning_events(
+                        splitter.feed(delta), forced, pending_sep)
+                    full_reasoning += added
+                    for ev in events:
+                        yield ev
+                events, forced, added, pending_sep = self._reasoning_events(
+                    (*splitter.finish(), False), forced, pending_sep)
+                full_reasoning += added
+                for ev in events:
+                    yield ev
             except Exception as e:
                 log.warning("Forced answer stream failed: %s", e)
             if forced.strip():
@@ -1288,6 +1343,7 @@ class AgentExecutor:
 
         response = ChatResponse(
             reply=final_text,
+            reasoning=full_reasoning.strip(),
             conversation=clean_messages,
             iterations=iterations,
             tool_results=[_step_summary(s) for s in trace_steps],

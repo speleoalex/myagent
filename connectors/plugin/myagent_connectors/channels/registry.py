@@ -52,8 +52,8 @@ class Channel:
     label: str = ""
     hints: dict = field(default_factory=dict)
     handle: dict = field(default_factory=dict)
-    # Shape of Binding.url for channels where WE call the device (label +
-    # example, like `handle`). Missing/empty = the UI hides the URL field.
+    # Shape of Binding.url for channels where WE call the device (the
+    # placeholder `example`). Missing/empty = the UI hides the URL field.
     url: dict = field(default_factory=dict)
     # Declares that the far end is a DEVICE holding its own settings, which
     # /bindings/{id}/device can read and write ({"config": true, "voices":
@@ -69,7 +69,8 @@ class Channel:
 
     def info(self) -> dict:
         """What the UI needs: how to name the channel, which hint keys to show,
-        and how to label a person's handle on it."""
+        and how to label a person's handle on it (``handle.label`` may be an
+        i18n key — the UI translates it and falls back to the raw text)."""
         return {
             "type": self.type,
             "label": self.label or self.type,

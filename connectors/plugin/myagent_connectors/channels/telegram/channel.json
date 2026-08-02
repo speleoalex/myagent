@@ -5,11 +5,10 @@
   "class": "TelegramConnector",
   "hints": {
     "token": "connectors.telegram.tokenHint",
-    "allowed": "connectors.telegram.allowedHint",
-    "empty": "connectors.telegram.emptyHint"
+    "allowed": "connectors.telegram.allowedHint"
   },
   "handle": {
-    "label": "Telegram id or @username",
+    "label": "connectors.telegram.handleLabel",
     "example": "471091560"
   }
 }

@@ -1,0 +1,27 @@
+{
+  "name": "Local Read",
+  "description": "Read a document from the offline library by id, as returned by local_search. Long documents are paged: repeat the call with the offset printed at the end.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "id": {
+        "type": "string",
+        "description": "Result id from local_search, copied exactly"
+      },
+      "offset": {
+        "type": "integer",
+        "description": "Continue reading from this character offset",
+        "default": 0
+      },
+      "path": {
+        "type": "string",
+        "description": "Same 'path' passed to local_search, if any"
+      }
+    },
+    "required": [
+      "id"
+    ]
+  },
+  "timeout": 30,
+  "max_output": 9500
+}

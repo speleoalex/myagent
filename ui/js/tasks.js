@@ -292,7 +292,7 @@ const TasksPage = {
         };
         document.getElementById('f-mode').onchange = showPanes;
         App.container.querySelectorAll('.mode-pane input').forEach(el => {
-            el.oninput = () => this.refreshPreview();
+            el.oninput = () => this.schedulePreview();
             el.onchange = () => this.refreshPreview();
         });
         const noteLive = () => {
@@ -373,12 +373,25 @@ const TasksPage = {
         return { cron: this.PRESETS.weekly.build({ hh, mm, days: days.sort() }), at: '' };
     },
 
+    /** Debounced preview for keystroke events: while the user is mid-edit
+     *  every intermediate state is invalid, so don't ask the server yet. */
+    schedulePreview() {
+        clearTimeout(this._previewTimer);
+        this._previewTimer = setTimeout(() => this.refreshPreview(), 300);
+    },
+
     /** Next runs, straight from the server's own cron implementation. */
     async refreshPreview() {
+        clearTimeout(this._previewTimer);
         const box = document.getElementById('preview');
         if (!box) return;
         const schedule = this.readSchedule();
         if (schedule.error) return void (box.innerHTML = `<span class="text-danger">${App.esc(schedule.error)}</span>`);
+        if (schedule.cron && schedule.cron.split(/\s+/).length !== 5) {
+            // Field count only — cron semantics stay on the server.
+            box.innerHTML = `<span class="text-secondary">${i18n('tasks.cronIncomplete')}</span>`;
+            return;
+        }
         if (!schedule.cron) {
             box.innerHTML = schedule.at
                 ? `${i18n('tasks.willRun')} <strong>${App.esc(this.when(schedule.at))}</strong>`

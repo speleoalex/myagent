@@ -78,6 +78,9 @@ Related tools can share a **group folder**: a subfolder of the tools dir
 │   ├── file_write/
 │   ├── file_append/
 │   └── make_dir/
+├── library/                # another group: search the offline library…
+│   ├── local_search/       #   …then read one result at length
+│   └── local_read/
 └── shell_exec/             # ungrouped tool, same as before
 ```
 
@@ -173,7 +176,7 @@ by hand or from **Tools** in the UI.
 
 The tool subprocess uses whatever interpreter its shebang points at. If a
 tool needs packages from the app's venv, launch that venv's Python explicitly
-(see `server/tools/local_search/run` for the pattern):
+(see `server/tools/library/local_search/run` for the pattern):
 
 ```sh
 #!/bin/sh

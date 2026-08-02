@@ -1,0 +1,31 @@
+{
+  "name": "Local Search",
+  "description": "Search the offline library (local Wikipedia ZIM archives + the user's notes and documents). Returns compact results: id | title | snippet. Read a full document with local_read(id).",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "query": {
+        "type": "string",
+        "description": "Search terms or an article title"
+      },
+      "lang": {
+        "type": "string",
+        "description": "Wikipedia edition only, e.g. 'en', 'it'. Default: all"
+      },
+      "limit": {
+        "type": "integer",
+        "description": "Max results (1-8)",
+        "default": 5
+      },
+      "path": {
+        "type": "string",
+        "description": "Alternative folder or file to search. Default: the shared library"
+      }
+    },
+    "required": [
+      "query"
+    ]
+  },
+  "timeout": 30,
+  "max_output": 2500
+}

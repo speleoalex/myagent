@@ -13,6 +13,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from app.routers.crud import get_or_404, require_absent, require_exists
 from app.routers.secrets import SECRET_MASK
 
 from myagent_connectors.channels.base import Unreachable
@@ -64,10 +65,7 @@ async def list_bindings(request: Request):
 @router.get("/{binding_id}")
 async def get_binding(binding_id: str, request: Request):
     svc = services(request)
-    data = svc.bindings.get(binding_id)
-    if data is None:
-        raise HTTPException(404, "Binding not found")
-    d = _masked(data)
+    d = _masked(get_or_404(svc.bindings, binding_id, "Binding"))
     d["status"] = svc.manager.status(binding_id)
     return d
 
@@ -75,8 +73,7 @@ async def get_binding(binding_id: str, request: Request):
 @router.post("")
 async def create_binding(binding: Binding, request: Request):
     svc = services(request)
-    if svc.bindings.get(binding.id) is not None:
-        raise HTTPException(409, "A binding with this id already exists")
+    require_absent(svc.bindings, binding.id, "Binding")
     svc.bindings.save(binding.id, binding.model_dump())
     await svc.manager.reconcile(binding.id)
     return _masked(svc.bindings.get(binding.id))
@@ -85,9 +82,10 @@ async def create_binding(binding: Binding, request: Request):
 @router.put("/{binding_id}")
 async def update_binding(binding_id: str, binding: Binding, request: Request):
     svc = services(request)
-    existing = svc.bindings.get(binding_id)
-    if existing is None:
-        raise HTTPException(404, "Binding not found")
+    # require_exists, not get(): a corrupt file must stay repairable by
+    # overwriting it (the drift crud.py was written to end).
+    require_exists(svc.bindings, binding_id, "Binding")
+    existing = svc.bindings.get(binding_id) or {}
     if binding.id != binding_id:
         raise HTTPException(400, "id mismatch")
     data = binding.model_dump()
@@ -118,8 +116,7 @@ async def resume_binding(binding_id: str, request: Request):
     """Clear an auto-pause and reconnect. The counterpart of the scheduler's
     /api/autonomy/{id}/resume: a paused connector stays down until asked."""
     svc = services(request)
-    if svc.bindings.get(binding_id) is None:
-        raise HTTPException(404, "Binding not found")
+    require_exists(svc.bindings, binding_id, "Binding")
     await svc.manager.resume(binding_id)
     return {"ok": True, "status": svc.manager.status(binding_id)}
 
@@ -165,9 +162,7 @@ async def test_token(req: TestReq, request: Request):
 async def test_binding(binding_id: str, request: Request):
     """Validate the STORED credentials: the UI only ever sees the mask, so it
     cannot send the token back for a plain /test."""
-    data = services(request).bindings.get(binding_id)
-    if data is None:
-        raise HTTPException(404, "Binding not found")
+    data = get_or_404(services(request).bindings, binding_id, "Binding")
     return await _verify(Binding(**data), request)
 
 
@@ -179,9 +174,7 @@ async def test_binding(binding_id: str, request: Request):
 # way a second device channel needs no route of its own.
 def _device_connector(binding_id: str, request: Request, method: str):
     svc = services(request)
-    data = svc.bindings.get(binding_id)
-    if data is None:
-        raise HTTPException(404, "Binding not found")
+    data = get_or_404(svc.bindings, binding_id, "Binding")
     try:
         connector = create_connector(Binding(**data), svc.core, svc.grants)
     except ValueError as e:

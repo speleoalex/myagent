@@ -18,6 +18,8 @@ user to type that number into the model form, we ask the server:
     remote      GET  /v1/models -> context_length / max_model_len, when the
                                    gateway bothers to declare them (OpenRouter,
                                    vLLM, LiteLLM; OpenAI itself does not).
+    anthropic   GET  /v1/models/{id} -> max_input_tokens: the context window,
+                                   declared by the Anthropic Models API.
 
 Results are cached per (provider, base_url, model) with a short TTL: they are
 live data — restarting llama.cpp with a different ``-c`` changes them — but a
@@ -137,12 +139,20 @@ async def _probe_now(c: dict, client: httpx.AsyncClient | None) -> dict:
 
     own_client = None
     if client is None:
-        headers = {"Authorization": f"Bearer {c['api_key']}"} if c.get("api_key") else {}
+        if c.get("provider") == "anthropic":
+            headers = {"anthropic-version": "2023-06-01"}
+            if c.get("api_key"):
+                headers["x-api-key"] = c["api_key"]
+        else:
+            headers = {"Authorization": f"Bearer {c['api_key']}"} if c.get("api_key") else {}
         own_client = httpx.AsyncClient(timeout=PROBE_TIMEOUT, headers=headers)
         client = own_client
     try:
-        if (c.get("provider") or "ollama") == "ollama":
+        provider = c.get("provider") or "ollama"
+        if provider == "ollama":
             await _probe_ollama(client, base, c, out)
+        elif provider == "anthropic":
+            await _probe_anthropic(client, base, c, out)
         else:
             await _probe_openai_compatible(client, base, c, out)
     except Exception as e:
@@ -192,6 +202,22 @@ async def _probe_ollama(client, base: str, c: dict, out: dict) -> None:
                 break
     except Exception:
         pass
+
+
+async def _probe_anthropic(client, base: str, c: dict, out: dict) -> None:
+    """The Anthropic Models API declares the context window outright:
+    GET /v1/models/{id} carries max_input_tokens (and max_tokens)."""
+    if not base.endswith("/v1"):
+        base = f"{base}/v1"
+    model = (c.get("model") or "").strip()
+    if not model:
+        return
+    resp = await client.get(f"{base}/models/{model}", timeout=PROBE_TIMEOUT)
+    resp.raise_for_status()
+    d = resp.json()
+    out["reachable"] = True
+    out["served_model"] = d.get("id") or out["served_model"]
+    out["n_ctx_max"] = _first_int(d.get("max_input_tokens"))
 
 
 async def _probe_openai_compatible(client, base: str, c: dict, out: dict) -> None:
@@ -308,7 +334,7 @@ async def context_budget(cfg, *, client: httpx.AsyncClient | None = None) -> int
     # An explicit value already settles it for a remote provider, so don't spend
     # a round-trip on someone else's API. Local servers are on localhost and
     # llama.cpp has to be asked anyway (its fixed window clamps the value).
-    if c.get("provider") == "openai":
+    if c.get("provider") in ("openai", "anthropic"):
         explicit = _first_int(c.get("context_window"))
         if explicit:
             return explicit

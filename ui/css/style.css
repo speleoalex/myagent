@@ -56,6 +56,59 @@ body {
     color: var(--bs-danger-text-emphasis);
 }
 
+/* A thinking model's chain-of-thought: collapsed, above the tool calls. Quieter
+   than a tool call (dashed, no fill) — it is context, not something that ran. */
+.msg-reasoning {
+    border: 1px dashed var(--bs-border-color);
+    border-radius: 6px;
+    font-size: 0.82rem;
+    margin-bottom: 0.4rem;
+    opacity: 0.85;
+}
+
+.msg-reasoning > summary {
+    cursor: pointer;
+    padding: 0.3rem 0.5rem;
+    list-style: none;
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    user-select: none;
+}
+.msg-reasoning > summary::-webkit-details-marker {
+    display: none;
+}
+.msg-reasoning > summary::before {
+    content: "\25B8";  /* ▸ */
+    font-size: 0.7rem;
+    opacity: 0.6;
+}
+.msg-reasoning[open] > summary::before {
+    content: "\25BE";  /* ▾ */
+}
+.msg-reasoning.reasoning-live > summary {
+    /* Still thinking: the label pulses so a long silent block doesn't read as
+       a stall. Honors a reduced-motion preference below. */
+    animation: reasoning-pulse 1.4s ease-in-out infinite;
+}
+@keyframes reasoning-pulse {
+    50% { opacity: 0.5; }
+}
+@media (prefers-reduced-motion: reduce) {
+    .msg-reasoning.reasoning-live > summary { animation: none; }
+}
+
+.reasoning-body {
+    padding: 0.35rem 0.6rem 0.5rem;
+    border-top: 1px dashed var(--bs-border-color);
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-size: 0.78rem;
+    opacity: 0.9;
+    max-height: 300px;
+    overflow: auto;
+}
+
 /* Inline expandable tool calls (rendered in the chat, nesting recursively) */
 .tool-calls {
     display: flex;

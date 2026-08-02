@@ -11,6 +11,8 @@ It serves **its own page** at `http://<device>:8899/` — type to the agent, pre
 **Talk** to open the microphone, tune the settings. No app, no terminal: that
 page is how a headless device is actually used.
 
+![The satellite's page: a Talk button, the conversation, a text box](../docs/images/satellite.png)
+
 ```text
 [device]  mic → WAV ──────────▶  POST /api/connectors/inbound/<binding>   [myagent]
           speaker ◀─ reply ────  (same HTTP response)
@@ -57,14 +59,25 @@ endpoint, MyAgent presents it to the device's `/say`.
 http://<device-ip>:8899/
 ```
 
-- **Talk** opens the microphone ON THE DEVICE (not the browser's), records until
-  you stop speaking, and speaks the answer. This is the replacement for pressing
-  Enter in a terminal, and it works from a phone.
+Two screens, one action each — it is designed for a small touch panel with no
+keyboard in the room (800x480 on a Pi), not for a desktop window:
+
+- **Talk** — the big button — opens the microphone ON THE DEVICE (not the
+  browser's), records until you stop speaking, and speaks the answer. This is
+  the replacement for pressing Enter in a terminal, and it works from a phone.
 - The **text box** sends a typed message through the same path — useful in a
   quiet room, or to answer something the device just announced.
-- **Device settings** holds language, voice, voice install and the microphone
-  thresholds — the same values as the MyAgent form, since both write this
-  device's `config.json`.
+- **Reset** clears the conversation. It sends the connector's built-in
+  `/reset`, the same command a Telegram user types, so the history the agent
+  answers from is really gone and not just wiped off the screen. It asks twice:
+  a panel at elbow height gets touched by accident.
+- The **gear** opens the settings on their own screen: **volume** (with a
+  *Test* button, because volume is tuned by ear), spoken language, voice, voice
+  install and the microphone thresholds — the same values as the MyAgent form,
+  since both write this device's `config.json`.
+
+The page is shown in the device's own `language`, not the browser's: on the
+kiosk screen there is no browser locale anyone can set.
 
 The page itself is public (it is only markup); every action carries the shared
 key, which you paste once and the browser keeps. `install.sh` prints a
@@ -86,12 +99,14 @@ read at startup, so restart after editing by hand.
 | `name` | how the device introduces itself, and the sender the agent sees |
 | `language` | what is SPOKEN here (`it`, `en`, …). Sent with the audio so the server transcribes in that language instead of guessing; empty = auto-detect |
 | `voice` | path to the Piper `.onnx` that speaks the replies; empty = replies are printed only |
+| `volume` | playback volume 0-100, applied to the ALSA mixer at startup and whenever it changes. A device with no mixer reports that and the slider disappears — set the volume on the speaker instead. Setting it also lifts back any card playback control PulseAudio has parked at zero (see *A silent speaker* below) |
 | `myagent_url`, `binding_id`, `key` | pairing: which server, which binding, the shared key |
 | `listen_host`, `listen_port` | where `/say`, `/health` and `/config` answer |
 | `request_timeout_s` | how long to wait for the agent's reply (a local model can take minutes) |
-| `audio.silence_threshold` | RMS level that counts as speech. **The one value that needs tuning against the room** — too low and the mic never stops, too high and it never starts |
+| `audio.silence_threshold` | RMS level that counts as speech. **The one value that needs tuning against the room** — too low and the mic never stops, too high and it never starts. For scale: a USB speaker bar with someone talking at it reads ~25 idle and peaks around 1000-2000 on speech |
 | `audio.silence_ms` | how much silence closes an utterance |
 | `audio.max_seconds`, `audio.wait_speech_s` | caps: recording length, and how long to wait for speech after Enter |
+| `audio.max_gain` | ceiling for the auto-gain applied to a captured utterance before it is sent (`1` = off). A quiet microphone does not make whisper fail, it makes it *hallucinate* — it answers near-silence with stock filler like "Sottotitoli e revisione a cura di QTSS", which then reaches the agent as if a person had said it |
 
 ### From MyAgent, without ssh
 
@@ -119,13 +134,35 @@ curl -fsSLO --output-dir voices \
 
 ```bash
 .venv/bin/python satellite.py                        # push-to-talk + speaker
-systemctl --user enable --now myagent-satellite      # speaker-only service
+systemctl --user enable --now myagent-satellite      # page + speaker + microphone
 sudo loginctl enable-linger $USER                    # keep it up after logout (headless Pi)
 ```
 
 Without a terminal there is no Enter to press, but the microphone is **not**
 lost: use **Talk** on the device's page. That is why running it as a service is
 the normal setup, headless Pi included.
+
+### Kiosk: the page on the device's own screen
+
+A device WITH a display should show the agent, not a desktop:
+
+```bash
+bash kiosk.sh --install     # add it to the desktop session's autostart
+bash kiosk.sh               # try it now (needs a running X session)
+bash kiosk.sh --uninstall   # remove the autostart entry
+```
+
+`kiosk.sh` waits for `/health`, stops the screen from blanking and opens
+Chromium fullscreen on `http://127.0.0.1:<port>/?key=…`, so the page comes up
+already unlocked with nothing to type. The key is read from `config.json` at
+launch — never copied into the script — and the browser keeps its own profile
+(`~/.config/myagent-kiosk`), so clearing it does not touch your normal
+browsing. It ends up in that browser's argv, visible to `ps` on the device:
+the same trust boundary as `config.json` itself, and it never leaves localhost.
+
+Requires a desktop session (Raspberry Pi OS with desktop, autologin on) and
+`chromium-browser`. Undo the screen tweak with `xset s on +dpms` if you would
+rather the panel blanks.
 
 ## Check it works
 
@@ -150,6 +187,31 @@ to the device's contact makes it speak. From a browser, open
   `MYAGENT_WHISPER_MODEL`.
 - **No sound** — check `aplay -l`, and that the unit's user session owns the
   audio device (a user unit does; a system unit would not).
+- **A silent speaker, though the volume looks right** — compare the sink volume
+  with the card's own control: `pactl list sinks | grep -m1 Volume` against
+  `amixer -c <card> sget PCM`. When a card advertises a useless hardware range
+  (a USB speaker bar declaring its whole `PCM Playback Volume` as 0.00–0.39 dB)
+  PulseAudio takes the volume into software and parks that element at its
+  minimum — which on such a card is not a whisper, it is silence. The satellite
+  lifts it back on every volume change and at startup, and says so in the
+  journal (`mixer 1:PCM was parked at 0% — restoring`).
+- **Talk does nothing / "nothing was heard"** — `silence_threshold` is above
+  what this microphone gives. Read the actual levels before guessing:
+
+  ```bash
+  .venv/bin/python - <<'EOF'
+  import sounddevice as sd, struct
+  r, n = 16000, 16000*30//1000
+  with sd.RawInputStream(samplerate=r, channels=1, dtype="int16", blocksize=n) as s:
+      v = []
+      for _ in range(200):          # ~6 s: stay quiet, then talk
+          b = bytes(s.read(n)[0]); m = len(b)//2
+          v.append((sum(x*x for x in struct.unpack(f"<{m}h", b))/m)**0.5)
+  v.sort(); print("idle ~%.0f  loud ~%.0f  peak %.0f" % (v[len(v)//2], v[int(len(v)*.99)], v[-1]))
+  EOF
+  ```
+
+  Put the threshold between the two.
 - **Replies are printed but not spoken** — `piper` or the voice model is
   missing; rerun `install.sh`, set `voice` in `config.json`, or install one
   from the device box in MyAgent.

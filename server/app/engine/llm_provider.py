@@ -42,9 +42,14 @@ class LLMProvider:
         # Vision inference on local models can be slow (image encode + prefill),
         # so use a generous read timeout. Configurable via model options.
         read_timeout = float(model_config.options.get("request_timeout", 600))
-        # Remote OpenAI-compatible providers authenticate with a Bearer token.
+        # Remote OpenAI-compatible providers authenticate with a Bearer token;
+        # the Anthropic Messages API wants x-api-key + a pinned API version.
         headers = {}
-        if model_config.api_key:
+        if model_config.provider == "anthropic":
+            headers["anthropic-version"] = "2023-06-01"
+            if model_config.api_key:
+                headers["x-api-key"] = model_config.api_key
+        elif model_config.api_key:
             headers["Authorization"] = f"Bearer {model_config.api_key}"
         self._client = httpx.AsyncClient(
             timeout=httpx.Timeout(read_timeout, connect=10.0),
@@ -78,6 +83,10 @@ class LLMProvider:
         """Accept both base-URL conventions: with or without a trailing /v1
         (e.g. "https://api.openai.com/v1" and "http://localhost:11434")."""
         base = self.config.base_url.rstrip("/")
+        if self.config.provider == "anthropic":
+            if not base.endswith("/v1"):
+                base = f"{base}/v1"
+            return f"{base}/messages"
         if base.endswith("/v1"):
             return f"{base}/chat/completions"
         return f"{base}/v1/chat/completions"
@@ -276,14 +285,233 @@ class LLMProvider:
                     payload[replacement] = value
         return payload
 
+    # ------------------------------------------------------------------
+    # Anthropic Messages API (provider "anthropic")
+    #
+    # The rest of the app speaks OpenAI chat-completions end to end: the
+    # executor builds OpenAI-style messages/tools and consumes OpenAI-style
+    # stream chunks. The Anthropic support is therefore a translation layer
+    # confined to this class — requests are translated on the way out and
+    # SSE events back into `{"choices":[{"delta":...}]}` chunks on the way
+    # in, so executor, ReasoningSplitter and memory_compactor stay untouched.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _anthropic_tool(tool: dict) -> dict:
+        """OpenAI function definition -> Anthropic tool definition."""
+        func = tool.get("function", tool)
+        return {
+            "name": func.get("name", ""),
+            "description": func.get("description", ""),
+            "input_schema": func.get("parameters")
+            or {"type": "object", "properties": {}},
+        }
+
+    @staticmethod
+    def _anthropic_user_blocks(content) -> list[dict]:
+        """OpenAI user content (string or multimodal parts) -> content blocks."""
+        if isinstance(content, str):
+            return [{"type": "text", "text": content}] if content.strip() else []
+        blocks: list[dict] = []
+        if not isinstance(content, list):
+            return blocks
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            ptype = part.get("type")
+            if ptype == "text":
+                text = part.get("text", "")
+                if text.strip():
+                    blocks.append({"type": "text", "text": text})
+            elif ptype == "image_url":
+                url = (part.get("image_url") or {}).get("url", "")
+                if url.startswith("data:"):
+                    # data:<media_type>;base64,<data>
+                    header, _, data = url.partition(",")
+                    media_type = header[5:].split(";", 1)[0] or "image/png"
+                    blocks.append({
+                        "type": "image",
+                        "source": {"type": "base64",
+                                   "media_type": media_type, "data": data},
+                    })
+                elif url:
+                    blocks.append({
+                        "type": "image",
+                        "source": {"type": "url", "url": url},
+                    })
+            else:
+                # e.g. input_audio: the Messages API has no audio input.
+                log.warning("Anthropic provider: dropping unsupported "
+                            "content part type %r", ptype)
+        return blocks
+
+    def _anthropic_messages(self, messages: list[dict]) -> list[dict]:
+        """OpenAI-style history -> Anthropic messages.
+
+        system entries are hoisted by the caller; assistant tool_calls become
+        tool_use blocks and role:"tool" results become tool_result blocks in
+        a user message. Same-role neighbours are merged (tool results MUST
+        land in one user turn for parallel calls, and it keeps the strict
+        user-first alternation happy)."""
+        out: list[dict] = []
+
+        def append(role: str, blocks: list[dict]) -> None:
+            if not blocks:
+                return
+            if out and out[-1]["role"] == role:
+                out[-1]["content"].extend(blocks)
+            else:
+                out.append({"role": role, "content": blocks})
+
+        for m in messages:
+            role = m.get("role")
+            if role == "system":
+                continue
+            if role == "tool":
+                append("user", [{
+                    "type": "tool_result",
+                    "tool_use_id": m.get("tool_call_id", ""),
+                    "content": str(m.get("content") or ""),
+                }])
+            elif role == "assistant":
+                blocks = []
+                content = m.get("content")
+                if isinstance(content, str) and content.strip():
+                    # Never emit an empty text block: the API rejects it.
+                    blocks.append({"type": "text", "text": content})
+                for tc in m.get("tool_calls") or []:
+                    func = tc.get("function", {})
+                    try:
+                        args = json.loads(func.get("arguments") or "{}")
+                    except (json.JSONDecodeError, TypeError):
+                        args = {}
+                    if not isinstance(args, dict):
+                        args = {}
+                    blocks.append({
+                        "type": "tool_use",
+                        "id": tc.get("id", ""),
+                        "name": func.get("name", ""),
+                        "input": args,
+                    })
+                append("assistant", blocks)
+            else:
+                append("user", self._anthropic_user_blocks(m.get("content")))
+        return out
+
+    def _build_anthropic_payload(
+        self,
+        messages: list[dict],
+        tools: list[dict] | None,
+        temperature: float | None,
+        max_ctx: int,
+    ) -> dict:
+        # Truncate BEFORE translating: the estimator understands the
+        # OpenAI-style shapes (strings, image_url parts).
+        messages = self._truncate_messages(messages, max_ctx)
+
+        system = "\n\n".join(
+            m["content"] for m in messages
+            if m.get("role") == "system" and isinstance(m.get("content"), str)
+        )
+        payload = {
+            "model": self.config.model,
+            "messages": self._anthropic_messages(messages),
+            "stream": True,
+            # Required by the Messages API (it is a hard output cap).
+            "max_tokens": int(self.config.options.get("max_tokens") or 8192),
+        }
+        if system:
+            payload["system"] = system
+        if tools and self.supports_tools is not False:
+            payload["tools"] = [self._anthropic_tool(t) for t in tools]
+            payload["tool_choice"] = {"type": "auto"}
+        if temperature is not None:
+            payload["temperature"] = temperature
+        elif self.config.options.get("temperature") is not None:
+            payload["temperature"] = self.config.options["temperature"]
+        # frequency/presence penalty don't exist here; top_k does.
+        for key in ("top_p", "top_k"):
+            if key in self.config.options:
+                payload[key] = self.config.options[key]
+
+        # Re-apply what this endpoint already rejected (newer Claude models
+        # 400 on explicit sampling params — see _adapt_payload).
+        for key, replacement in self._param_fixes.items():
+            if key != "tools" and key in payload:
+                value = payload.pop(key)
+                if replacement:
+                    payload[replacement] = value
+        return payload
+
+    def _anthropic_chunks(self, event: dict, tool_idx: dict[int, int]) -> list[dict]:
+        """One Anthropic SSE event -> zero or more OpenAI-style stream chunks.
+
+        tool_idx maps the event's content-block index to the OpenAI tool_call
+        index the executor accumulates on (input_json_delta carries only the
+        block index, and text blocks in between must not shift tool indices).
+        """
+        etype = event.get("type")
+        if etype == "content_block_start":
+            block = event.get("content_block") or {}
+            if block.get("type") == "tool_use":
+                idx = len(tool_idx)
+                tool_idx[event.get("index", 0)] = idx
+                return [{"choices": [{"delta": {"tool_calls": [{
+                    "index": idx,
+                    "id": block.get("id", ""),
+                    "type": "function",
+                    "function": {"name": block.get("name", ""), "arguments": ""},
+                }]}}]}]
+            return []
+        if etype == "content_block_delta":
+            delta = event.get("delta") or {}
+            dtype = delta.get("type")
+            if dtype == "text_delta":
+                return [{"choices": [{"delta": {"content": delta.get("text", "")}}]}]
+            if dtype == "thinking_delta":
+                # Lands on the reasoning channel via ReasoningSplitter.
+                return [{"choices": [{"delta": {
+                    "reasoning_content": delta.get("thinking", "")}}]}]
+            if dtype == "input_json_delta":
+                idx = tool_idx.get(event.get("index", 0))
+                if idx is None:
+                    return []
+                return [{"choices": [{"delta": {"tool_calls": [{
+                    "index": idx,
+                    "function": {"arguments": delta.get("partial_json", "")},
+                }]}}]}]
+            return []
+        if etype == "message_delta":
+            stop = (event.get("delta") or {}).get("stop_reason")
+            if stop == "refusal":
+                # Safety classifiers decline with HTTP 200: without this the
+                # user would just see an empty reply.
+                details = event.get("delta", {}).get("stop_details") or {}
+                note = details.get("explanation") or ""
+                text = "[Request declined by the provider's safety filters"
+                text += f": {note}]" if note else ".]"
+                return [{"choices": [{"delta": {"content": text}}]}]
+            return []
+        if etype == "error":
+            message = (event.get("error") or {}).get("message", "unknown error")
+            raise RuntimeError(f"Anthropic stream error: {message}")
+        # ping, message_start, content_block_stop, message_stop
+        return []
+
     async def chat_completion_stream(
         self,
         messages: list[dict],
         tools: list[dict] | None = None,
         temperature: float | None = None,
     ) -> AsyncIterator[dict]:
-        payload = self._build_payload(messages, tools, temperature, stream=True,
-                                      max_ctx=await self._context_budget())
+        anthropic = self.config.provider == "anthropic"
+        if anthropic:
+            payload = self._build_anthropic_payload(
+                messages, tools, temperature,
+                max_ctx=await self._context_budget())
+        else:
+            payload = self._build_payload(messages, tools, temperature, stream=True,
+                                          max_ctx=await self._context_budget())
 
         # A 400 from an OpenAI-compatible endpoint usually means "this model
         # doesn't accept that field" rather than a real failure: adapt the
@@ -298,19 +526,33 @@ class LLMProvider:
                         log.warning("Model '%s' rejected the request (%s) — retrying adapted",
                                     self.config.model, detail or "no detail")
                         continue
-                    # Nothing left to adapt (or 401/404/500...): surface as-is.
+                    # Nothing left to adapt (or 401/404/500...): surface the
+                    # provider's own message when there is one — "credit
+                    # balance is too low" beats a bare "400 Bad Request" in
+                    # the chat UI (the executor shows str(exception)).
                     self._log_error_body(body, streaming=True)
+                    if detail:
+                        raise RuntimeError(
+                            f"LLM provider error (HTTP {resp.status_code}): {detail}")
                     resp.raise_for_status()
 
                 if self.supports_tools is None and "tools" in payload:
                     self.supports_tools = True
+                # Anthropic streams typed events (the type is inside the data
+                # JSON; the SSE `event:` lines are redundant and ignored here).
+                tool_idx: dict[int, int] = {}
                 async for line in resp.aiter_lines():
                     line = line.strip()
                     if line.startswith("data: ") and line != "data: [DONE]":
                         try:
-                            yield json.loads(line[6:])
+                            chunk = json.loads(line[6:])
                         except json.JSONDecodeError:
                             continue
+                        if anthropic:
+                            for translated in self._anthropic_chunks(chunk, tool_idx):
+                                yield translated
+                        else:
+                            yield chunk
                 return
 
         # Unreachable: every adaptation strictly shrinks the payload.
@@ -324,9 +566,14 @@ class LLMProvider:
         reason to give up tool calling), then the no-tools fallback.
         """
         low = detail.lower()
+        anthropic = self.config.provider == "anthropic"
 
         for key in DROPPABLE_PARAMS:
             if key not in payload or key not in low:
+                continue
+            if anthropic and key == "max_tokens":
+                # Required by the Messages API: dropping it would only trade
+                # this 400 for another. Surface the original error instead.
                 continue
             # Some models want the same value under a different name.
             replacement = ("max_completion_tokens"
@@ -346,7 +593,11 @@ class LLMProvider:
             self._param_fixes["tools"] = None
             payload.pop("tools", None)
             payload.pop("tool_choice", None)
-            payload["messages"] = self._sanitize_messages(payload["messages"])
+            if not anthropic:
+                # Anthropic payloads carry already-translated content blocks;
+                # the sanitizer only understands the OpenAI message shape
+                # (and Anthropic never rejects native tools anyway).
+                payload["messages"] = self._sanitize_messages(payload["messages"])
             return True
 
         return False

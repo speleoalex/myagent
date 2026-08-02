@@ -6,8 +6,8 @@ JS/Bootstrap 5 frontend (`ui/`), plain-JSON storage. An optional messaging
 plugin lives in `connectors/`, installed separately (see `docs/PLUGINS.md`).
 
 It is designed to run **without internet**: a local model serves the
-inference, the `local_search` tool answers from the offline library
-(`~/myagent/library`), and `http_request` reaches IoT devices on the LAN.
+inference, the `local_search` / `local_read` tools answer from the offline
+library (`~/myagent/library`), and `http_request` reaches IoT devices on the LAN.
 The web tools are an optional online extra.
 
 ## Repository layout
@@ -44,12 +44,18 @@ connectors/            # optional Telegram plugin: source only, NOT deployed
 4. `LLMProvider` (`server/app/engine/llm_provider.py`) talks to any
    OpenAI-compatible `/v1/chat/completions` endpoint. Providers: `ollama`,
    `llamacpp`, `openai` (generic remote with Bearer `api_key`; non-standard
-   sampling params are not forwarded to remote providers).
+   sampling params are not forwarded to remote providers), plus `anthropic`
+   (native Messages API `/v1/messages`, `x-api-key` auth): a translation
+   layer confined to `LLMProvider` converts the OpenAI-style request on the
+   way out and the typed SSE events back into OpenAI-shaped chunks on the way
+   in (`thinking_delta` → the reasoning channel, `tool_use`/`input_json_delta`
+   → incremental `tool_calls`), so the executor and the reasoning splitter
+   are provider-agnostic.
 5. `ToolRegistry` (`server/app/tools/registry.py`) dispatches each tool call
    to an external subprocess or an internal Python handler.
 
-SSE events emitted: `token`, `tool_start`, `tool_result`, `clear_tokens`,
-`error`, `done` (plus `stopped` from the live-run manager).
+SSE events emitted: `token`, `reasoning`, `tool_start`, `tool_result`,
+`clear_tokens`, `error`, `done` (plus `stopped` from the live-run manager).
 
 ## Executor details (`server/app/engine/executor.py`)
 
@@ -98,6 +104,20 @@ SSE events emitted: `token`, `tool_start`, `tool_result`, `clear_tokens`,
   call, so the advertised list and the permitted list cannot drift. Between
   agents only the essentials travel: the caller's `message` in, the sub-agent's
   `reply` out — a sub-agent never receives the parent's conversation history.
+- **Thinking is a separate channel** (`server/app/engine/reasoning.py`) — a
+  reasoning model's chain-of-thought arrives either in a dedicated delta field
+  (`reasoning_content`, `reasoning`) or inline as `<think>…</think>` inside the
+  content, and `ReasoningSplitter` peels it off *while it streams* (the tags
+  get cut in half by chunk boundaries, so the scan is stateful). It leaves as
+  `reasoning` SSE events and as `ChatResponse.reasoning`, never as `token`
+  text: the answer alone reaches `conversation[]` (and therefore the next
+  round's prompt), the channels, and a voice satellite's speaker. The chat
+  shows it collapsed above the answer and the session stores it on the display
+  message. Two wrinkles worth knowing: Qwen3/DeepSeek chat templates **prefill**
+  `<think>`, so the model emits only the closing tag — text already streamed as
+  the answer is then reclaimed with a `clear_tokens` event; and an unterminated
+  block (token cap hit mid-thought) stays reasoning rather than being promoted
+  to an answer.
 - **Live runs** — generation is decoupled from the HTTP client
   (`server/app/engine/live.py`): you can close the tab, re-attach to the
   stream later, or stop a run. In-flight runs live in memory only; finished
@@ -120,6 +140,9 @@ asks for it rather than requiring configuration
   `max_model_len` when the gateway declares one (OpenRouter, vLLM, LiteLLM).
   Precedence: explicit → probed → 32768 safety net. The value only bounds
   message truncation; nothing is allocated on our behalf.
+- **anthropic** — `GET /v1/models/{id}` declares `max_input_tokens` (the
+  context window) outright. Same precedence and truncation-only semantics as
+  the other remote provider.
 
 Probe answers are cached per (provider, base_url, model) with a 300s TTL and
 invalidated when a model config is saved or deleted.
@@ -170,7 +193,8 @@ Each tool is a folder with two files:
 **Groups (categories)** — a subfolder of the tools dir *without* its own
 `tool.json` is a group: its subfolders are scanned as ordinary tools, one
 level deep (e.g. the bundled `file_management/` holds `file_read`,
-`file_write`, `file_append`, `make_dir`). The group name becomes the tools'
+`file_write`, `file_append`, `make_dir`; `library/` holds `local_search` and
+`local_read`). The group name becomes the tools'
 `category`; ids stay global (the leaf folder name), so grouping a tool
 changes nothing for the agents that reference it. An agent's `tools` list can
 grant a whole group with the `<group>/*` wildcard (e.g. `file_management/*`)
@@ -483,6 +507,19 @@ queued behind a recording whose speaker has already finished. The page is public
 (it is markup) while every action carries the shared key: baking the key into the
 page would hand out the credential that also opens myagent's inbound route.
 
+The page is laid out for the screen it runs on — a small touch panel, typically
+800x480 — so it is **two screens**: one action (Talk) plus the conversation, and
+the settings on their own. Folding the settings under the conversation at that
+size either steals the space Talk needs or hides them below the fold. Reset
+sends the connector's built-in `/reset` rather than clearing the log, because
+the conversation is server-side and a cleared screen would leave the agent
+answering from a history the user believes gone; the page follows the DEVICE's
+`language`, since the kiosk screen has no browser locale to set; and volume is
+an ALSA mixer setting (`aplay` has no per-stream gain), discovered by control
+name and re-applied at every start. **`kiosk.sh`** on the device opens Chromium
+fullscreen on `127.0.0.1/?key=…` at graphical login, reading the key from
+`config.json`, so a device with a display comes up showing the agent.
+
 Voices download **in the background on the device** (tens of MB: an HTTP call
 held open that long is one the caller has already timed out on, which would read
 as a failure while the download was fine). `POST .../device/voices` returns as
@@ -535,7 +572,7 @@ Everything is plain JSON under `~/myagent/` (see `server/app/config.py`):
 | `~/myagent/config/mcp/` | `MYAGENT_CONFIG` | one JSON per MCP server (0600: `env`/`headers` may hold secrets) + `cache/` with the discovered tool catalogue |
 | `~/myagent/config/tasks/` | `MYAGENT_CONFIG` | one JSON per scheduled task (agent + prompt + cron/`at`) — user intent, hence config and not runtime state |
 | `~/myagent/tools/` | `MYAGENT_TOOLS` | tool folders |
-| `~/myagent/library/` | `MYAGENT_LIBRARY` | offline knowledge for `local_search` (ZIM archives, notes) — user-placed, never written by the app |
+| `~/myagent/library/` | `MYAGENT_LIBRARY` | offline knowledge for the `library/*` tools (ZIM archives, notes) — user-placed, never written by the app |
 | `~/myagent/workspace/` | `MYAGENT_WORKSPACE` | working dir for agents' file operations; relative paths in file/shell tools resolve here |
 | `~/myagent/sessions/` | `MYAGENT_SESSIONS` | `current.json`, `history/`, `channels/` (connector chats) |
 | `~/myagent/memory/` | `MYAGENT_MEMORY` | per-agent long-term memory: `<agent_id>/memory.md` + `chunks/*.md` |
@@ -648,6 +685,7 @@ one the navbar shows) rendered white on a blue gradient.
 |---|---|
 | Agent execution loop | `server/app/engine/executor.py` |
 | Text-based tool-call parsing | `server/app/engine/toolcall_parser.py` |
+| Chain-of-thought splitting (streaming) | `server/app/engine/reasoning.py` |
 | LLM communication | `server/app/engine/llm_provider.py` |
 | Context window / capability probe | `server/app/engine/model_probe.py` |
 | Live (client-decoupled) runs | `server/app/engine/live.py` |

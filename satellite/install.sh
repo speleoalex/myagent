@@ -50,20 +50,17 @@ for tool in aplay arecord; do
 done
 
 # ------------------------------------------------------------- Piper voice
-# Voice name <lang>_<REGION>-<speaker>-<quality> maps to the huggingface path
-# <lang>/<lang>_<REGION>/<speaker>/<quality>/<name>.onnx (+ .json).
 mkdir -p "$DIR/voices"
 ONNX="$DIR/voices/$VOICE.onnx"
 if [ ! -f "$ONNX" ]; then
-    locale="${VOICE%%-*}"                      # it_IT
-    lang="${locale%%_*}"                       # it
-    rest="${VOICE#*-}"                         # paola-medium
-    speaker="${rest%%-*}"                      # paola
-    quality="${rest#*-}"                       # medium
-    base="https://huggingface.co/rhasspy/piper-voices/resolve/main/$lang/$locale/$speaker/$quality/$VOICE"
+    # The voice-name → huggingface-URL derivation lives in satellite.py
+    # (voice_url), which serves every later install: one definition, no drift.
+    base="$("$DIR/.venv/bin/python" -c \
+        'import sys; sys.path.insert(0, sys.argv[1]); from satellite import voice_url; print(voice_url(sys.argv[2]))' \
+        "$DIR" "$VOICE" 2>/dev/null || true)"
     echo "Downloading Piper voice $VOICE…"
     if command -v curl >/dev/null 2>&1; then GET="curl -fsSL -o"; else GET="wget -qO"; fi
-    if ! $GET "$ONNX" "$base.onnx" || ! $GET "$ONNX.json" "$base.onnx.json"; then
+    if [ -z "$base" ] || ! $GET "$ONNX" "$base.onnx" || ! $GET "$ONNX.json" "$base.onnx.json"; then
         rm -f "$ONNX" "$ONNX.json"
         echo "WARNING: could not download the voice. TTS stays off until you" >&2
         echo "         put a voice in $DIR/voices/ and point config.json at it." >&2
@@ -128,4 +125,9 @@ Open the device's own page (type, Listen, settings — the key is prefilled once
 Talk from a terminal instead:       $DIR/.venv/bin/python $DIR/satellite.py
 Run it as a service:                systemctl --user enable --now myagent-satellite
 Test from the server:               curl http://$IP:8899/health
+
+If this device has a screen, show that page on it, fullscreen and unlocked,
+from the next graphical login:
+
+    bash $DIR/kiosk.sh --install
 EOM

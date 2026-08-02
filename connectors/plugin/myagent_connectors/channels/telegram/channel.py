@@ -303,28 +303,16 @@ class TelegramConnector(BaseConnector):
         return content
 
     @staticmethod
-    def _image_attachment(content: bytes, mime: str, name: str) -> dict:
-        b64 = base64.b64encode(content).decode()
-        return {"name": name, "kind": "image", "mime": mime,
-                "data": f"data:{mime};base64,{b64}"}
-
-    @staticmethod
     def _text_attachment(content: bytes, name: str) -> dict:
         return {"name": name, "kind": "text",
                 "data": content.decode("utf-8", errors="replace")}
 
     @staticmethod
-    def _audio_attachment(content: bytes, mime: str, name: str) -> dict:
-        # Sent as-is (opus/oga/mp3/...); myagent lets the bound model read it
-        # natively (if audio-capable) or transcribe it via document_extract.
-        b64 = base64.b64encode(content).decode()
-        return {"name": name, "kind": "audio", "mime": mime,
-                "data": f"data:{mime};base64,{b64}"}
-
-    @staticmethod
-    def _binary_attachment(content: bytes, mime: str, name: str, kind: str = "file") -> dict:
-        # Generic binary (e.g. PDF): myagent materializes it to a workspace file
-        # and the model reads it via document_extract (never inlined as text).
+    def _b64_attachment(kind: str, content: bytes, mime: str, name: str) -> dict:
+        # Any binary payload travels as a data: URI; the kind tells myagent how
+        # the model reads it — image/audio natively when the model can, "file"
+        # (e.g. PDF) materialized to the workspace for document_extract. Never
+        # inlined as text.
         mime = mime or "application/octet-stream"
         b64 = base64.b64encode(content).decode()
         return {"name": name, "kind": kind, "mime": mime,
@@ -341,7 +329,7 @@ class TelegramConnector(BaseConnector):
                 content = await self._fetch_file(photo["file_id"])
             except Exception as e:
                 return [], caption, f"⚠️ Could not download the image: {redact(str(e), self.binding.token)}"
-            return [self._image_attachment(content, "image/jpeg", "photo.jpg")], caption, None
+            return [self._b64_attachment("image", content, "image/jpeg", "photo.jpg")], caption, None
 
         doc = msg.get("document")
         if doc:
@@ -362,12 +350,12 @@ class TelegramConnector(BaseConnector):
             except Exception as e:
                 return [], caption, f"⚠️ Could not download the file: {redact(str(e), self.binding.token)}"
             if is_image:
-                return [self._image_attachment(content, mime or "image/jpeg", name)], caption, None
+                return [self._b64_attachment("image", content, mime or "image/jpeg", name)], caption, None
             if is_text:
                 return [self._text_attachment(content, name)], caption, None
             if is_audio:
-                return [self._audio_attachment(content, mime or "audio/ogg", name)], caption, None
-            return [self._binary_attachment(content, mime or "application/pdf", name)], caption, None
+                return [self._b64_attachment("audio", content, mime or "audio/ogg", name)], caption, None
+            return [self._b64_attachment("file", content, mime or "application/pdf", name)], caption, None
 
         # An audio *file* ('audio') → attachment; myagent lets the model read it
         # natively or transcribe it via document_extract. (Voice notes 'voice' are
@@ -380,7 +368,7 @@ class TelegramConnector(BaseConnector):
                 content = await self._fetch_file(audio["file_id"])
             except Exception as e:
                 return [], caption, f"⚠️ Could not download the audio: {redact(str(e), self.binding.token)}"
-            return [self._audio_attachment(content, mime, name)], caption, None
+            return [self._b64_attachment("audio", content, mime, name)], caption, None
 
         return [], caption, None
 

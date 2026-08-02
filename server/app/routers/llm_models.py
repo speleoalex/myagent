@@ -97,8 +97,7 @@ class RemoteModelsRequest(BaseModel):
     model_id: str | None = None
 
 
-@router.post("/openai/available")
-async def list_openai_models(req: RemoteModelsRequest, request: Request):
+def _remote_key(req: RemoteModelsRequest, request: Request) -> str:
     api_key = req.api_key
     # Empty or masked key + an existing config: reuse the stored key — but ONLY
     # if the request targets that model's own base_url. Otherwise a caller could
@@ -110,10 +109,30 @@ async def list_openai_models(req: RemoteModelsRequest, request: Request):
             api_key = stored.get("api_key", "")
         else:
             api_key = ""
+    return api_key
 
-    base = req.base_url.rstrip("/")
-    url = f"{base}/models" if base.endswith("/v1") else f"{base}/v1/models"
+
+@router.post("/anthropic/available")
+async def list_anthropic_models(req: RemoteModelsRequest, request: Request):
+    """Same shape as /openai/available ({"data":[{"id":...}]}), different
+    auth headers: the Anthropic API wants x-api-key + anthropic-version."""
+    api_key = _remote_key(req, request)
+    headers = {"anthropic-version": "2023-06-01"}
+    if api_key:
+        headers["x-api-key"] = api_key
+    return await _fetch_remote_models(req.base_url, headers)
+
+
+@router.post("/openai/available")
+async def list_openai_models(req: RemoteModelsRequest, request: Request):
+    api_key = _remote_key(req, request)
     headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    return await _fetch_remote_models(req.base_url, headers)
+
+
+async def _fetch_remote_models(base_url: str, headers: dict) -> list[str]:
+    base = base_url.rstrip("/")
+    url = f"{base}/models" if base.endswith("/v1") else f"{base}/v1/models"
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.get(url, headers=headers)
@@ -195,7 +214,7 @@ async def update_model(model_id: str, model: ModelConfig, request: Request):
     #  - the mask sentinel means "keep the stored key" (field untouched);
     #  - anything else (including an empty string) is taken literally, so the
     #    key can be replaced or explicitly cleared.
-    if model.provider != "openai":
+    if model.provider not in ("openai", "anthropic"):
         model.api_key = ""
     elif model.api_key == API_KEY_MASK:
         model.api_key = existing.get("api_key", "")

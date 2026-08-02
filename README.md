@@ -15,16 +15,18 @@ home where you'd rather not send everything to someone else's server.
 
 ![The Librarian agent answering from an offline Wikipedia archive](docs/images/chat-librarian.png)
 
-*A local model answering from an offline Wikipedia archive — this machine
-had no internet access.*
+*A local model answering from an offline Wikipedia archive: the Librarian
+searches the library, opens the best hit and answers from it. Nothing in that
+path touches the network.*
 
 ## Features
 
 - **Works offline** — local model + local knowledge + local devices. Nothing
   in the core path needs an internet connection
 - **Offline knowledge library** — drop Wikipedia ZIM archives and your own
-  Markdown/text documents into `~/myagent/library/`; the `local_search` tool
-  searches them full-text (see [Offline knowledge](#offline-knowledge-the-library))
+  Markdown/text documents into `~/myagent/library/`; agents search them
+  full-text and read what they find
+  (see [Offline knowledge](#offline-knowledge-the-library))
 - **IoT & home automation** — agents call your devices' local HTTP APIs
   (Home Assistant, Shelly, Tasmota, ESPHome, Hue …) over the LAN
   (see [Local devices](#local-devices--home-automation))
@@ -38,7 +40,8 @@ had no internet access.*
 - **Autonomous agents** *(opt-in, per agent)* — give an agent a **scheduled
   task** ("every Monday at 9", "every 20 minutes", "in one hour") and switch it
   **Live**: it runs unattended, takes initiatives, schedules its own future work
-  (`manage_tasks`) and pushes messages to you on Telegram (`notify_user`). Tasks
+  (`manage_tasks`) and reaches you where you are — Telegram, or out loud on a
+  voice satellite (`notify_user`, which takes a contact's name). Tasks
   are editable from the Tasks page or by asking the agent; a started agent
   restarts by itself after a reboot, and stopping it is one click
 - **Agent delegation** — agents can call other agents (`call_agent`), with
@@ -52,11 +55,22 @@ had no internet access.*
   import them (see [MCP servers](#mcp-servers))
 - **Works with tool-less models** — tool calls are also parsed from plain
   model text, so small local models without native function calling still work
+- **Any backend** — llama.cpp, Ollama, any OpenAI-compatible API (OpenAI,
+  OpenRouter, Groq, vLLM …) and the Anthropic API, which is spoken natively.
+  A model's context window is *probed* from the backend, not typed in and hoped
+  for
 - **Live chat** — token streaming, background generation you can leave and
   re-attach to, stop button, session history; regenerate an answer, edit a
   prompt and send it again, copy any answer as Markdown
-- **Telegram connector** — bridge any agent to a Telegram bot. An optional
-  plugin, installed separately (see [connectors/](connectors/README.md))
+- **Thinking models** — a reasoning model's chain-of-thought (a
+  `reasoning_content` field or an inline `<think>…</think>`) is peeled off while
+  it streams and shown collapsed above the answer: it never lands in the reply,
+  in the next prompt, or in a voice device's speaker
+- **Telegram and voice** — bridge an agent to a Telegram bot, or to a **voice
+  satellite**: a microphone and a speaker on a Raspberry Pi (or any spare PC)
+  that you talk to and that answers out loud, with the speech recognized on
+  your own server (see [Talking to it](#talking-to-it-telegram-and-voice)).
+  Both come from one optional plugin, installed separately
 - **Optional online tools** — web search and page reading are there when you
   *do* have connectivity, in a separate agent
 - **Installable** — the UI installs as an app (own window, launcher/home-screen
@@ -118,7 +132,9 @@ such.
 - At least one LLM backend — for a fully offline setup, a local one:
   - llama.cpp server (`http://localhost:8080`), or
   - Ollama (`http://localhost:11434`), or
-  - any remote OpenAI-compatible API with an API key *(needs internet)*
+  - any remote OpenAI-compatible API with an API key — OpenAI, OpenRouter,
+    Groq, Mistral, a vLLM box on the LAN … *(needs internet)*, or
+  - the Anthropic API (Claude), spoken natively *(needs internet)*
 - **`libzim`** *(optional)* — to search offline Wikipedia archives
 - **Node.js + Chrome/Chromium** *(optional)* — only for the online web tools
 
@@ -144,12 +160,18 @@ agents. Two kinds of files live side by side in that folder:
 | Put in `~/myagent/library/` | Searched how |
 |---|---|
 | **Wikipedia / ZIM archives** (`*.zim`) | full-text index built into the archive |
-| **Your notes and documents** (`.md`, `.txt`, `.rst`) | keyword scorer, results returned per section with `file › heading` |
+| **Your notes and documents** (`.md`, `.txt`, `.rst`) | keyword scorer, one result per section |
 
-The **Librarian** agent is wired to it out of the box: ask it a question and
-it searches the library and answers from what it finds — citing the article
-or file — or tells you the library doesn't cover it. The **Master** agent
-delegates general-knowledge questions to it before touching the web.
+Searching happens in two steps, so an agent pays for the text it actually
+wants: `local_search` returns a compact list (`id | title | snippet`, a few
+hundred tokens for the whole list) and `local_read` opens one of those ids at
+length, a page at a time for long documents.
+
+The **Librarian** agent is wired to both out of the box: ask it a question and
+it searches the library, reads the best hit and answers from what it finds —
+citing the article or file — or tells you the library doesn't cover it. The
+**Master** agent delegates general-knowledge questions to it before touching
+the web.
 
 ### Getting an offline Wikipedia
 
@@ -176,7 +198,7 @@ the `document_extract` tool (ask an agent to extract the file and write the
 Markdown into the library), then they become searchable like any other note.
 
 Each agent can also have its **own** knowledge folder instead of the shared
-one — the `local_search` tool takes an optional `path`.
+one — both library tools take an optional `path`.
 
 ## Local devices & home automation
 
@@ -200,6 +222,32 @@ section of its system prompt, one line each with the exact URL to call —
 (MQTT, Zigbee, serial, GPIO) write a tool: a folder with a `tool.json` and a
 `run` script that shells out to `mosquitto_pub`, a Python library, or
 whatever your hardware speaks — see [docs/TOOLS.md](docs/TOOLS.md).
+
+## Talking to it: Telegram and voice
+
+An agent does not have to be used from a browser. The optional **connectors
+plugin** ([connectors/](connectors/README.md), installed separately) binds an
+agent to a channel, and gives it a way to reach *you*:
+
+- **Telegram** — a bot answers as the agent bound to it, for the users you
+  allow. Voice notes are transcribed on your server before the agent sees them.
+- **Voice satellite** — a microphone and a speaker on a Raspberry Pi or a spare
+  PC ([satellite/](satellite/README.md)). You talk, the recording goes to
+  MyAgent and is transcribed there (Whisper), the agent answers, and the device
+  speaks the reply with [Piper](https://github.com/rhasspy/piper). It also
+  listens on `/say`, so an agent can make the kitchen speaker announce
+  something by itself.
+
+![The voice satellite's own page on a small touch panel](docs/images/satellite.png)
+
+*The satellite serves its own page — talk, type, tune the device — laid out for
+the 800×480 touch panel such a device usually has. The same settings are also
+editable from MyAgent, under Connectors.*
+
+Both directions stay on your network, and an agent addresses people by **name**:
+the plugin keeps an address book where a contact has one handle per channel, so
+`notify_user` can be told *"tell Sylvia the backup finished"* — on Telegram, or
+out loud in the kitchen.
 
 ## MCP servers
 
@@ -355,7 +403,7 @@ MyAgent keeps all runtime state under `~/myagent/`, decoupled from the code:
 ```text
 ~/myagent/
 ├── config/      # agents, models (API keys, 0600), MCP servers, settings — small & precious: back this up
-├── connectors/  # Telegram bindings (bot tokens, 0600), grants, address book
+├── connectors/  # channel bindings (bot tokens and device keys, 0600), grants, address book
 ├── plugins/     # installed plugins — code, replaceable (see docs/PLUGINS.md)
 ├── tools/       # your tools: the ones you (or the AI) create, plus your edits to the built-in ones
 ├── library/     # your offline knowledge: Wikipedia ZIM archives + notes/documents
@@ -387,7 +435,7 @@ Everything is configured via environment variables (none are required):
 | `MYAGENT_SESSIONS`   | `~/myagent/sessions`   | chat sessions                              |
 | `MYAGENT_MEMORY`     | `~/myagent/memory`     | per-agent long-term memory                 |
 | `MYAGENT_AUTONOMY`   | `~/myagent/autonomy`   | live agents' state and event queues        |
-| `MYAGENT_LIBRARY`    | `~/myagent/library`    | `local_search` knowledge folder            |
+| `MYAGENT_LIBRARY`    | `~/myagent/library`    | offline knowledge folder (library tools)   |
 | `MYAGENT_PLUGINS`    | `~/myagent/plugins`    | installed plugins                          |
 | `MYAGENT_CHANNEL_ROTATE_BYTES` | `2 MiB`      | size at which a channel session is archived and restarted |
 | `MYAGENT_DEBUG`      | *(off)*                | `1` = verbose executor trace (full chat content) |
@@ -402,7 +450,8 @@ Whisper model) — see [connectors/README.md](connectors/README.md).
 
 ![The bundled agents in the web UI](docs/images/agents.png)
 
-*The seven bundled agents. The play button on a card starts that agent as a
+*The seven bundled agents, each on the model chosen in Settings (`default`).
+The play button on a card starts that agent as a
 [live autonomous agent](#autonomous-agents).*
 
 First run seeds seven agents:
@@ -420,7 +469,9 @@ First run seeds seven agents:
 …plus three model configs: `llama-cpp` (whatever your llama.cpp server is
 serving on `:8080`), `gemma4` and `qwen3` (Ollama). The Ollama entries are
 models with native tool-calling support, which is what makes agents usable
-with small local models. Everything is editable, and nothing is lost by
+with small local models. Every seed agent runs on the **default model**
+picked in Settings, so pointing the whole set at another model is one
+choice in one place. Everything is editable, and nothing is lost by
 editing: an agent or tool you changed shows a *modified* badge with a **reset
 to original** button next to it, and an agent you deleted stays in the list as
 a dimmed card you can re-import in one click.
@@ -434,8 +485,8 @@ dependencies are present (`./setup.sh` reports what it finds):
 |----------------------------------|--------------------------------------|---------------------------------------------------|
 | Web search & browsing            | `web_search`, `browse_web`, `web_research` | Node.js + Chrome/Chromium (`PUPPETEER_EXECUTABLE_PATH` honored) |
 | Document extraction (PDF, images)| `document_extract`                   | `poppler-utils`, `tesseract`, `pandoc` (each optional) |
-| Offline Wikipedia archives       | `local_search`                       | `pip install libzim` (`.zim` files only — Markdown/text notes need nothing) |
-| Audio transcription (files and Telegram voice notes) | `document_extract` | `ffmpeg` + `faster-whisper` (installed with the connectors plugin) |
+| Offline Wikipedia archives       | `local_search`, `local_read`         | `pip install libzim` (`.zim` files only — Markdown/text notes need nothing) |
+| Speech to text (audio files, Telegram voice notes, voice satellites) | `document_extract` | `ffmpeg` + `faster-whisper` (installed with the connectors plugin) |
 
 ## Autonomous agents
 
@@ -458,9 +509,10 @@ Useful pieces to give a live agent:
 
 - `manage_tasks` — it schedules, reviews and cancels its own work
   ("check the backup log every morning")
-- `notify_user` — it messages you on Telegram through the
-  [connectors plugin](connectors/README.md); pick the bot and the default chat
-  in the agent's autonomy settings
+- `notify_user` — it reaches you through the
+  [connectors plugin](connectors/README.md): a Telegram message, or a sentence
+  spoken by a voice satellite. Recipients are contacts, addressed by name; the
+  agent's autonomy settings hold the default one
 - memory (`memory_enabled`) — so it remembers what it did across wakes
 - `POST /api/tasks` — trigger one from a script or a webhook (a task with no
   schedule is due immediately and runs once)
@@ -489,7 +541,10 @@ rely on shebangs); use WSL2.
   a worked example
 - [Writing plugins](docs/PLUGINS.md) — the plugin contract, isolation rules,
   where state goes
-- [Telegram connectors](connectors/README.md) — the messaging plugin
+- [Connectors](connectors/README.md) — the messaging plugin: Telegram bots,
+  channels, address book
+- [Voice satellite](satellite/README.md) — the speaker/microphone client for a
+  Raspberry Pi or a spare PC
 
 ## Contributing
 

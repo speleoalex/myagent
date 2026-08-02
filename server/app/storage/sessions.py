@@ -129,12 +129,20 @@ def steps_from(trace, tool_events: list[dict] | None) -> list[dict]:
     ]
 
 
-def record_turn(session: dict, steps: list[dict], reply: str, conversation) -> None:
+def record_turn(session: dict, steps: list[dict], reply: str, conversation,
+                reasoning: str = "") -> None:
     """Append the tool calls (recursive trace) and assistant reply, and update
-    the compact LLM history."""
+    the compact LLM history.
+
+    `reasoning` is a thinking model's chain-of-thought: kept on the display
+    message (the chat shows it collapsed) and deliberately absent from
+    `conversation`, which is what goes back to the model next turn."""
     for step in steps:
         session["messages"].append(tool_message_from_step(step))
-    session["messages"].append({"role": "assistant", "text": reply, "ts": now_iso()})
+    msg = {"role": "assistant", "text": reply, "ts": now_iso()}
+    if reasoning:
+        msg["reasoning"] = reasoning
+    session["messages"].append(msg)
     if conversation is not None:
         session["conversation"] = [
             m for m in conversation

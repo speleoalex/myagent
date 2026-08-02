@@ -19,12 +19,15 @@ _VALID_MCP_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,%d}$" % (MCP_ID_MAX_LEN - 1))
 class ModelConfig(BaseModel):
     id: str
     name: str
-    provider: str = "ollama"  # "ollama" | "llamacpp" | "openai" (generic OpenAI-compatible API)
+    # "ollama" | "llamacpp" | "openai" (generic OpenAI-compatible API) |
+    # "anthropic" (native Messages API, translated in LLMProvider)
+    provider: str = "ollama"
     model: str = ""
     base_url: str = "http://localhost:11434"
-    # Bearer token for remote OpenAI-compatible providers (OpenAI, OpenRouter,
-    # Groq, Mistral, ...). Never sent back to the frontend in clear (masked by
-    # the models router); empty for local providers.
+    # API key for remote providers: Bearer token for OpenAI-compatible ones
+    # (OpenAI, OpenRouter, Groq, Mistral, ...), x-api-key for Anthropic. Never
+    # sent back to the frontend in clear (masked by the models router); empty
+    # for local providers.
     api_key: str = ""
     api_format: str = "openai"
     # Modalities the model can read natively. They gate whether an attachment is
@@ -356,6 +359,11 @@ class ChatRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     reply: str
+    # Chain-of-thought of a thinking model, split out of the reply (see
+    # engine/reasoning.py). Shown collapsed in the chat and stored with the
+    # turn; deliberately NOT part of `conversation` — it is never fed back to
+    # the model, sent to a channel or spoken by a voice satellite.
+    reasoning: str = ""
     conversation: list[ChatMessage] = []
     iterations: int = 0
     tool_results: list[dict] = []

@@ -8,11 +8,10 @@
     "url": "connectors.satellite.urlHint"
   },
   "url": {
-    "label": "Device URL",
     "example": "http://192.168.1.50:8899"
   },
   "handle": {
-    "label": "Satellite binding id",
+    "label": "connectors.satellite.handleLabel",
     "example": "cucina"
   },
   "device": {

@@ -1,0 +1,11 @@
+#!/bin/sh
+# local_search launcher.
+# The libzim dependency lives in the app virtualenv. Tools run from
+# ~/myagent/tools (outside the app tree), so prefer the app dir exported by
+# the ToolRegistry; fall back to the legacy layout (tool folder inside the
+# app tree) and finally to system python3.
+DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+PY="$MYAGENT_APP_DIR/.venv/bin/python"
+[ -x "$PY" ] || PY="$DIR/../../../.venv/bin/python"
+[ -x "$PY" ] || PY=python3
+exec "$PY" "$DIR/search.py"

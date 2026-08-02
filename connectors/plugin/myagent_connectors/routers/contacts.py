@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request
 
+from app.routers.crud import get_or_404, require_absent, require_exists
+
 from myagent_connectors.models import Contact
 from myagent_connectors.services import services
 
@@ -37,17 +39,13 @@ async def list_contacts(request: Request):
 
 @router.get("/{contact_id}")
 async def get_contact(contact_id: str, request: Request):
-    data = services(request).contacts.get(contact_id)
-    if data is None:
-        raise HTTPException(404, "Contact not found")
-    return _public(data)
+    return _public(get_or_404(services(request).contacts, contact_id, "Contact"))
 
 
 @router.post("")
 async def create_contact(contact: Contact, request: Request):
     store = services(request).contacts
-    if store.get(contact.id) is not None:
-        raise HTTPException(409, "A contact with this id already exists")
+    require_absent(store, contact.id, "Contact")
     store.save(contact.id, contact.model_dump())
     return _public(store.get(contact.id))
 
@@ -55,8 +53,8 @@ async def create_contact(contact: Contact, request: Request):
 @router.put("/{contact_id}")
 async def update_contact(contact_id: str, contact: Contact, request: Request):
     store = services(request).contacts
-    if store.get(contact_id) is None:
-        raise HTTPException(404, "Contact not found")
+    # require_exists, not get(): a corrupt file stays repairable by overwrite.
+    require_exists(store, contact_id, "Contact")
     if contact.id != contact_id:
         raise HTTPException(400, "id mismatch")
     store.save(contact_id, contact.model_dump())

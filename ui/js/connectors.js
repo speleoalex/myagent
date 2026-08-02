@@ -250,7 +250,7 @@ const ConnectorsPage = {
                 <div class="mb-4 d-none" id="block-device"></div>
 
                 <div class="row g-3 mb-3">
-                    <div class="col-12 col-md-6">
+                    <div class="col-12 col-md-6" id="block-access">
                         <label class="form-label" for="f-access">${i18n('connectors.access')}</label>
                         <select class="form-select" id="f-access">
                             <option value="allowlist" ${b.access_mode === 'allowlist' ? 'selected' : ''}>${i18n('connectors.accessAllowlist')}</option>
@@ -278,7 +278,7 @@ const ConnectorsPage = {
                     <div class="form-text">${i18n('connectors.passwordHint')}</div>
                 </div>
 
-                <div class="mb-3">
+                <div class="mb-3" id="block-welcome">
                     <label class="form-label" for="f-welcome">${i18n('connectors.welcome')}</label>
                     <textarea class="form-control" id="f-welcome" rows="2">${App.esc(b.welcome)}</textarea>
                 </div>
@@ -321,6 +321,7 @@ const ConnectorsPage = {
             document.getElementById('f-url').placeholder = urlSpec?.example || '';
             const uh = document.getElementById('url-hint');
             if (uh) uh.textContent = i18n(this._hint('url', 'connectors.urlHint'));
+            this._syncAccess();
             this._renderChips();
             this._loadDevice(isEdit ? b.id : '');
         };
@@ -412,6 +413,9 @@ const ConnectorsPage = {
                     <label class="form-label" for="d-language">${i18n('connectors.deviceLanguage')}</label>
                     <input type="text" class="form-control" id="d-language" list="d-languages"
                            value="${App.escAttr(d.language || '')}" placeholder="it">
+                    <!-- language and voice suggestions: keep in sync with the
+                         datalists in satellite/ui.html, which cannot import them
+                         (the device page must work with no server in sight) -->
                     <datalist id="d-languages">
                         ${['it', 'en', 'fr', 'de', 'es', 'pt', 'nl'].map(c => `<option value="${c}">`).join('')}
                     </datalist>
@@ -534,9 +538,16 @@ const ConnectorsPage = {
     },
 
     _syncAccess() {
+        // A device channel (satellite) authenticates with the binding token and
+        // never runs the user-facing pipeline: access modes and the welcome
+        // message would be dead controls there, so they are hidden — a user who
+        // sets "password" on a device would believe it protects something.
+        const device = !!this._channel().device;
         const mode = document.getElementById('f-access').value;
-        document.getElementById('block-allowed').classList.toggle('d-none', mode !== 'allowlist');
-        document.getElementById('block-password').classList.toggle('d-none', mode !== 'password');
+        document.getElementById('block-access').classList.toggle('d-none', device);
+        document.getElementById('block-welcome').classList.toggle('d-none', device);
+        document.getElementById('block-allowed').classList.toggle('d-none', device || mode !== 'allowlist');
+        document.getElementById('block-password').classList.toggle('d-none', device || mode !== 'password');
     },
 
     // Address-book chips over the free-text field. The text field stays the
@@ -614,9 +625,11 @@ const ConnectorsPage = {
 
     _readForm() {
         const val = id => document.getElementById(id).value.trim();
+        // Identifiers are STRINGS end to end (a phone number keeps its '+', a
+        // Telegram id may outgrow 2^53): never Number() them.
         const ids = [], usernames = [];
         for (const token of this._tokens()) {
-            if (/^-?\d+$/.test(token)) ids.push(Number(token));
+            if (/^[+-]?\d+$/.test(token)) ids.push(token);
             else usernames.push(token.replace(/^@/, '').toLowerCase());
         }
         return {
@@ -783,7 +796,7 @@ const ConnectorsPage = {
                     ${(this._types.length ? this._types : [{ type: 'telegram', label: 'Telegram' }]).map(t => `
                     <div class="col-12 col-md-6">
                         <label class="form-label" for="c-h-${App.escAttr(t.type)}">
-                            ${App.esc(t.handle?.label || t.label || t.type)}</label>
+                            ${App.esc(i18n(t.handle?.label || t.label || t.type))}</label>
                         <input type="text" class="form-control" id="c-h-${App.escAttr(t.type)}"
                                data-handle="${App.escAttr(t.type)}"
                                placeholder="${App.escAttr(t.handle?.example || '')}"

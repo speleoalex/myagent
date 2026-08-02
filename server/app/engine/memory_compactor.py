@@ -38,6 +38,7 @@ from collections import Counter
 from app.engine import prompts
 from app.engine.executor import AgentExecutor
 from app.engine.llm_provider import LLMProvider
+from app.engine.reasoning import strip_reasoning
 from app.models import Agent, ModelConfig
 from app.storage.memory import MemoryStore
 from app.storage.sessions import now_iso
@@ -54,7 +55,6 @@ CONTEXT_CAP = 6
 # Temperature for summarization calls: factual, not creative.
 _SUMMARY_TEMP = 0.2
 
-_THINK_RE = re.compile(r"^\s*<think>.*?</think>\s*", re.DOTALL)
 _WORD_RE = re.compile(r"[a-zA-Zà-ÿÀ-ß0-9_]{5,}")
 
 
@@ -126,7 +126,9 @@ def _validate_summary(text: str | None, max_chars: int) -> str | None:
     runaway-long, JSON/tool-call shaped, or echoed tool plumbing."""
     if not text:
         return None
-    text = _THINK_RE.sub("", text).strip()
+    # A thinking model summarizing: this call streams straight into a string
+    # (no executor), so the chain-of-thought is still inline here.
+    text = strip_reasoning(text)
     if len(text) < 20 or len(text) > max_chars * 2:
         return None
     if text[0] in "{[":

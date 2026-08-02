@@ -165,16 +165,12 @@ class BaseConnector:
                     text: str) -> tuple[bool, str | None]:
         """Return (allowed, reply_if_denied_or_note). For password mode this may
         consume a ``/start <password>`` and grant access."""
-        mode = self.binding.access_mode
-        if mode == "open":
+        if self.quick_authorized(user_id, username):
             return True, None
+        mode = self.binding.access_mode
         if mode == "allowlist":
-            if self._in_allowlist(user_id, username):
-                return True, None
             return False, "⛔ You are not authorized to use this bot."
         if mode == "password":
-            if user_id in self.grants.get(self.binding.id):
-                return True, None
             # Expect "/start <password>" or the bare password.
             candidate = text.strip()
             if candidate.startswith("/start"):

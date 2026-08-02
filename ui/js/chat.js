@@ -280,9 +280,10 @@ const ChatPage = {
         const box = document.getElementById('chat-messages');
         if (box) box.innerHTML = '';
         let pendingTools = [];
-        const flushAssistant = (text, ts) => {
+        const flushAssistant = (text, ts, reasoning) => {
             const msgDiv = this.createMessageDiv('assistant');
             msgDiv._md = text || '';  // raw markdown, for the copy / source view
+            this.setReasoning(msgDiv, reasoning || '', false);
             if (pendingTools.length) {
                 const tc = document.createElement('div');
                 tc.className = 'tool-calls';
@@ -304,7 +305,7 @@ const ChatPage = {
             } else if (m.role === 'tool') {
                 pendingTools.push(m);
             } else if (m.role === 'assistant') {
-                flushAssistant(m.text || '', m.ts);
+                flushAssistant(m.text || '', m.ts, m.reasoning);
             } else if (m.role === 'error') {
                 this.appendMessage('error', m.text || '', m.ts);
             }
@@ -553,6 +554,33 @@ const ChatPage = {
         return { msgDiv, contentDiv, toolsInline, thinking };
     },
 
+    // A thinking model's chain-of-thought, collapsed above the tool calls and
+    // the answer. Plain text on purpose (textContent): it is the model talking
+    // to itself, half-formed markdown included, and it must never be able to
+    // inject markup. Kept out of msgDiv._md, so copy / "show source" / the
+    // stored turn keep meaning the answer alone.
+    setReasoning(msgDiv, text, live) {
+        if (!text) return null;
+        let box = msgDiv.querySelector(':scope > .msg-reasoning');
+        const fresh = !box;
+        if (fresh) {
+            box = document.createElement('details');
+            box.className = 'msg-reasoning';
+            const sum = document.createElement('summary');
+            sum.innerHTML = '<i class="bi bi-lightbulb"></i> <span class="rs-label"></span>';
+            box.appendChild(sum);
+            const body = document.createElement('div');
+            body.className = 'reasoning-body';
+            box.appendChild(body);
+            msgDiv.insertBefore(box, msgDiv.firstChild);
+        }
+        box.querySelector('.reasoning-body').textContent = text;
+        box.querySelector('.rs-label').textContent =
+            i18n(live ? 'chat.reasoningLive' : 'chat.reasoning');
+        box.classList.toggle('reasoning-live', !!live);
+        return fresh ? box : null;  // non-null only when it just appeared
+    },
+
     // Read an SSE stream into the given bubble. Shared by send and re-attach.
     // If the bubble leaves the DOM (user navigated away) it stops consuming but
     // the server keeps generating, so we can re-attach later.
@@ -564,6 +592,15 @@ const ChatPage = {
         const reader = resp.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '', streamedText = '', errored = false, stopped = false, idle = false;
+        let reasoningText = '', reasoningLive = false;
+        // Drop the "reasoning..." label once the model moves on to the answer.
+        // Guarded: this runs on every token, and rewriting the whole block
+        // each time would be O(reasoning) per character of the answer.
+        const settleReasoning = () => {
+            if (!reasoningLive) return;
+            reasoningLive = false;
+            this.setReasoning(msgDiv, reasoningText, false);
+        };
 
         while (true) {
             const { done, value } = await reader.read();
@@ -579,10 +616,19 @@ const ChatPage = {
                 switch (event.type) {
                     case 'token':
                         clearThinking();
+                        settleReasoning();
                         streamedText += event.data;
                         msgDiv._md = streamedText;
                         contentDiv.innerHTML = this.renderMarkdown(streamedText);
                         scroll();
+                        break;
+                    case 'reasoning':
+                        // Collapsed while it streams: the typing dots already
+                        // say "working", and an auto-expanding block would push
+                        // the answer off screen on every turn.
+                        reasoningText += event.data;
+                        reasoningLive = true;
+                        if (this.setReasoning(msgDiv, reasoningText, true)) scroll();
                         break;
                     case 'clear_tokens':
                         streamedText = '';
@@ -599,6 +645,7 @@ const ChatPage = {
                         break;
                     case 'done': {
                         clearThinking();
+                        settleReasoning();
                         if (errored) break;
                         if (!streamedText && event.data && event.data.reply) {
                             msgDiv._md = event.data.reply;
@@ -615,6 +662,7 @@ const ChatPage = {
                     }
                     case 'stopped':
                         clearThinking();
+                        settleReasoning();
                         stopped = true;
                         contentDiv.insertAdjacentHTML('beforeend',
                             `<div class="text-secondary small fst-italic mt-1">${i18n('chat.stopped')}</div>`);
@@ -624,6 +672,7 @@ const ChatPage = {
                     case 'error':
                         errored = true;
                         clearThinking();
+                        settleReasoning();
                         if (!streamedText && !toolsInline.children.length) msgDiv.remove();
                         this.appendMessage('error', i18n('chat.errorPrefix', { msg: event.data }));
                         break;

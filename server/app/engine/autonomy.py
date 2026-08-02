@@ -406,6 +406,7 @@ class AutonomyService:
                 prior = [ChatMessage(**m) for m in stored]
                 tool_events: list[dict] = []
                 reply_text = ""
+                reasoning_text = ""
                 recorded = False
                 try:
                     async for event in executor.run_stream(prompt, prior, None,
@@ -415,6 +416,10 @@ class AutonomyService:
                             tool_events.append(event.get("data", {}))
                         elif et == "token":
                             reply_text += event.get("data", "")
+                        elif et == "reasoning":
+                            reasoning_text += event.get("data", "")
+                        elif et == "clear_tokens":
+                            reply_text = ""
                         elif et == "error":
                             result["error"] = str(event.get("data", "")) or "error"
                         elif et == "done":
@@ -431,7 +436,8 @@ class AutonomyService:
                                 })
                                 steps = steps_from(data.get("trace"), tool_events)
                                 conv = data.get("conversation")
-                                record_turn(session, steps, reply, conv)
+                                record_turn(session, steps, reply, conv,
+                                            data.get("reasoning") or reasoning_text)
                                 if not agent.memory_enabled:
                                     session["conversation"] = \
                                         session.get("conversation", [])[-NO_MEMORY_CONV_CAP:]
@@ -449,7 +455,7 @@ class AutonomyService:
                         partial = (f"{reply_text}\n\n{prompts.INTERRUPTED}" if reply_text
                                    else prompts.INTERRUPTED)
                         record_turn(session, steps_from(None, tool_events),
-                                    partial, None)
+                                    partial, None, reasoning_text)
                         self.named.save_rotating(sid, session)
                     raise
             if result["tool_calls"] and agent.memory_enabled:

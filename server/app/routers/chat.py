@@ -62,7 +62,7 @@ async def chat(req: ChatRequest, request: Request) -> ChatResponse:
 
     conv = [m.model_dump(exclude_none=True) for m in response.conversation]
     steps = steps_from(response.trace, response.tool_results)
-    record_turn(session, steps, response.reply, conv)
+    record_turn(session, steps, response.reply, conv, response.reasoning)
     # persist(), not save_current(): the user may have opened another chat
     # while this run was in flight — never clobber the new current.json.
     await asyncio.to_thread(session_store.persist, session)
@@ -78,6 +78,7 @@ def _make_drive(executor, message, prior, attachments, session, session_store, l
     async def drive(run):
         tool_events: list[dict] = []
         reply_text = ""
+        reasoning_text = ""
         recorded = False  # the completed turn has been recorded to `session`
         try:
             async for event in executor.run_stream(message, prior, attachments,
@@ -87,6 +88,10 @@ def _make_drive(executor, message, prior, attachments, session, session_store, l
                     tool_events.append(event.get("data", {}))
                 elif et == "token":
                     reply_text += event.get("data", "")
+                elif et == "reasoning":
+                    reasoning_text += event.get("data", "")
+                elif et == "clear_tokens":
+                    reply_text = ""
                 elif et == "error":
                     session["messages"].append(
                         {"role": "error", "text": str(event.get("data", "")), "ts": now_iso()}
@@ -102,7 +107,8 @@ def _make_drive(executor, message, prior, attachments, session, session_store, l
                     # window must not lose the completed turn or trigger the
                     # partial-answer path below on top of it.
                     record_turn(session, steps, data.get("reply") or reply_text,
-                                data.get("conversation"))
+                                data.get("conversation"),
+                                data.get("reasoning") or reasoning_text)
                     recorded = True
                     await asyncio.shield(asyncio.to_thread(session_store.persist, session))
                     schedule_compaction(executor, session["id"],
@@ -115,7 +121,8 @@ def _make_drive(executor, message, prior, attachments, session, session_store, l
             if not recorded:
                 partial = (f"{reply_text}\n\n{prompts.INTERRUPTED}" if reply_text
                            else prompts.INTERRUPTED)
-                record_turn(session, steps_from(None, tool_events), partial, None)
+                record_turn(session, steps_from(None, tool_events), partial, None,
+                            reasoning_text)
                 session_store.persist(session)
             raise
     return drive

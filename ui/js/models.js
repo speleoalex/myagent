@@ -10,7 +10,7 @@ const ModelsPage = {
         try { models = await App.api('GET', '/models'); } catch (e) { /* empty */ }
 
         const providerBadge = (p) =>
-            ({ ollama: 'success', llamacpp: 'primary', openai: 'info' }[p] || 'secondary');
+            ({ ollama: 'success', llamacpp: 'primary', openai: 'info', anthropic: 'warning' }[p] || 'secondary');
 
         App.container.innerHTML = `
             <div class="d-flex flex-wrap gap-2 justify-content-between align-items-center mb-3">
@@ -171,21 +171,34 @@ const ModelsPage = {
     // what actually happens.
     optionSpecs(provider) {
         const local = provider === 'ollama' || provider === 'llamacpp';
+        const anthropic = provider === 'anthropic';
         const specs = [
             { key: 'temperature',       min: 0,  max: 2, ph: '0.7' },
             { key: 'top_p',             min: 0,  max: 1, ph: '0.9' },
-            { key: 'max_tokens',        min: 0,  int: true, ph: local ? '2048' : i18n('models.optUnset') },
+            // Anthropic REQUIRES max_tokens: the empty field falls back to the
+            // provider's 8192 default, so the placeholder says so.
+            { key: 'max_tokens',        min: 0,  int: true, ph: local ? '2048' : (anthropic ? '8192' : i18n('models.optUnset')) },
             { key: 'request_timeout',   min: 5,  int: true, ph: '600' },
+        ];
+        if (!anthropic) specs.push(
+            // The Messages API has no frequency/presence penalty.
             { key: 'frequency_penalty', min: -2, max: 2, ph: '0' },
             { key: 'presence_penalty',  min: -2, max: 2, ph: '0' },
-        ];
-        if (local) specs.push(
+        );
+        if (local || anthropic) specs.push(
             { key: 'top_k',          min: 0,  int: true, ph: '40' },
+        );
+        if (local) specs.push(
             { key: 'min_p',          min: 0,  max: 1, ph: '0.05' },
             { key: 'repeat_penalty', min: 0,  max: 2, ph: '1.1' },
             { key: 'repeat_last_n',  min: -1, int: true, ph: '64' },
         );
         return specs;
+    },
+
+    // Providers that talk to a paid remote API with an API key.
+    isRemote(provider) {
+        return provider === 'openai' || provider === 'anthropic';
     },
 
     // Union of every key that has a dedicated field for SOME provider. Keys in
@@ -293,6 +306,7 @@ const ModelsPage = {
             ollama: 'http://localhost:11434',
             llamacpp: 'http://localhost:8080',
             openai: 'https://api.openai.com/v1',
+            anthropic: 'https://api.anthropic.com',
         }[provider] || '';
     },
 
@@ -341,13 +355,14 @@ const ModelsPage = {
                                 <option value="ollama" ${model.provider === 'ollama' ? 'selected' : ''}>Ollama</option>
                                 <option value="llamacpp" ${model.provider === 'llamacpp' ? 'selected' : ''}>llama.cpp</option>
                                 <option value="openai" ${model.provider === 'openai' ? 'selected' : ''}>${i18n('models.providerOpenai')}</option>
+                                <option value="anthropic" ${model.provider === 'anthropic' ? 'selected' : ''}>${i18n('models.providerAnthropic')}</option>
                             </select>
                         </div>
                         <div class="mb-3">
                             <label class="form-label">${i18n('models.baseUrl')}</label>
-                            <input type="text" class="form-control" id="f-url" value="${App.esc(model.base_url)}" required>
+                            <input type="text" class="form-control" id="f-url" value="${App.esc(model.base_url)}" autocomplete="url" required>
                         </div>
-                        <div class="mb-3" id="api-key-group" ${model.provider === 'openai' ? '' : 'style="display:none"'}>
+                        <div class="mb-3" id="api-key-group" ${this.isRemote(model.provider) ? '' : 'style="display:none"'}>
                             <label class="form-label">${i18n('models.apiKey')}</label>
                             <div class="input-group">
                                 <input type="password" class="form-control" id="f-apikey" value="${keyInitial}" autocomplete="new-password"
@@ -364,7 +379,7 @@ const ModelsPage = {
                                        ${model.provider !== 'llamacpp' ? 'required' : ''}
                                        placeholder="${i18n('models.modelPlaceholder')}">
                                 <button type="button" class="btn btn-outline-secondary" id="btn-fetch-models"
-                                        ${model.provider === 'openai' ? '' : 'style="display:none"'}>
+                                        ${this.isRemote(model.provider) ? '' : 'style="display:none"'}>
                                     <i class="bi bi-cloud-download"></i> ${i18n('models.fetchRemote')}
                                 </button>
                             </div>
@@ -429,11 +444,12 @@ const ModelsPage = {
         // elsewhere).
         const applyProviderHelp = (provider) => {
             document.getElementById('options-help').textContent =
-                i18n(provider === 'openai' ? 'models.optionsRemoteHelp' : 'models.optionsLocalHelp');
+                i18n(this.isRemote(provider) ? 'models.optionsRemoteHelp' : 'models.optionsLocalHelp');
             document.getElementById('ctx-help').textContent = i18n({
                 ollama: 'models.contextHelpOllama',
                 llamacpp: 'models.contextHelpLlamacpp',
                 openai: 'models.contextHelpRemote',
+                anthropic: 'models.contextHelpAnthropic',
             }[provider] || 'models.contextHelpOllama');
         };
         applyProviderHelp(model.provider);
@@ -443,10 +459,10 @@ const ModelsPage = {
         document.getElementById('f-provider').onchange = (e) => {
             const provider = e.target.value;
             document.getElementById('f-url').value = this.defaultUrl(provider);
-            document.getElementById('api-key-group').style.display = provider === 'openai' ? '' : 'none';
+            document.getElementById('api-key-group').style.display = this.isRemote(provider) ? '' : 'none';
             document.getElementById('model-name-group').style.display = provider === 'llamacpp' ? 'none' : '';
             document.getElementById('f-model').required = provider !== 'llamacpp';
-            document.getElementById('btn-fetch-models').style.display = provider === 'openai' ? '' : 'none';
+            document.getElementById('btn-fetch-models').style.display = this.isRemote(provider) ? '' : 'none';
             // Re-render the option fields for the new provider, keeping the
             // values the user already typed for the knobs that survive.
             document.getElementById('options-fields').innerHTML =
@@ -466,8 +482,10 @@ const ModelsPage = {
         document.getElementById('btn-fetch-models').onclick = async () => {
             const btn = document.getElementById('btn-fetch-models');
             btn.disabled = true;
+            const endpoint = document.getElementById('f-provider').value === 'anthropic'
+                ? '/models/anthropic/available' : '/models/openai/available';
             try {
-                const ids = await App.api('POST', '/models/openai/available', {
+                const ids = await App.api('POST', endpoint, {
                     base_url: document.getElementById('f-url').value.trim(),
                     api_key: document.getElementById('f-apikey').value,
                     model_id: isEdit ? modelId : null,
@@ -503,7 +521,7 @@ const ModelsPage = {
                 base_url: document.getElementById('f-url').value.trim(),
                 // Empty on an existing keyed config means "keep the stored key"
                 // (the server never sends the real key back).
-                api_key: provider === 'openai' ? document.getElementById('f-apikey').value : '',
+                api_key: this.isRemote(provider) ? document.getElementById('f-apikey').value : '',
                 api_format: 'openai',
                 supports_vision: document.getElementById('f-vision').checked,
                 supports_audio: document.getElementById('f-audio').checked,
@@ -529,7 +547,7 @@ const ModelsPage = {
         if (isEdit) {
             // Local servers are cheap to ask, so show the live window right away;
             // remote (paid) providers only on demand, via the button.
-            if (model.provider !== 'openai') {
+            if (!this.isRemote(model.provider)) {
                 this.probeContext(modelId);
             } else {
                 document.getElementById('ctx-info').textContent = i18n('models.contextDetectHint');
