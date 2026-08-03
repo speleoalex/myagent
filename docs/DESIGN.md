@@ -49,8 +49,9 @@ delete. Nothing in the core path needs a socket to the internet; the online
 extras are optional and marked as such.
 
 The same principle decides smaller things: the library downloader is a separate
-top-level folder you can delete, `setup.sh` never downloads content, and the
-installer reports what is missing instead of fetching it.
+top-level folder you can delete, and `setup.sh` draws the line at *content* —
+it offers to install a missing package, but the gigabytes of archives are only
+ever a command it prints, onto a disk only you can choose.
 
 ## Deliberately not here
 

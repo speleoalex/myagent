@@ -103,9 +103,10 @@ server/.venv/bin/python server/main.py
 ```
 
 Apri **<http://127.0.0.1:8888>**, scegli un agente e scrivi. `setup.sh` ti dice
-quale backend ha trovato, e MyAgent risponde con il modello locale che risulta
-raggiungibile — quindi il primo messaggio funziona prima ancora che tu abbia
-configurato qualcosa.
+quale backend ha trovato e ti offre di installare le parti opzionali che
+mancano, e MyAgent risponde con il modello locale che risulta raggiungibile —
+quindi il primo messaggio funziona prima ancora che tu abbia configurato
+qualcosa.
 
 Poi riempi la biblioteca, che è ciò che lo rende utile offline:
 

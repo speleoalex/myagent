@@ -16,17 +16,33 @@ as an app, and hosting that UI somewhere else.
   - any remote OpenAI-compatible API with a key — OpenAI, OpenRouter, Groq,
     Mistral, a vLLM box on the LAN … *(needs internet)*, or
   - the Anthropic API (Claude), spoken natively *(needs internet)*
-- **`libzim`** *(optional)* — to search offline Wikipedia archives.
+- **`libzim`** — to search offline Wikipedia archives. Installed by `setup.sh`
+  into its own virtualenv, so there is nothing to do.
 - **Node.js + Chrome/Chromium** *(optional)* — only for the online web tools.
 
-`setup.sh` reports what it found, backend included:
+`setup.sh` offers to install the missing system packages, then reports what it
+found, backend included:
 
 ```text
-[3/3] LLM backend and optional features:
+[3/4] Optional system dependencies...
+  Missing: PDF text extraction, OCR
+  Command: sudo apt-get install -y poppler-utils tesseract-ocr
+  Install them now? [y/N] y
+[4/4] LLM backend and optional features:
   [ok] LLM backend          (Ollama, 4 model(s))
   [ok] web browsing/search  (Node + Chrome/Chromium)
-  [--] PDF text extraction  (install poppler-utils)
+  [ok] offline library      (7 archive(s) in /home/you/myagent/library)
 ```
+
+The prompt defaults to **no** and always prints the command, so you can install
+it later by hand. With no terminal to answer on — a container build, a scripted
+deploy — nothing is asked and nothing is installed. `--yes` accepts everything
+(also `MYAGENT_ASSUME_YES=1`), `--no-optional` never asks.
+
+Two things `setup.sh` deliberately leaves alone: **Chrome/Chromium**, because on
+Ubuntu the apt package is a snap shim that fails inside containers and a
+headless server often wants no browser at all, and the **library archives**,
+which are gigabytes onto a disk only you can pick (see below).
 
 ## Optional features
 
@@ -37,7 +53,7 @@ dependencies are present:
 |---|---|---|
 | Web search & browsing | `web_search`, `browse_web`, `web_research` | Node.js + Chrome/Chromium (`PUPPETEER_EXECUTABLE_PATH` honored) |
 | Document extraction (PDF, images) | `document_extract` | `poppler-utils`, `tesseract`, `pandoc` (each optional) |
-| Offline Wikipedia archives | `local_search`, `local_read` | `pip install libzim` (`.zim` files only — Markdown/text notes need nothing) |
+| Offline Wikipedia archives | `local_search`, `local_read` | `libzim`, installed by `setup.sh` (`.zim` files only — Markdown/text notes need nothing). To repair it by hand: `server/.venv/bin/pip install libzim` |
 | Speech to text (audio files, Telegram voice notes, voice satellites) | `document_extract` | `ffmpeg` + `faster-whisper` (installed with the connectors plugin) |
 
 Missing dependencies never block startup: the tool simply fails when called,

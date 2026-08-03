@@ -96,8 +96,9 @@ server/.venv/bin/python server/main.py
 ```
 
 Open **<http://127.0.0.1:8888>**, pick an agent and chat. `setup.sh` reports
-which backend it found, and MyAgent answers on whichever local model is
-reachable — so the first message works before you have configured anything.
+which backend it found and offers to install the optional pieces that are
+missing, and MyAgent answers on whichever local model is reachable — so the
+first message works before you have configured anything.
 
 Then fill the library, which is what makes it useful offline:
 
