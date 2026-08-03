@@ -146,7 +146,7 @@ class SatelliteConnector(BaseConnector):
         id``, so notify_user's session append (``session_id_for(handle)``)
         lands in this same session. ``sender_id`` is the binding id too, which
         makes the provenance line resolve to that contact's name when one
-        exists ("[Message from Cucina via Satellite]")."""
+        exists ("[Cucina via Satellite]")."""
         chat_key = self.binding.id
         if chat_key in self._busy:
             # Spoken back by the device — same wording the other channels use.

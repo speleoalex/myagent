@@ -46,9 +46,12 @@ async def run_channel_turn(req: ChatRequest, named, executor) -> ChatResponse:
         # to the message (so a group chat, where the sender changes at every
         # turn, stays attributable in the conversation history) and kept out of
         # the display record below — the UI shows what the person typed.
+        # No English words in the wrapper: a small model reads the FIRST line
+        # of the user turn as the user's language, and "Message from" was
+        # enough to flip whole replies to English (observed on Qwen3-VL-4B).
         model_message = req.message
         if req.sender:
-            model_message = f"[Message from {req.sender}]\n{req.message}"
+            model_message = f"[{req.sender}]\n{req.message}"
 
         response = await executor.run(model_message, prior, attachments,
                                       memory_context=memory_context(session))

@@ -494,10 +494,13 @@ Inbound provenance is the reverse path: the transport hands
 `process_message` the sender's id / @username / display name, `CoreClient.chat`
 resolves them against the address book (`Connectors.sender_display`, the mirror
 of `resolve_recipients`) and the turn prefixes the MODEL-visible message with
-`[Message from Alessandro via Telegram]` (`ChatRequest.sender`,
+`[Alessandro via Telegram]` (`ChatRequest.sender`,
 `run_channel_turn`). Per message, not per session — in a group the sender
 changes at every turn — and only on the model's copy: the stored display
-message stays exactly what the person typed.
+message stays exactly what the person typed. The wrapper deliberately contains
+no English words: a small model reads the first line of the user turn as the
+user's language, and a "Message from …" prefix flipped whole replies to
+English.
 
 `GET /api/connectors/bindings` is served by the plugin and lets the agent form
 offer a real picker for `autonomous.notify_binding_id` instead of a free-text id;
