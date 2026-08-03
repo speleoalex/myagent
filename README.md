@@ -2,84 +2,107 @@
 
 ***English** · [Italiano](README.it.md)*
 
-**An AI assistant that keeps working when the internet doesn't.**
+**Your personal AI workstation.**
 
-MyAgent runs entirely on your own machine: a local model, a local knowledge
-library, and the devices on your own network. No cloud account, no telemetry,
-no outbound traffic required. Point it at a remote API if you prefer — that's a
-choice, not a dependency.
+Runs locally. Works offline. Controls your devices. Answers from a library you
+own. Keeps working when everything else stops.
 
-Because nothing is fetched at answer time, you can give it knowledge that
-outlives your connection: **a full offline Wikipedia** alongside medicine,
-first aid, repair manuals, agriculture and appropriate technology — tens of
-gigabytes on a disk you own, which the agents search and quote from.
+![MyAgent — a local AI agent in a rugged, silent, reliable box](docs/images/myagent-case.jpg)
+
+## Not just another AI chat
+
+Most AI assistants are frontends for a cloud model. MyAgent turns an ordinary
+computer into a **self-contained AI system**, where the language model is only
+one component:
+
+```text
+           Local LLM
+               │
+  Offline knowledge library
+               │
+       Autonomous agents
+               │
+       ┌───────┴───────┐
+       │               │
+  Local tools     IoT devices
+       │               │
+       └───────┬───────┘
+               │
+        Your computer
+```
+
+No account, no subscription, no telemetry, no vendor lock-in. Point it at a
+remote API if you prefer — that's a choice, not a dependency.
+
+## Built for resilience
+
+The internet is optional: your knowledge is stored on disks you own, and your
+devices stay on your network. Your assistant keeps working through
+
+- power and network outages that outlast the day,
+- disasters and emergencies — the medical, first-aid, repair and agriculture
+  references are on a disk you own, and still answer questions,
+- remote places — a boat, a camper van, a mountain hut, a field station,
+- air-gapped labs, workshops and client sites where connecting is not allowed,
+- homes, studios and practices where questions and documents must not leave
+  the building.
+
+When the network disappears, the assistant doesn't.
+
+## The offline library
+
+Instead of asking the internet every time, the agents search a collection you
+own: **a full offline Wikipedia** alongside medicine, first aid, repair
+manuals, agriculture and electronics — plus your own Markdown notes, converted
+PDFs and technical documentation. Tens or hundreds of gigabytes on your own
+disk, searched full-text in moments, quoted with their source
+([the library](library/README.md)).
 
 ![The Librarian agent answering from the offline library](docs/images/chat-librarian.png)
 
 *A local model answering from the offline library: the Librarian searches, opens
 the best hit and answers from it. Nothing in that path touches the network.*
 
-## What it's for
+## Autonomous AI
 
-- **Off-grid and remote** — a boat, a mountain hut, a field station, a valley
-  the network never reached
-- **When infrastructure fails** — a blackout or an outage that outlasts the
-  day: the medical, repair and agriculture references are still there, and
-  still answer questions
-- **Air-gapped work** — a lab, a workshop or a client site where connecting is
-  not allowed
-- **Total privacy** — a home, a studio or a practice where your questions and
-  your documents must not leave the building
-- **Home automation without a vendor cloud** — your lights and sensors answer
-  to a model running in the same house
-- **A personal library that answers back** — years of your own notes, manuals
-  and converted PDFs, searchable and quotable
-- **Unattended work** — scheduled agents that check, summarise and notify you
-  on their own
+MyAgent doesn't only answer questions. Agents run scheduled tasks, monitor and
+notify, schedule their own future work, control devices, delegate to other
+agents and remember what they did — even while you're away
+([autonomous agents](docs/AUTONOMY.md)).
+
+## Privacy by architecture
+
+Privacy is not a feature to switch on: it's the default architecture. There is
+no account, no cloud, no analytics, not even a phone-home for updates.
+Conversations, documents and device commands stay on hardware you control, and
+the only outbound traffic is what you explicitly turn on.
+
+## Philosophy
+
+MyAgent is not another chatbot. It aims to be a **personal AI operating
+environment**: an assistant that lives on your own hardware, learns your
+documents, uses your tools, controls your devices, and keeps working for
+years. Even when the internet doesn't.
 
 ## Features
 
-- **Total privacy** — nothing leaves the machine: no account, no telemetry, no
-  third party, not even a phone-home for updates. Your conversations,
-  documents and device commands stay on hardware you control, and the only
-  outbound traffic is what you explicitly turn on
-- **Works offline** — local model + local knowledge + local devices; nothing in
-  the core path needs a connection
-- **Offline knowledge library** — Wikipedia ZIM archives and your own
-  Markdown/text documents in `~/myagent/library/`, searched full-text
-  ([details](library/README.md))
-- **IoT & home automation** — agents call your devices' local HTTP APIs
-  (Home Assistant, Shelly, Tasmota, ESPHome, Hue …) over the LAN
-  ([details](docs/AGENTS.md#local-devices--home-automation))
-- **Atomic agents** — an agent is just `model + system prompt + tools`,
-  editable from the UI and stored as a JSON file
-- **Tools are folders** — a `tool.json` plus an executable `run` in any
-  language, hot-reloaded, no restart. The AI can write its own
-  ([details](docs/TOOLS.md))
-- **Autonomous agents** — scheduled tasks, unattended runs, agents that
-  schedule their own future work and notify you ([details](docs/AUTONOMY.md))
-- **Long-term memory** *(opt-in)* — old turns are archived and replaced by
-  compact summaries, so an agent remembers without blowing a small model's
-  context
-- **Agent delegation** — agents call other agents, with per-agent permissions
-- **MCP servers** — Model Context Protocol servers over stdio or HTTP join the
-  tool list; paste a Claude Desktop config to import ([details](docs/MCP.md))
-- **Any backend** — llama.cpp, Ollama, any OpenAI-compatible API and the
-  Anthropic API, spoken natively; the context window is *probed*, not guessed
-- **Built for small local models** — tool calls parsed from plain text for
-  models without native function calling, loop protection, malformed-call
-  retries ([why](docs/DESIGN.md))
-- **Live chat** — token streaming, background generation you can leave and
-  re-attach to, stop button, history, regenerate, prompt editing
-- **Thinking models** — chain-of-thought is separated as it streams and shown
-  collapsed: it never reaches the reply, the next prompt, or a speaker
-- **Telegram and voice** — bridge an agent to a Telegram bot
-  ([connectors](connectors/README.md)) or to a voice satellite you talk to out
-  loud, with speech recognised on your own server
-  ([satellite](satellite/README.md))
-- **Installable** — the UI installs as an app and is cached, so it opens with
-  the network down
-- **i18n UI** — English and Italian out of the box
+| Feature | Description |
+| ------- | ----------- |
+| **Any LLM backend** | llama.cpp, Ollama, any OpenAI-compatible API and the Anthropic API, spoken natively; the context window is *probed*, not guessed |
+| **Built for small local models** | tool calls parsed from plain text for models without native function calling, loop protection, malformed-call retries ([why](docs/DESIGN.md)) |
+| **Offline library** | Wikipedia ZIM archives and your own documents in `~/myagent/library/`, searched full-text ([details](library/README.md)) |
+| **Atomic agents** | an agent is just `model + system prompt + tools`, editable from the UI and stored as a JSON file |
+| **Autonomous agents** | scheduled tasks, unattended runs, agents that schedule their own future work and notify you ([details](docs/AUTONOMY.md)) |
+| **Agent delegation** | agents call other agents, with per-agent permissions |
+| **Long-term memory** | opt-in: old turns are archived and replaced by compact summaries, so an agent remembers without blowing a small model's context |
+| **Tools are folders** | a `tool.json` plus an executable `run` in any language, hot-reloaded, no restart; the AI can write its own ([details](docs/TOOLS.md)) |
+| **Files into the chat** | tools deliver images, HTML pages and downloads into the conversation by reference, never through the model; the HTML Designer agent builds self-contained pages and reports this way ([details](docs/TOOLS.md#returning-files-to-the-user-resources)) |
+| **MCP servers** | stdio and HTTP servers join the tool list; paste a Claude Desktop config to import ([details](docs/MCP.md)) |
+| **IoT & home automation** | agents call your devices' local HTTP APIs (Home Assistant, Shelly, Tasmota, ESPHome, Hue …) over the LAN ([details](docs/AGENTS.md#local-devices--home-automation)) |
+| **Live chat** | token streaming, background generation you can leave and re-attach to, stop button, history, regenerate, prompt editing |
+| **Thinking models** | chain-of-thought is separated as it streams and shown collapsed: it never reaches the reply, the next prompt, or a speaker |
+| **Telegram and voice** | bridge an agent to a Telegram bot ([connectors](connectors/README.md)) or to a voice satellite, with speech recognised on your own server ([satellite](satellite/README.md)) |
+| **Installable UI** | installs as an app and is cached, so it opens with the network down; English and Italian out of the box |
 
 ## Quickstart
 

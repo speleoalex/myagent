@@ -2,18 +2,66 @@
 
 *[English](README.md) · **Italiano***
 
-**Un assistente AI che continua a funzionare quando internet non c'è.**
+**La tua workstation AI personale.**
 
-MyAgent gira interamente sulla tua macchina: un modello locale, una biblioteca
-di conoscenza locale e i dispositivi della tua rete. Nessun account cloud,
-nessuna telemetria, nessun traffico verso l'esterno. Se preferisci puoi
-puntarlo a un'API remota — ma è una scelta, non una dipendenza.
+Gira in locale. Funziona offline. Controlla i tuoi dispositivi. Risponde da
+una biblioteca che è tua. Continua a funzionare quando tutto il resto si
+ferma.
 
-Siccome al momento della risposta non viene scaricato niente, puoi dargli una
-conoscenza che sopravvive alla connessione: **Wikipedia completa offline**
-insieme a medicina, primo soccorso, manuali di riparazione, agricoltura e
-tecnologie appropriate — decine di gigabyte su un disco tuo, che gli agenti
-cercano e citano.
+![MyAgent — un agente AI locale in un case rugged, silenzioso e affidabile](docs/images/myagent-case.jpg)
+
+## Non è l'ennesima chat AI
+
+La maggior parte degli assistenti AI è un frontend per un modello nel cloud.
+MyAgent trasforma un computer qualsiasi in un **sistema AI autosufficiente**,
+dove il modello linguistico è solo un componente:
+
+```text
+         Modello locale
+               │
+  Biblioteca di conoscenza offline
+               │
+        Agenti autonomi
+               │
+       ┌───────┴───────┐
+       │               │
+  Tool locali    Dispositivi IoT
+       │               │
+       └───────┬───────┘
+               │
+        Il tuo computer
+```
+
+Nessun account, nessun abbonamento, nessuna telemetria, nessun vincolo a un
+fornitore. Se preferisci puoi puntarlo a un'API remota — è una scelta, non una
+dipendenza.
+
+## Costruito per la resilienza
+
+Internet è opzionale: la tua conoscenza sta su dischi tuoi, e i tuoi
+dispositivi restano sulla tua rete. Il tuo assistente continua a funzionare
+durante
+
+- blackout e guasti di rete che durano più di un giorno,
+- disastri ed emergenze — i riferimenti medici, di primo soccorso, di
+  riparazione e di agricoltura stanno su un disco tuo, e continuano a
+  rispondere alle domande,
+- posti isolati — una barca, un camper, un rifugio in montagna, una stazione
+  da campo,
+- laboratori, officine e sedi di clienti dove collegarsi non è permesso,
+- case, studi e ambulatori dove domande e documenti non devono uscire
+  dall'edificio.
+
+Quando la rete sparisce, l'assistente resta.
+
+## La biblioteca offline
+
+Invece di chiedere a internet ogni volta, gli agenti cercano in una collezione
+tua: **Wikipedia completa offline** insieme a medicina, primo soccorso,
+manuali di riparazione, agricoltura ed elettronica — più i tuoi appunti
+Markdown, i PDF convertiti e la documentazione tecnica. Decine o centinaia di
+gigabyte su un disco tuo, cercati full-text in un attimo, citati con la fonte
+([la biblioteca](library/README.md)).
 
 ![L'agente Bibliotecario risponde dalla biblioteca offline](docs/images/chat-librarian.png)
 
@@ -21,72 +69,47 @@ cercano e citano.
 cerca, apre il risultato migliore e risponde da lì. Niente in questo percorso
 tocca la rete.*
 
-## A cosa serve
+## AI autonoma
 
-- **Fuori rete e in posti isolati** — una barca, un rifugio in montagna, una
-  stazione da campo, una valle dove la rete non è mai arrivata
-- **Quando l'infrastruttura cede** — un blackout o un guasto che dura più di un
-  giorno: i riferimenti medici, di riparazione e di agricoltura restano lì, e
-  continuano a rispondere alle domande
-- **Lavoro scollegato** — un laboratorio, un'officina o la sede di un cliente
-  dove collegarsi non è permesso
-- **Privacy totale** — una casa, uno studio o un ambulatorio dove le tue
-  domande e i tuoi documenti non devono uscire dall'edificio
-- **Domotica senza il cloud del produttore** — le tue luci e i tuoi sensori
-  rispondono a un modello che gira nella stessa casa
-- **Una biblioteca personale che risponde** — anni di appunti, manuali e PDF
-  convertiti, consultabili e citabili
-- **Lavoro non presidiato** — agenti programmati che controllano, riassumono e
-  ti avvisano da soli
+MyAgent non si limita a rispondere alle domande. Gli agenti eseguono task
+programmati, controllano e avvisano, si programmano il lavoro futuro,
+comandano i dispositivi, delegano ad altri agenti e ricordano quello che hanno
+fatto — anche mentre non ci sei ([agenti autonomi](docs/AUTONOMY.md)).
+
+## La privacy è l'architettura
+
+La privacy non è una funzione da accendere: è l'architettura di default.
+Nessun account, nessun cloud, nessuna analisi d'uso, nemmeno una chiamata a
+casa per gli aggiornamenti. Conversazioni, documenti e comandi ai dispositivi
+restano su hardware che controlli tu, e l'unico traffico verso l'esterno è
+quello che accendi esplicitamente.
+
+## Filosofia
+
+MyAgent non è l'ennesimo chatbot. Punta a essere un **ambiente operativo AI
+personale**: un assistente che vive sul tuo hardware, impara i tuoi documenti,
+usa i tuoi strumenti, comanda i tuoi dispositivi e continua a funzionare per
+anni. Anche quando internet no.
 
 ## Caratteristiche
 
-- **Privacy totale** — niente esce dalla macchina: nessun account, nessuna
-  telemetria, nessuna terza parte, nemmeno una chiamata a casa per gli
-  aggiornamenti. Le tue conversazioni, i tuoi documenti e i comandi ai
-  dispositivi restano su hardware che controlli tu, e l'unico traffico verso
-  l'esterno è quello che accendi esplicitamente
-- **Funziona offline** — modello locale + conoscenza locale + dispositivi
-  locali; niente nel percorso principale ha bisogno di una connessione
-- **Biblioteca di conoscenza offline** — archivi ZIM di Wikipedia e i tuoi
-  documenti Markdown/testo in `~/myagent/library/`, cercati full-text
-  ([dettagli](library/README.md))
-- **IoT e domotica** — gli agenti chiamano le API HTTP locali dei tuoi
-  dispositivi (Home Assistant, Shelly, Tasmota, ESPHome, Hue …) sulla LAN
-  ([dettagli](docs/AGENTS.md#local-devices--home-automation))
-- **Agenti atomici** — un agente è solo `modello + prompt di sistema + tool`,
-  modificabile dalla UI e salvato come file JSON
-- **I tool sono cartelle** — un `tool.json` più un `run` eseguibile in
-  qualsiasi linguaggio, ricaricato a caldo, senza riavvii. L'AI può scriverne
-  di nuovi ([dettagli](docs/TOOLS.md))
-- **Agenti autonomi** — task programmati, esecuzioni non presidiate, agenti che
-  si programmano il lavoro futuro e ti avvisano ([dettagli](docs/AUTONOMY.md))
-- **Memoria a lungo termine** *(opzionale)* — i turni vecchi vengono archiviati
-  e sostituiti da riassunti compatti, così un agente ricorda senza far
-  esplodere il contesto di un modello piccolo
-- **Delega tra agenti** — un agente ne chiama un altro, con permessi per agente
-- **Server MCP** — server Model Context Protocol via stdio o HTTP si aggiungono
-  all'elenco dei tool; incolla una configurazione di Claude Desktop per
-  importarli ([dettagli](docs/MCP.md))
-- **Qualsiasi backend** — llama.cpp, Ollama, qualsiasi API compatibile OpenAI e
-  l'API Anthropic, parlata nativamente; la finestra di contesto viene *sondata*,
-  non indovinata
-- **Pensato per i modelli locali piccoli** — chiamate ai tool interpretate dal
-  testo puro per i modelli senza function calling nativo, protezione dai loop,
-  ritentativi sulle chiamate malformate ([perché](docs/DESIGN.md))
-- **Chat dal vivo** — streaming dei token, generazione in background che puoi
-  lasciare e riprendere, pulsante di stop, cronologia, rigenerazione, modifica
-  del prompt
-- **Modelli che ragionano** — il ragionamento viene separato mentre scorre e
-  mostrato richiuso: non finisce mai nella risposta, nel prompt successivo o in
-  un altoparlante
-- **Telegram e voce** — collega un agente a un bot Telegram
-  ([connettori](connectors/README.md)) o a un satellite vocale a cui parli ad
-  alta voce, con il riconoscimento vocale sul tuo server
-  ([satellite](satellite/README.md))
-- **Installabile** — la UI si installa come app e viene messa in cache, quindi
-  si apre anche senza rete
-- **UI multilingua** — inglese e italiano inclusi
+| Funzionalità | Descrizione |
+| ------------ | ----------- |
+| **Qualsiasi backend LLM** | llama.cpp, Ollama, qualsiasi API compatibile OpenAI e l'API Anthropic, parlata nativamente; la finestra di contesto viene *sondata*, non indovinata |
+| **Pensato per i modelli locali piccoli** | chiamate ai tool interpretate dal testo puro per i modelli senza function calling nativo, protezione dai loop, ritentativi sulle chiamate malformate ([perché](docs/DESIGN.md)) |
+| **Biblioteca offline** | archivi ZIM di Wikipedia e i tuoi documenti in `~/myagent/library/`, cercati full-text ([dettagli](library/README.md)) |
+| **Agenti atomici** | un agente è solo `modello + prompt di sistema + tool`, modificabile dalla UI e salvato come file JSON |
+| **Agenti autonomi** | task programmati, esecuzioni non presidiate, agenti che si programmano il lavoro futuro e ti avvisano ([dettagli](docs/AUTONOMY.md)) |
+| **Delega tra agenti** | un agente ne chiama un altro, con permessi per agente |
+| **Memoria a lungo termine** | opzionale: i turni vecchi vengono archiviati e sostituiti da riassunti compatti, così un agente ricorda senza far esplodere il contesto di un modello piccolo |
+| **I tool sono cartelle** | un `tool.json` più un `run` eseguibile in qualsiasi linguaggio, ricaricato a caldo, senza riavvii; l'AI può scriverne di nuovi ([dettagli](docs/TOOLS.md)) |
+| **File nella chat** | i tool consegnano immagini, pagine HTML e download nella conversazione per riferimento, mai attraverso il modello; l'agente HTML Designer costruisce così pagine e report autocontenuti ([dettagli](docs/TOOLS.md#returning-files-to-the-user-resources)) |
+| **Server MCP** | server via stdio o HTTP si aggiungono all'elenco dei tool; incolla una configurazione di Claude Desktop per importarli ([dettagli](docs/MCP.md)) |
+| **IoT e domotica** | gli agenti chiamano le API HTTP locali dei tuoi dispositivi (Home Assistant, Shelly, Tasmota, ESPHome, Hue …) sulla LAN ([dettagli](docs/AGENTS.md#local-devices--home-automation)) |
+| **Chat dal vivo** | streaming dei token, generazione in background che puoi lasciare e riprendere, pulsante di stop, cronologia, rigenerazione, modifica del prompt |
+| **Modelli che ragionano** | il ragionamento viene separato mentre scorre e mostrato richiuso: non finisce mai nella risposta, nel prompt successivo o in un altoparlante |
+| **Telegram e voce** | collega un agente a un bot Telegram ([connettori](connectors/README.md)) o a un satellite vocale, con il riconoscimento vocale sul tuo server ([satellite](satellite/README.md)) |
+| **UI installabile** | si installa come app e viene messa in cache, quindi si apre anche senza rete; inglese e italiano inclusi |
 
 ## Partenza rapida
 
