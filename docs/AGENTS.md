@@ -5,23 +5,25 @@ An agent is `model + system prompt + tools`, stored as a JSON file under
 
 ![The bundled agents in the web UI](images/agents.png)
 
-## The seven bundled agents
+## The eight bundled agents
 
-First run seeds seven, each running on the model chosen in **Settings**:
+First run seeds eight, each running on the model chosen in **Settings**:
 
 | Agent | Does | Needs internet? |
 |---|---|---|
-| **Master** | orchestrator: routes your question to the right agent | no |
+| **Master** | orchestrator: routes your question to the right agent, and schedules reminders and recurring jobs for itself | no |
 | **Librarian** | answers from the offline library | no |
 | **Home Automation** | drives IoT devices over their local HTTP APIs — fill in with your own | no |
-| **System Administrator** | shell and file operations on the machine | no |
-| **Conversation** | plain chat | no |
+| **System Administrator** | shell and file operations on the machine; converts PDFs, images and audio to text | no |
+| **Conversation** | plain chat, no tools | no |
 | **Tool Manager** | writes new tools for the other agents, and tests them | no |
+| **Agent Manager** | creates and updates the agents themselves | no |
 | **Web Researcher** | searches and reads web pages | yes |
 
-Two are deliberately **not delegatable** (`callable: false`), so Master cannot
-route to them: Tool Manager, which writes code, and any agent you mark the same
-way. You pick those yourself.
+Three are deliberately **not delegatable** (`callable: false`), so Master cannot
+route to them: Tool Manager and Agent Manager, which write code and agents — you
+select those on purpose — and Master itself, which is the entry point rather
+than a target.
 
 ## Editing never loses anything
 
@@ -76,9 +78,10 @@ Python library, or whatever your hardware speaks. See [TOOLS.md](TOOLS.md).
 
 ## Writing your own agents
 
-Create one from **Agents → New**, or let the AI do it: the **Tool Manager**
-writes and tests tools, and `manage_agents` lets an agent create other agents.
-Both are deliberately not reachable by delegation — you select them on purpose.
+Create one from **Agents → New**, or let the AI do it: the **Agent Manager**
+creates and updates agents (through `manage_agents`), and the **Tool Manager**
+writes and tests their tools (through `manage_tools`). Both are deliberately
+not reachable by delegation — you select them on purpose.
 
 A good agent is narrow. Every tool description ends up in the model's prompt,
 so an agent with thirty tools spends its context explaining itself instead of

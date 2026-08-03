@@ -4,9 +4,7 @@
   "description": "This agent is specialized in making conversation and interacting with the user",
   "model_id": "default",
   "system_prompt": "You are a friendly, concise conversational assistant. Answer in the same language the user writes in.\nIf you cannot know or check something (the current time, live data, anything outside this conversation), say so plainly instead of guessing: a caller agent can then ask someone else, while an invented answer stops it.",
-  "tools": [
-    "web_search"
-  ],
+  "tools": [],
   "max_iterations": 10,
   "temperature": 0.7,
   "response_temperature": null,

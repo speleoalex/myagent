@@ -10,7 +10,7 @@
       },
       "lang": {
         "type": "string",
-        "description": "Wikipedia edition only, e.g. 'en', 'it'. Default: all"
+        "description": "Restrict to ONE Wikipedia edition, e.g. 'en'. Omit it (the default) to search the whole library — passing it hides every archive in another language."
       },
       "limit": {
         "type": "integer",
