@@ -64,7 +64,7 @@ const AgentsPage = {
      *  reaching the screen untranslated). */
     stateLabel(state) {
         const keys = { running: 'agents.stateRunning', idle: 'agents.stateIdle',
-                       paused: 'agents.statePaused', error: 'agents.stateError',
+                       retrying: 'agents.stateRetrying', error: 'agents.stateError',
                        rate_limited: 'agents.stateRateLimited',
                        disabled: 'agents.stateDisabled' };
         return keys[state] ? i18n(keys[state]) : state;
@@ -79,7 +79,13 @@ const AgentsPage = {
         if (status.last_wake) {
             bits.push(`${i18n('agents.lastWake')}: ${status.last_wake} (${status.last_result || '—'})`);
         }
-        if (status.next_wake) bits.push(`${i18n('agents.nextWake')}: ${status.next_wake}`);
+        // While the error backoff runs, next_wake is the due task's own next_at
+        // and sits in the PAST — retry_after is what actually gates the attempt.
+        if (status.retry_after && status.retry_after > new Date().toISOString().slice(0, 19)) {
+            bits.push(`${i18n('agents.nextRetry')}: ${status.retry_after}`);
+        } else if (status.next_wake) {
+            bits.push(`${i18n('agents.nextWake')}: ${status.next_wake}`);
+        }
         if (status.tasks) {
             bits.push(i18n('agents.scheduledTasks', { n: status.tasks }));
         }
@@ -89,8 +95,11 @@ const AgentsPage = {
     liveBadge(agent, status) {
         if (!agent.live) return '';
         const state = (status && status.state) || 'idle';
-        const color = { running: 'bg-primary', idle: 'bg-success', paused: 'bg-danger',
-                        error: 'bg-danger', rate_limited: 'bg-warning text-dark' }[state] || 'bg-secondary';
+        // 'retrying' is amber, not red: the agent is still working through its
+        // error backoff, and red said "stopped" for something that isn't.
+        const color = { running: 'bg-primary', idle: 'bg-success',
+                        retrying: 'bg-warning text-dark', error: 'bg-danger',
+                        rate_limited: 'bg-warning text-dark' }[state] || 'bg-secondary';
         const tip = this.wakeSummary(status).join(' · ');
         const label = i18n('agents.liveBadge');
         return `<span class="badge ${color}" title="${App.escAttr(tip)}">` +

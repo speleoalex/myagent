@@ -28,12 +28,18 @@ and the drive taking ``named_sessions.lock(sid)`` — the same lock
 can never interleave.
 
 Rescheduling belongs to TaskStore.advance and happens only after a successful
-wake: a failed run is retried, bounded by ``max_wakes_per_hour`` and by the
-auto-pause after ``max_consecutive_errors``. Several tasks due at the same
-moment share ONE wake (and one rate-limit slot), which is also why a slow
-local-model turn can never build up a backlog of overlapping runs. Per-agent
-runtime state (last wake, error streak, pause, wake history) is persisted to
-``<autonomy>/<agent_id>/state.json``, so a restart causes no wake storm.
+wake: a failed run is RETRIED, with a growing delay (see ``RETRY_BACKOFF_BASE``)
+and bounded by ``max_wakes_per_hour``. There is no terminal failure state —
+``live: false`` is the only stop, because that one is the user's. Several tasks
+due at the same moment share ONE wake (and one rate-limit slot), which is also
+why a slow local-model turn can never build up a backlog of overlapping runs.
+Per-agent runtime state (last wake, error streak, retry_after, wake history) is
+persisted to ``<autonomy>/<agent_id>/state.json``, so a restart causes no wake
+storm.
+
+``max_consecutive_errors`` says when to TELL THE USER, not when to give up: at
+that many failures in a row the service sends one notice through the agent's own
+notify target, and one more when wakes start working again.
 """
 from __future__ import annotations
 
@@ -62,7 +68,56 @@ SCAN_INTERVAL = 5.0
 # memory_enabled get real continuity from the compactor instead.
 NO_MEMORY_CONV_CAP = 40
 
+# A failed wake waits longer each time, and NEVER stops being retried. The old
+# behaviour — auto-pause after max_consecutive_errors, cleared only by a human
+# (POST /resume or re-saving the agent) — got the design backwards twice:
+#
+#  * Most failures are transient (network not up at boot, Ollama not started,
+#    a remote 429/5xx), which is exactly what an unattended agent must ride out.
+#    The connectors side already holds this line: BaseConnector.start() retries
+#    transport errors with the poll loop's own backoff.
+#  * Even a "permanent" failure gets fixed OUTSIDE MyAgent. Observed: master
+#    auto-paused on "credit balance is too low" and stayed dark for ~20 hours;
+#    the cause was fixed by switching the default model, and the agent only came
+#    back because an unrelated re-save happened to touch its mtime.
+#
+# The old code also had no floor BETWEEN consecutive attempts — max_wakes_per_hour
+# is a rolling COUNT — so five identical failures burned the whole error budget
+# in 1.4 seconds (measured) before anyone could see them.
+RETRY_BACKOFF_BASE = 60.0      # after the first failure
+RETRY_BACKOFF_MAX = 1800.0     # ceiling: keep trying twice an hour, forever
+
 _NOOP_RE = re.compile(r"^\s*noop[.!]?\s*$", re.IGNORECASE)
+
+# What the service says when it needs the user. Plain sentences, no emoji: this
+# can be spoken by a voice satellite, and Raspberry Pi OS has no emoji font.
+_ALERT_TEXT = (
+    "Scheduler notice for agent '{name}': {n} scheduled runs failed in a row. "
+    "Last error: {reason}. Retrying every {mins} minutes — nothing is lost, the "
+    "tasks stay due. Fix the cause, or switch the agent off if that is what you "
+    "want."
+)
+_RECOVERED_TEXT = (
+    "Scheduler notice for agent '{name}': scheduled runs are working again "
+    "(after {n} failures in a row)."
+)
+
+
+def _retry_delay(errors: int) -> float:
+    """Seconds to wait before retrying, after *errors* consecutive failures."""
+    if errors <= 0:
+        return 0.0
+    return min(RETRY_BACKOFF_BASE * 2 ** (errors - 1), RETRY_BACKOFF_MAX)
+
+
+def _iso_in(seconds: float) -> str:
+    """A timestamp *seconds* from now, in ``now_iso``'s exact shape.
+
+    ``timespec="seconds"`` is not cosmetic here: ``retry_after`` is compared
+    against ``now_iso()`` LEXICOGRAPHICALLY (see _tick), so a different
+    precision would silently order wrong.
+    """
+    return (datetime.now() + timedelta(seconds=seconds)).isoformat(timespec="seconds")
 
 # Naming convention of the dedicated per-agent autonomous session. Owned here;
 # other layers (the sessions router) must use these helpers, never the literal.
@@ -186,6 +241,10 @@ class AutonomyService:
         self._wakes: dict[str, asyncio.Task] = {}
         self._kick = asyncio.Event()
         self._states: dict[str, dict] = {}  # agent_id -> persisted state (cached)
+        # How the SERVICE speaks to the user, set in main.py with a closure over
+        # app.state — the connectors plugin that delivers registers itself later,
+        # exactly like ToolRegistry.notify_targets. None = no channel installed.
+        self.send_notification = None
         tasks.on_change = self.notify
 
     # ------------------------------------------------------------- lifecycle
@@ -223,6 +282,15 @@ class AutonomyService:
         st = self._states.get(agent_id)
         if st is None:
             st = read_json(self._state_path(agent_id)) or {}
+            # Legacy: the terminal auto-pause that RETRY_BACKOFF_* replaced.
+            # Dropped on read, and the error streak with it — nothing clears
+            # that flag any more, so an upgrade would otherwise leave an agent
+            # stopped forever, and the streak would start the backoff at its
+            # ceiling and skip the notification.
+            if st.pop("paused", None) is not None:
+                st.pop("paused_agent_mtime", None)
+                st.pop("retry_after", None)
+                st["consecutive_errors"] = 0
             self._states[agent_id] = st
         return st
 
@@ -267,15 +335,9 @@ class AutonomyService:
                 continue  # one wake at a time (layer 1)
             cfg = agent.autonomous or AutonomousConfig()
             st = self._state(aid)
-            if st.get("paused"):
-                # Re-saving the agent clears the pause: editing the config is
-                # an explicit sign of intent (the alternative is POST /resume).
-                if self._agent_mtime(aid) > st.get("paused_agent_mtime", float("inf")):
-                    st["paused"] = False
-                    st["consecutive_errors"] = 0
-                    self._save_state(aid, st)
-                else:
-                    continue
+            retry_after = st.get("retry_after") or ""
+            if retry_after and now < retry_after:
+                continue  # error backoff still running; the tasks stay due
             if not self.tasks.due(aid, now):
                 continue
             if len(self._wakes_last_hour(st)) >= cfg.max_wakes_per_hour:
@@ -340,6 +402,10 @@ class AutonomyService:
                      timed_out: bool, stopped: bool, manual: bool) -> None:
         aid = agent.id
         st = self._state(aid)
+        # How many failures in a row before the user is told. 0 is storable and
+        # means "never tell me" — it must silence the recovery notice too, or a
+        # `>= 0` test would fire one after every successful wake.
+        threshold = cfg.max_consecutive_errors
         failed = timed_out or result["error"] is not None
         if failed:
             # The tasks keep their next_at, so they stay due and are retried —
@@ -349,14 +415,21 @@ class AutonomyService:
             for t in wake_tasks:
                 self.tasks.advance(t["id"], "timeout" if timed_out else "error",
                                    _short(reason or "", 120), reschedule=False)
-            st["consecutive_errors"] = st.get("consecutive_errors", 0) + 1
+            errors = st.get("consecutive_errors", 0) + 1
+            st["consecutive_errors"] = errors
             st["last_result"] = "timeout" if timed_out else "error"
             st["last_error"] = reason
-            if st["consecutive_errors"] >= cfg.max_consecutive_errors:
-                st["paused"] = True
-                st["paused_agent_mtime"] = self._agent_mtime(aid)
-                log.warning("agent '%s' auto-paused after %d consecutive errors",
-                            aid, st["consecutive_errors"])
+            delay = _retry_delay(errors)
+            st["retry_after"] = _iso_in(delay)
+            log.warning("agent '%s' wake failed (%d in a row), retrying in %ds: %s",
+                        aid, errors, int(delay), _short(reason or "", 120))
+            # Exactly AT the threshold, so the notice is sent once and not on
+            # every later retry: a channel that repeats the same alert every
+            # 30 minutes is a channel the user mutes.
+            if threshold > 0 and errors == threshold:
+                self._announce(agent, _ALERT_TEXT.format(
+                    name=agent.name, n=errors, reason=_short(reason or "", 160),
+                    mins=max(1, int(_retry_delay(errors + 1) // 60))))
         elif stopped:
             st["last_result"] = "stopped"  # user intervention: not an error
         else:
@@ -369,12 +442,46 @@ class AutonomyService:
             # the event queue had. All tasks of one wake share one outcome.
             for t in wake_tasks:
                 self.tasks.advance(t["id"], "noop" if noop else "acted", reply)
+            recovered = st.get("consecutive_errors", 0)
             st["consecutive_errors"] = 0
             st["last_result"] = "noop" if noop else "acted"
             st.pop("last_error", None)
+            st.pop("retry_after", None)
+            # Only if the user was told it was broken. Silence after an alert
+            # reads as "still broken", and the whole point of alerting is that
+            # nobody is watching the badge.
+            if threshold > 0 and recovered >= threshold:
+                self._announce(agent, _RECOVERED_TEXT.format(
+                    name=agent.name, n=recovered))
         self._save_state(aid, st)
         log.info("wake of '%s' finished: %s%s", aid, st["last_result"],
                  " (manual)" if manual else "")
+
+    def _announce(self, agent: Agent, text: str) -> None:
+        """Tell the user out-of-band about the SCHEDULER's own state.
+
+        An agent whose wakes keep failing is precisely the one that cannot
+        report it: it never gets to run, so ``notify_user`` is never called.
+        The old auto-pause only wrote a log line, and the agent went dark for
+        ~20 hours with nobody told — found by noticing a badge.
+
+        Fire-and-forget: this runs inside _finish_wake's bookkeeping, and a
+        notice that could not be delivered must not turn into a second failure.
+        """
+        sender = self.send_notification
+        if sender is None:
+            return          # no connectors plugin: the log line is all there is
+
+        async def deliver() -> None:
+            try:
+                result = await sender(agent, text)
+            except Exception as e:
+                log.warning("could not announce state of '%s': %s", agent.id, e)
+                return
+            if isinstance(result, str) and result.startswith("ERROR"):
+                log.warning("could not announce state of '%s': %s", agent.id, result)
+
+        asyncio.create_task(deliver())
 
     def _make_autonomous_drive(self, agent: Agent, executor, sid: str,
                                prompt: str, result: dict):
@@ -489,9 +596,12 @@ class AutonomyService:
         return await self.live.stop(session_id_for(agent_id))
 
     async def resume(self, agent_id: str) -> None:
+        """Retry now: clear the error backoff and the streak."""
         st = self._state(agent_id)
-        st["paused"] = False
         st["consecutive_errors"] = 0
+        st.pop("retry_after", None)
+        st.pop("paused", None)              # legacy field, see _state
+        st.pop("paused_agent_mtime", None)
         self._save_state(agent_id, st)
         self._kick.set()
 
@@ -527,10 +637,10 @@ class AutonomyService:
                 state = "disabled"
             elif running:
                 state = "running"
-            elif st.get("paused"):
-                state = "paused"
             elif len(self._wakes_last_hour(st)) >= cfg.max_wakes_per_hour:
                 state = "rate_limited"
+            elif st.get("retry_after", "") > now:
+                state = "retrying"   # failing, but still trying — not stopped
             elif st.get("consecutive_errors", 0) > 0:
                 state = "error"
             else:
@@ -547,6 +657,10 @@ class AutonomyService:
                 "next_wake": next((t["next_at"] for t in agent_tasks
                                    if t.get("enabled", True) and t.get("next_at")), ""),
                 "consecutive_errors": st.get("consecutive_errors", 0),
+                # When the error backoff lets the next attempt through. Needed
+                # separately from next_wake: a failed task keeps its next_at, so
+                # next_wake sits in the PAST while this is what actually gates.
+                "retry_after": st.get("retry_after", ""),
                 "wakes_last_hour": len(self._wakes_last_hour(st)),
                 "tasks": len(agent_tasks),
                 "due_tasks": sum(1 for t in agent_tasks if t.get("enabled", True)

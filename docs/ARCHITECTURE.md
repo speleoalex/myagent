@@ -394,8 +394,8 @@ stays idle whether it is live or not.
   local-model turn can never build a backlog. Rescheduling happens only after a
   successful wake (``TaskStore.advance``): run-once-on-success, with a failed
   run left due and retried. Per-agent runtime state (last wake, error streak,
-  pause, wake history) persists in ``~/myagent/autonomy/<id>/state.json`` — no
-  wake storm on restart.
+  ``retry_after``, wake history) persists in
+  ``~/myagent/autonomy/<id>/state.json`` — no wake storm on restart.
 - **Wake turn** — a normal executor turn in the dedicated named session
   ``autonomous_<agent_id>`` (source ``autonomous``, visible in the UI session
   list), driven through the LiveRunManager and serialized on the same lock as
@@ -427,10 +427,15 @@ stays idle whether it is live or not.
   flag is off. Every message that names a target says so ("Task t-3 created for
   agent 'sysadmin'"): the reader is a model that relays the line to the user,
   and "task created" is otherwise heard as its own.
-- **Safety rails** — per-hour rate limit (also the floor on how often a task
-  can really run), auto-pause after N consecutive errors (cleared by re-saving
-  the agent or ``POST /api/autonomy/{id}/resume``), ``wake_timeout_s`` wall,
-  plus the existing per-turn ``max_iterations`` / ``max_tool_calls``. A failed
+- **Safety rails** — per-hour rate limit (a rolling count, and the floor between
+  two *successful* runs of a task), a growing retry delay after a failure
+  (1 min doubling to a 30 min ceiling, kept in ``retry_after``) that never gives
+  up — ``live: false`` is the only stop, because that decision is the user's —
+  with ``max_consecutive_errors`` deciding when the SERVICE notifies the user
+  through that agent's own notify target, and again on recovery: an agent whose
+  wakes fail cannot report it, because it never gets to run a turn. Plus the
+  ``wake_timeout_s`` wall and the per-turn ``max_iterations`` /
+  ``max_tool_calls``. A failed
   wake records the outcome on its due tasks WITHOUT advancing ``next_at``: they
   stay due and are retried, and the Tasks page shows the error instead of the
   last success.

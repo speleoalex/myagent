@@ -371,6 +371,32 @@ async def notify_user_handler(
     return out
 
 
+class _AgentOnly:
+    """The only thing notify_user_handler reads off an executor: ``.agent``."""
+
+    __slots__ = ("agent",)
+
+    def __init__(self, agent):
+        self.agent = agent
+
+
+async def notify_agent_owner(agent, text: str, named=None, state=None) -> str:
+    """Send *text* to an agent's configured notify target, with no agent turn.
+
+    Used by the autonomy scheduler to report its OWN state — repeated wake
+    failures, and recovery — which the agent cannot report itself, because a
+    failing agent never gets to run a turn.
+
+    Deliberately routed through ``notify_user_handler`` rather than calling a
+    connector directly: recipient resolution by name, the configured-target
+    fallback, one send per recipient and the append to the chat's own
+    conversation all live there, each for a reason that was a bug first. A
+    second implementation would drift from all four.
+    """
+    return await notify_user_handler(
+        text=text, executor=_AgentOnly(agent), _named=named, _state=state)
+
+
 async def _log_to_channel(sid: str, text: str, executor, named) -> bool:
     """Append a sent notification to the chat's own conversation.
 

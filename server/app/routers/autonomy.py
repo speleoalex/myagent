@@ -2,7 +2,7 @@
 
 The on/off switch is NOT here: it is the ``live`` field of the agent (PUT
 /api/agents/{id}). These endpoints expose the scheduler's runtime state and
-the manual levers: wake now, stop the in-flight wake, resume after auto-pause.
+the manual levers: wake now, stop the in-flight wake, retry now after a failure.
 """
 from fastapi import APIRouter, HTTPException, Request
 
@@ -16,7 +16,8 @@ def _autonomy(request: Request):
 @router.get("/status")
 async def autonomy_status(request: Request):
     """Per-agent scheduler state: {agent_id: {state: idle|running|rate_limited|
-    error|paused|disabled, last_wake, last_result, next_wake, ...}}."""
+    retrying|error|disabled, last_wake, last_result, next_wake, retry_after,
+    ...}}. ``retrying`` = failing but still inside its error backoff."""
     return _autonomy(request).status()
 
 
@@ -42,8 +43,10 @@ async def stop_agent_wake(agent_id: str, request: Request):
 
 @router.post("/{agent_id}/resume")
 async def resume_agent(agent_id: str, request: Request):
-    """Clear the auto-pause after repeated errors (re-saving the agent's
-    config does the same)."""
+    """Retry now: clear the error backoff and the consecutive-error streak.
+
+    Failing wakes are retried on their own with a growing delay, so this only
+    skips the wait — there is no paused state left to lift."""
     if request.app.state.stores.agents.get(agent_id) is None:
         raise HTTPException(404, f"Agent not found: {agent_id}")
     await _autonomy(request).resume(agent_id)

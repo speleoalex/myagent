@@ -15,7 +15,9 @@ where the *when* is a set of presets — once, every N minutes or hours, daily,
 certain days of the week, or a raw cron expression — with a preview of the next
 runs.
 
-Or just ask the agent, if it has the `manage_tasks` tool:
+Or just ask the agent, if it has the `manage_tasks` tool — the bundled
+**Master** ships with it (and with `autonomy_control`, so it can switch its own
+live mode on when you ask for a reminder):
 
 > *"wake up in an hour and remind me to call the accountant"*
 > *"every Monday at 9, prepare my week"*
@@ -64,18 +66,34 @@ optional:
 
 | Limit | Default | What it does |
 |---|---|---|
-| `max_wakes_per_hour` | 12 | also the real floor: no task runs more often than every 5 minutes |
-| `max_consecutive_errors` | 5 | auto-pauses the agent instead of looping on a broken task |
+| `max_wakes_per_hour` | 12 | ceiling on wakes in a rolling hour; also the floor between two *successful* runs of a task |
+| `max_consecutive_errors` | 5 | failures in a row after which the agent **notifies you** |
 | `wake_timeout_s` | 600 | a stuck turn is cancelled |
 
 A failed wake does **not** advance the schedule — the task stays due and is
 retried — but the failure is still recorded, so the Tasks page shows red
 instead of the last success.
 
-Unpause with `POST /api/autonomy/{id}/resume` or by re-saving the agent.
+**A failing agent is never abandoned.** Each failure waits longer than the last
+(1 minute, then 2, 4, 8, … capped at 30) and it keeps trying indefinitely.
+Turning autonomy off is the only thing that stops it, because that decision is
+yours: most failures are transient (the network isn't up yet, Ollama isn't
+started, a remote API returns 429), and even a permanent one — an expired API
+key, an exhausted credit balance — is usually fixed *outside* MyAgent, so the
+agent has to come back on its own.
+
+`max_consecutive_errors` is therefore about **being told**, not about giving up:
+at that many failures in a row you get one message through the agent's own
+notify target, naming the agent and the actual error, and one more when its
+wakes start working again. The scheduler sends it, not the agent — an agent that
+cannot complete a turn cannot report that it can't. Set it to `0` to never be
+notified.
+
+`POST /api/autonomy/{id}/resume` skips the current retry delay.
 `GET /api/autonomy/status` (or the badge on the agent card) shows the scheduler
-state, and `POST /api/autonomy/{id}/wake` forces a turn — the main way to test
-an agent's behaviour without waiting for its schedule.
+state — `retrying` while the backoff is running, with `retry_after` saying when
+the next attempt is due — and `POST /api/autonomy/{id}/wake` forces a turn, the
+main way to test an agent's behaviour without waiting for its schedule.
 
 A started agent restarts by itself after a reboot; the stop button (or
 `live: false`) halts it within seconds and is the kill switch.

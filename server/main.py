@@ -47,6 +47,7 @@ from app.tools.internal import (
     autonomy_control_handler,
     call_agent_handler,
     manage_tasks_handler,
+    notify_agent_owner,
     notify_targets,
     notify_user_handler,
 )
@@ -244,6 +245,12 @@ tool_registry.register_internal(
     "autonomy_control",
     functools.partial(autonomy_control_handler, _autonomy=autonomy_service),
 )
+# The scheduler's own voice. An agent whose wakes keep failing cannot report it
+# (it never runs), so the SERVICE says it, through that agent's configured notify
+# target. Same late, lazy app.state closure as notify_user above: the connectors
+# plugin that delivers is loaded further down.
+autonomy_service.send_notification = functools.partial(
+    notify_agent_owner, named=named_sessions, state=app.state)
 
 # Store in app state
 app.state.stores = stores
