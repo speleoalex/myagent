@@ -150,6 +150,32 @@ invalidated when a model config is saved or deleted.
 raw probe plus the resolved window; the UI shows it in the model form and as
 a `… ctx` badge in the models list.
 
+## The default model falls back, and is never rewritten
+
+Every bundled agent runs on the model chosen in **Settings**. When that model
+is unreachable or gone, `server/app/engine/default_model.py` runs the turn on
+whichever local backend *is* answering, rather than failing — otherwise a fresh
+install (whose seeded default points at llama.cpp on `:8080`) cannot answer a
+single message even with Ollama running.
+
+The order is deterministic: a reachable registered local model, then a model
+pulled into Ollama that nobody registered yet (tool-capable first), then any
+reachable llama.cpp instance. Four properties are deliberate:
+
+- **Nothing is written.** `settings.json` keeps the user's choice, so the
+  configured model is used again the moment it comes back.
+- **A remote default is taken at its word** — never probed, never replaced. A
+  gateway that doesn't serve `/v1/models` probes as unreachable, and diverting
+  a turn away from it (or calling a paid API on every page load) would be worse
+  than the problem.
+- **A model with an API key is never chosen automatically.** Silently moving a
+  conversation onto a paid remote service is not a fallback, it's a bill.
+- **It is announced**, as an SSE `notice` event stored in the session, shown
+  above the answer it explains.
+
+`GET /api/system/ready` reports the same decision (and warms its cache) for the
+home page, which shows a banner only when nothing can answer.
+
 ## Tool system
 
 Tools are an **overlay of two layers**, with no install step:
@@ -572,7 +598,7 @@ Everything is plain JSON under `~/myagent/` (see `server/app/config.py`):
 | `~/myagent/config/mcp/` | `MYAGENT_CONFIG` | one JSON per MCP server (0600: `env`/`headers` may hold secrets) + `cache/` with the discovered tool catalogue |
 | `~/myagent/config/tasks/` | `MYAGENT_CONFIG` | one JSON per scheduled task (agent + prompt + cron/`at`) — user intent, hence config and not runtime state |
 | `~/myagent/tools/` | `MYAGENT_TOOLS` | tool folders |
-| `~/myagent/library/` | `MYAGENT_LIBRARY` | offline knowledge for the `library/*` tools (ZIM archives, notes) — user-placed, never written by the app |
+| `~/myagent/library/` | `MYAGENT_LIBRARY` | offline knowledge for the `library/*` tools (ZIM archives, notes) — user-placed, never written by the app; `library/fetch.py` in the repo fills it on demand |
 | `~/myagent/workspace/` | `MYAGENT_WORKSPACE` | working dir for agents' file operations; relative paths in file/shell tools resolve here |
 | `~/myagent/sessions/` | `MYAGENT_SESSIONS` | `current.json`, `history/`, `channels/` (connector chats) |
 | `~/myagent/memory/` | `MYAGENT_MEMORY` | per-agent long-term memory: `<agent_id>/memory.md` + `chunks/*.md` |
@@ -688,6 +714,7 @@ one the navbar shows) rendered white on a blue gradient.
 | Chain-of-thought splitting (streaming) | `server/app/engine/reasoning.py` |
 | LLM communication | `server/app/engine/llm_provider.py` |
 | Context window / capability probe | `server/app/engine/model_probe.py` |
+| Default-model fallback (never persisted) | `server/app/engine/default_model.py` |
 | Live (client-decoupled) runs | `server/app/engine/live.py` |
 | Long-term memory store (memory.md + chunks) | `server/app/storage/memory.py` |
 | Memory compaction pipeline | `server/app/engine/memory_compactor.py` |
