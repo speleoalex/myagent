@@ -25,6 +25,30 @@ from myagent_connectors import config
 log = logging.getLogger("connectors.core")
 
 
+def collect_resources(trace) -> list[dict]:
+    """Files the turn delivered through the resource channel — walked
+    RECURSIVELY through sub-agent traces, so a page master delegated to
+    html-designer still reaches the Telegram user. Mirrors the UI's
+    collectResources (ui/js/chat.js); dedup by path, document order."""
+    out: list[dict] = []
+    seen: set = set()
+
+    def walk(steps):
+        for s in steps or []:
+            for r in (s.get("resources") or []):
+                path = r.get("path") if isinstance(r, dict) else None
+                if path and path not in seen:
+                    seen.add(path)
+                    out.append(r)
+            sub = s.get("sub_trace")
+            if isinstance(sub, dict):
+                walk(sub.get("steps"))
+
+    if isinstance(trace, dict):
+        walk(trace.get("steps"))
+    return out
+
+
 class CoreClient:
     """Drives agent turns on channel-scoped sessions.
 
@@ -43,8 +67,14 @@ class CoreClient:
                    attachments: list[dict] | None = None,
                    source: str | None = None,
                    sender_id: str = "", sender_username: str = "",
-                   sender_name: str = "") -> str:
-        """Run one agent turn and return the reply text.
+                   sender_name: str = "") -> tuple[str, list[dict]]:
+        """Run one agent turn; return ``(reply text, delivered resources)``.
+
+        The resources are the files the turn flagged for the user (the
+        resource channel, ``app/tools/resources.py``): the transport decides
+        what to do with them — Telegram sends them as photos/documents, a
+        voice satellite has nothing to show and skips them (they stay visible
+        in the channel session from the web UI).
 
         ``sender_*`` is whatever the transport knows about who wrote (id,
         @username, display name); it is resolved against the address book here
@@ -81,7 +111,7 @@ class CoreClient:
                 run_channel_turn(req, state.named_sessions, executor),
                 timeout=config.CHAT_TIMEOUT,
             )
-        return response.reply
+        return response.reply, collect_resources(response.trace)
 
     async def transcribe(self, content: bytes, name: str,
                          language: str | None = None) -> str:

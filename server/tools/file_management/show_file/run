@@ -1,0 +1,35 @@
+#!/usr/bin/env python3
+"""Flag a workspace file for the chat UI via the resource channel.
+
+Prints the [[resource:...]] marker the executor turns into an inline image /
+open button / download card (see docs/TOOLS.md, "Returning files to the user").
+The file must already exist: this tool shows files, it does not create them.
+"""
+import json
+import mimetypes
+import os
+import sys
+
+args = json.loads(sys.stdin.read())
+path = str(args.get("path") or "").strip()
+while path.startswith("./"):
+    path = path[2:]
+title = " ".join(str(args.get("title") or "").split())
+
+# cwd IS the workspace (the registry runs every tool there); refuse anything
+# that points outside it — the executor would drop the marker anyway, but a
+# clear in-band error teaches the model, a silently missing image does not.
+if not path or path.startswith("/") or ".." in path.split("/"):
+    print("ERROR: path must be a workspace-relative file path (no .. or absolute paths)")
+    sys.exit(0)
+if not os.path.isfile(path):
+    print(f"ERROR: file not found in the workspace: {path}")
+    sys.exit(0)
+
+mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
+name = os.path.basename(path)
+# The marker line must survive verbatim; strip the separator chars from the
+# title (same rule as the server-side marker() helper).
+safe_title = (title or name).replace("|", "/").replace("]]", ")")
+print(f"[[resource:{path}|{mime}|{safe_title}]]")
+print(f"Shown to the user: {safe_title} ({mime})")

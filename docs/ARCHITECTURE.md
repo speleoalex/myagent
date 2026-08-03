@@ -56,6 +56,9 @@ connectors/            # optional Telegram plugin: source only, NOT deployed
 
 SSE events emitted: `token`, `reasoning`, `tool_start`, `tool_result`,
 `clear_tokens`, `error`, `done` (plus `stopped` from the live-run manager).
+A `tool_result` may carry `resources` — files the tool delivered to the chat
+(see *Resources* under [Tool system](#tool-system)); `GET /api/files/{path}`
+serves them.
 
 ## Executor details (`server/app/engine/executor.py`)
 
@@ -238,6 +241,36 @@ the persisted `Agent.live` switch and cancelling any wake in flight).
 
 **Hot reload** — the registry re-scans the folder with mtime caching on every
 access; adding or editing a tool requires no restart.
+
+**Resources (files delivered to the chat)** — a tool that wants the user to
+SEE a file (image, generated HTML, any binary) writes it under the workspace
+and prints a one-line marker on stdout:
+`[[resource:<workspace-relative-path>|<mime>|<title>]]` (single definition:
+`server/app/tools/resources.py` — the model of MCP's `resource_link`, applied
+to folder tools). The registry's output truncation preserves marker lines; the
+executor extracts them right after `execute()` returns — the model sees a
+short "file delivered to the user" note (the bytes never enter the
+conversation), while the UI receives `{path, mime, title, size}` on the trace
+step, which rides the existing pipeline: SSE `tool_result`, the `done` trace,
+and the persisted session tool message. `GET /api/files/{path}` serves the
+bytes (read-only, traversal-guarded, `Content-Security-Policy: sandbox` so a
+generated HTML page runs in an opaque origin). The chat renders a resource
+strip per message — images inline, HTML as a live sandboxed preview
+(collapsible iframe fed by an authenticated fetch, `ui/viewer.html` for a full
+tab; the API key never enters a URL either way), the rest as download cards —
+and the model may also embed a delivered image in its reply with
+`![alt](_resources/<name>)` (the only image syntax the markdown renderer
+accepts). Connectors deliver the same resources through their transport:
+`CoreClient.chat` returns them next to the reply, `BaseConnector` re-checks
+workspace containment and calls the per-channel `send_file` hook — Telegram
+sends photos/documents, a voice satellite keeps its default "not supported"
+and the files stay visible in the channel session from the web UI. Files under
+`workspace/_resources/` are never auto-pruned (sessions reference them
+indefinitely), unlike `_attachments/` which is swept after 24h; MCP
+image/blob content lands there too and shows in the chat the same way.
+Bundled `show_file` (`file_management/`) flags an existing file, and
+`library/local_read` delivers a ZIM article's images through the same
+channel. See [TOOLS.md](TOOLS.md), "Returning files to the user".
 
 **Native agent catalog** — agents follow a different (older) model: the bundled
 `server/config/agents/` seeds `~/myagent/config/agents/` on first run, and
@@ -604,7 +637,7 @@ Everything is plain JSON under `~/myagent/` (see `server/app/config.py`):
 | `~/myagent/config/tasks/` | `MYAGENT_CONFIG` | one JSON per scheduled task (agent + prompt + cron/`at`) — user intent, hence config and not runtime state |
 | `~/myagent/tools/` | `MYAGENT_TOOLS` | tool folders |
 | `~/myagent/library/` | `MYAGENT_LIBRARY` | offline knowledge for the `library/*` tools (ZIM archives, notes) — user-placed, never written by the app; `library/fetch.py` in the repo fills it on demand |
-| `~/myagent/workspace/` | `MYAGENT_WORKSPACE` | working dir for agents' file operations; relative paths in file/shell tools resolve here |
+| `~/myagent/workspace/` | `MYAGENT_WORKSPACE` | working dir for agents' file operations; relative paths in file/shell tools resolve here. `_attachments/` = 24h scratch for uploads/MCP text blobs; `_resources/` = files delivered to the chat (never auto-pruned, served by `GET /api/files/`) |
 | `~/myagent/sessions/` | `MYAGENT_SESSIONS` | `current.json`, `history/`, `channels/` (connector chats) |
 | `~/myagent/memory/` | `MYAGENT_MEMORY` | per-agent long-term memory: `<agent_id>/memory.md` + `chunks/*.md` |
 | `~/myagent/autonomy/` | `MYAGENT_AUTONOMY` | live agents' runtime state: `<agent_id>/state.json` (the schedule itself lives in `config/tasks/`) |

@@ -15,7 +15,11 @@
       },
       "path": {
         "type": "string",
-        "description": "Same 'path' passed to local_search, if any"
+        "description": "The SAME 'path' passed to local_search — required whenever that search used one, because an id only resolves inside the folder that produced it (the search output prints the call to make)"
+      },
+      "images": {
+        "type": "boolean",
+        "description": "Deliver the article's images to the user's chat. Default: automatic on the first page only (max 3); true forces them on any page, false disables"
       }
     },
     "required": [

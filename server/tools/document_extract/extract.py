@@ -26,6 +26,14 @@ from pathlib import Path
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tif", ".tiff", ".ppm", ".pgm"}
 AUDIO_EXTS = {".oga", ".ogg", ".opus", ".mp3", ".m4a", ".aac", ".wav", ".flac",
               ".wma", ".amr", ".webm", ".weba"}
+# What `pdfimages -all` writes that a viewer can actually open: it also emits
+# raw .ccitt/.jbig2 streams with .params sidecars for bilevel scans, and those
+# are links to nothing.
+VIEWABLE_IMG_EXTS = {".png", ".jpg", ".jpeg", ".tif", ".tiff"}
+# Output budget for a PDF window, kept under the tool's max_output so the cut
+# happens HERE, at a page boundary we can name, instead of mid-page in the
+# registry.
+MAX_CHARS = 18000
 
 
 def err(msg: str, code: int = 1):
@@ -96,9 +104,35 @@ def dedup_and_clean(files: list[Path]) -> list[Path]:
 
 
 # --------------------------------------------------------------------------- PDF
-def _pdf_image_types(path: Path) -> dict[tuple[int, int], str]:
+def normalize_layout(text: str) -> str:
+    """Squeeze `pdftotext -layout` output: whitespace runs to two spaces, at
+    most one blank line. Mirrored in the library tools' pdf_pages().
+
+    `-layout` is what keeps a table ROW together ("Clutch cover bolt  15-22
+    1.5-2.2  11-15"); plain pdftotext puts every cell on a line of its own and
+    a torque table stops saying which value belongs to which bolt. The price is
+    padding with the page geometry — measured on a scanned service manual, 45%
+    of the output was indentation, i.e. half the model's budget for the page.
+    """
+    out, blank = [], 0
+    for line in text.splitlines():
+        line = re.sub(r"[ \t]{2,}", "  ", line).strip()
+        if not line:
+            blank += 1
+            if blank == 1:
+                out.append("")
+            continue
+        blank = 0
+        out.append(line)
+    while out and not out[-1]:
+        out.pop()
+    return "\n".join(out)
+
+
+def _pdf_image_types(path: Path, first: int, last: int) -> dict[tuple[int, int], str]:
     """Map (page, num) -> image type from `pdfimages -list` (to skip smasks)."""
-    rc, out, _ = run_cmd(["pdfimages", "-list", str(path)])
+    rc, out, _ = run_cmd(["pdfimages", "-list", "-f", str(first), "-l", str(last),
+                          str(path)])
     types: dict[tuple[int, int], str] = {}
     if rc != 0:
         return types
@@ -114,25 +148,48 @@ def _pdf_image_types(path: Path) -> dict[tuple[int, int], str]:
     return types
 
 
-def extract_pdf(path: Path, out_dir: Path, max_pages: int) -> str:
+def extract_pdf(path: Path, out_dir: Path, max_pages: int,
+                from_page: int = 1, images: bool = True) -> str:
     if not have("pdftotext"):
         err("pdftotext (poppler-utils) is not installed")
 
-    # 1) Text, page by page (pages are separated by form-feed).
+    # 1) Text, page by page (pages are separated by form-feed). The WHOLE
+    # document is extracted even for a windowed read — it costs well under a
+    # second and is the only honest source for the total page count.
     rc, out, serr = run_cmd(["pdftotext", "-layout", str(path), "-"], timeout=90)
     if rc == 127:
         err("pdftotext (poppler-utils) is not installed")
     text = out.decode(errors="replace") if rc == 0 else ""
-    text_pages = [p.rstrip() for p in text.split("\x0c")]
+    text_pages = [normalize_layout(p) for p in text.split("\x0c")]
     while text_pages and not text_pages[-1].strip():
         text_pages.pop()
+    has_text = any(p.strip() for p in text_pages)
 
-    # 2) Extract embedded images, skipping soft-masks; then dedup.
+    # The window to render. from_page is what makes a 200-page manual readable
+    # past its first pages: max_pages alone only ever moved the END.
+    #
+    # The page total comes from pdfinfo when available (10-40ms, same package as
+    # pdftotext) because a SCAN has no text pages to count, and the window would
+    # collapse to one page — the OCR fallback below has to know how far to go.
+    total_pages = len(text_pages)
+    rc_i, info, _ = run_cmd(["pdfinfo", str(path)])
+    if rc_i == 0:
+        m = re.search(r"^Pages:\s+(\d+)", info.decode(errors="replace"), re.M)
+        if m:
+            total_pages = max(total_pages, int(m.group(1)))
+    first = max(1, from_page)
+    last = min(total_pages, first + max_pages - 1) if total_pages else first
+
+    # 2) Embedded images for the WINDOW only, skipping soft-masks; then dedup.
+    # Restricted with -f/-l because a scanned manual carries one full-page
+    # image per page: extracting all 214 of them to read page 12 was tens of
+    # MB of /tmp and seconds of work, thrown away.
     img_by_page: dict[int, list[Path]] = {}
-    if have("pdfimages"):
-        types = _pdf_image_types(path)
+    if images and have("pdfimages"):
+        types = _pdf_image_types(path, first, last)
         prefix = out_dir / "img"
-        run_cmd(["pdfimages", "-all", "-p", str(path), str(prefix)], timeout=90)
+        run_cmd(["pdfimages", "-all", "-p", "-f", str(first), "-l", str(last),
+                 str(path), str(prefix)], timeout=90)
         raw = sorted(out_dir.glob("img-*"))
         keep: list[Path] = []
         for f in raw:
@@ -140,8 +197,12 @@ def extract_pdf(path: Path, out_dir: Path, max_pages: int) -> str:
             if not m:
                 continue
             page, num = int(m.group(1)), int(m.group(2))
-            # Keep only real images (drop smask/stencil alpha masks).
-            if types.get((page, num), "image") != "image":
+            # Keep only real images (drop smask/stencil alpha masks), and only
+            # what can actually be VIEWED: `-all` writes a bilevel scan as a
+            # raw .ccitt stream plus a .params sidecar, and linking those put
+            # 21 dead links in the output of a 14-page manual (measured).
+            if (types.get((page, num), "image") != "image"
+                    or f.suffix.lower() not in VIEWABLE_IMG_EXTS):
                 f.unlink(missing_ok=True)
                 continue
             keep.append(f)
@@ -150,14 +211,15 @@ def extract_pdf(path: Path, out_dir: Path, max_pages: int) -> str:
             page = int(m.group(1)) if m else 0
             img_by_page.setdefault(page, []).append(f)
 
-    total_pages = max(len(text_pages), max(img_by_page or [0]))
-    has_text = any(p.strip() for p in text_pages)
-
-    # 3) OCR fallback for scanned PDFs (no extractable text) — render + OCR pages.
+    # 3) OCR fallback for scanned PDFs (no extractable text) — render + OCR the
+    # window's pages.
     ocr_pages: dict[int, str] = {}
     if not has_text and have("pdftoppm") and have("tesseract"):
-        limit = min(total_pages or 1, max_pages)
-        for pg in range(1, limit + 1):
+        # Last resort when pdfinfo is absent: the image page numbers.
+        if not total_pages and img_by_page:
+            total_pages = max(img_by_page)
+            last = min(total_pages, first + max_pages - 1)
+        for pg in range(first, (last if total_pages else first) + 1):
             base = out_dir / f"page-{pg:03d}"
             run_cmd(["pdftoppm", "-png", "-r", "150", "-f", str(pg), "-l", str(pg),
                      str(path), str(base)], timeout=60)
@@ -165,30 +227,49 @@ def extract_pdf(path: Path, out_dir: Path, max_pages: int) -> str:
             if not rendered:
                 continue
             page_img = rendered[0]
-            img_by_page.setdefault(pg, []).append(page_img)
+            if images:
+                img_by_page.setdefault(pg, []).append(page_img)
             rc2, oout, _ = run_cmd(["tesseract", str(page_img), "stdout", "-l", "eng+ita"], timeout=60)
             if rc2 == 0:
                 ocr_pages[pg] = oout.decode(errors="replace").strip()
 
-    # 4) Assemble Markdown, interleaving each page's text with its images.
+    if total_pages and first > total_pages:
+        err(f"'{path.name}' has {total_pages} pages: from_page={from_page} is "
+            f"past the end")
+
+    # 4) Assemble Markdown, interleaving each page's text with its images, and
+    # stop at a PAGE boundary once MAX_CHARS is spent. The registry would
+    # otherwise cut mid-page at max_output, and the model has no way to tell
+    # where to resume from — which is how a 214-page manual read as "only the
+    # first four pages exist".
     lines = [f"# {path.name}", ""]
-    n = min(total_pages, max_pages) if total_pages else 0
-    if total_pages > max_pages:
-        lines.append(f"_[Documento di {total_pages} pagine — mostrate le prime {max_pages}]_\n")
-    for pg in range(1, (n or 1) + 1):
-        lines.append(f"## Pagina {pg}\n")
+    shown = first - 1
+    budget = MAX_CHARS
+    for pg in range(first, (last or first) + 1):
         body = ""
         if pg - 1 < len(text_pages) and text_pages[pg - 1].strip():
             body = text_pages[pg - 1]
-        elif pg in ocr_pages and ocr_pages[pg]:
+        elif ocr_pages.get(pg):
             body = ocr_pages[pg]
+        page_lines = [f"## Pagina {pg}\n"]
         if body.strip():
-            lines.append(body.strip())
-            lines.append("")
+            page_lines += [body.strip(), ""]
         for i, img in enumerate(img_by_page.get(pg, [])):
-            lines.append(f"![page {pg} · image {i}]({img})")
+            page_lines.append(f"![page {pg} · image {i}]({img})")
         if img_by_page.get(pg):
-            lines.append("")
+            page_lines.append("")
+        cost = sum(len(x) + 1 for x in page_lines)
+        if shown >= first and cost > budget:
+            break
+        budget -= cost
+        lines += page_lines
+        shown = pg
+
+    if not (first == 1 and shown == total_pages):
+        lines.insert(2, f"_[Documento di {total_pages} pagine — mostrate "
+                        f"{first}-{shown}]_\n")
+    if shown < total_pages:
+        lines.append(f"\n_[continua con document_extract from_page={shown + 1}]_")
     if not has_text and not ocr_pages:
         lines.append("_[No extractable text — the PDF is probably scanned and no OCR is available]_")
     return "\n".join(lines).rstrip() + "\n"
@@ -336,11 +417,16 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     max_pages = int(args.get("max_pages") or 50)
+    from_page = int(args.get("from_page") or 1)
     ocr = args.get("ocr", True)
+    # Tolerate the string forms small models produce for booleans.
+    images = args.get("images", True)
+    if isinstance(images, str):
+        images = images.strip().lower() in ("1", "true", "yes", "si", "sì")
 
     kind = detect_kind(path)
     if kind == "pdf":
-        md = extract_pdf(path, out_dir, max_pages)
+        md = extract_pdf(path, out_dir, max_pages, from_page, bool(images))
     elif kind == "html":
         md = extract_html(path, out_dir)
     elif kind == "image":

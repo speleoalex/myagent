@@ -58,7 +58,7 @@ from app.tools.memory_tools import (
 )
 from app.plugins import load_plugins, start_plugins, stop_plugins
 from app.routers import (agents, tools, llm_models, chat, mcp, system, sessions,
-                         autonomy, plugins, tasks)
+                         autonomy, files, plugins, tasks)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -273,6 +273,7 @@ app.include_router(sessions.router, prefix="/api/sessions", tags=["sessions"])
 app.include_router(system.router, prefix="/api/system", tags=["system"])
 app.include_router(autonomy.router, prefix="/api/autonomy", tags=["autonomy"])
 app.include_router(tasks.router, prefix="/api/tasks", tags=["tasks"])
+app.include_router(files.router, prefix="/api/files", tags=["files"])
 app.include_router(plugins.router, prefix="/api/plugins", tags=["plugins"])
 
 # Optional plugins installed under ~/myagent/plugins (see docs/PLUGINS.md).

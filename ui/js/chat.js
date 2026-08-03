@@ -295,6 +295,9 @@ const ChatPage = {
             c.className = 'msg-content';
             c.innerHTML = this.renderMarkdown(text || '');
             msgDiv.appendChild(c);
+            // Persisted tool messages carry the same resources/sub_trace shape
+            // as trace steps, so a reloaded session shows the same strip.
+            this.renderResources(msgDiv, this.collectResources(pendingTools));
             msgDiv.appendChild(this._timeEl(ts));
             pendingTools = [];
         };
@@ -646,6 +649,15 @@ const ChatPage = {
                         break;
                     case 'tool_result':
                         this.completeLiveTool(toolsInline, event.data);
+                        // Resources render the moment the tool finishes, before
+                        // the answer streams; the 'done' rebuild below replaces
+                        // this with the authoritative list from the trace.
+                        if (event.data && event.data.resources) {
+                            msgDiv._resources = this.collectResources(
+                                [event.data], msgDiv._resources);
+                            this.renderResources(msgDiv, msgDiv._resources);
+                            scroll();
+                        }
                         break;
                     case 'done': {
                         clearThinking();
@@ -659,6 +671,11 @@ const ChatPage = {
                         if (trace && trace.steps && trace.steps.length) {
                             toolsInline.innerHTML = '';
                             this.renderTraceSteps(toolsInline, trace);
+                            // Authoritative resource strip: same rebuild-from-
+                            // trace rule as the tool area, and the only source
+                            // that sees sub-agent resources (via sub_trace).
+                            msgDiv._resources = this.collectResources(trace.steps);
+                            this.renderResources(msgDiv, msgDiv._resources);
                         }
                         if (!toolsInline.children.length) toolsInline.remove();
                         msgDiv.appendChild(this._timeEl());
@@ -1165,6 +1182,218 @@ const ChatPage = {
         return wrap;
     },
 
+    // --- Tool resources (files a tool delivered to the chat) ----------------
+    //
+    // A trace step / persisted tool message may carry `resources`:
+    // [{path, mime, title, size}] — workspace files flagged by a tool through
+    // the resource marker (see server/app/tools/resources.py). Three render
+    // paths must agree: live SSE tool_result, the 'done' rebuild from the
+    // trace, and session reload. The strip sits OUTSIDE the collapsed tool
+    // <details>, so the user sees the image without expanding anything.
+
+    // Walk steps (recursively through sub_trace, so a sub-agent's images reach
+    // the caller's bubble) and accumulate resources, deduped by path. `acc`
+    // lets the live path grow one list across events; mutated and returned.
+    collectResources(steps, acc) {
+        const list = acc || [];
+        const seen = new Set(list.map(r => r && r.path));
+        const walk = (ss) => {
+            for (const s of (ss || [])) {
+                for (const r of (s.resources || [])) {
+                    if (r && r.path && !seen.has(r.path)) {
+                        seen.add(r.path);
+                        list.push(r);
+                    }
+                }
+                if (s.sub_trace) walk(s.sub_trace.steps);
+            }
+        };
+        walk(steps);
+        return list;
+    },
+
+    // Create/refresh the message's resource strip (idempotent: rebuilt on each
+    // call, so live growth and the 'done' rebuild both just re-render).
+    renderResources(msgDiv, list) {
+        if (!msgDiv || !list || !list.length) return;
+        let strip = msgDiv.querySelector(':scope > .msg-resources');
+        if (!strip) {
+            strip = document.createElement('div');
+            strip.className = 'msg-resources';
+            const content = msgDiv.querySelector(':scope > .msg-content');
+            msgDiv.insertBefore(strip, content || null);
+        }
+        strip.innerHTML = '';
+        for (const r of list) strip.appendChild(this._resourceItem(r));
+    },
+
+    _resourceItem(r) {
+        const mime = String(r.mime || '');
+        const name = String(r.path || '').split('/').pop();
+        const title = r.title || name;
+
+        if (mime.startsWith('image/')) {
+            const a = document.createElement('a');
+            a.className = 'res-thumb';
+            a.href = App.fileUrl(r.path);
+            a.target = '_blank';
+            a.rel = 'noopener';
+            a.title = title;
+            const img = document.createElement('img');
+            img.src = App.fileUrl(r.path);
+            img.alt = title;
+            img.loading = 'lazy';
+            // Dangling reference (the file was cleaned from _resources/):
+            // degrade to a labeled chip instead of a broken-image icon.
+            img.onerror = () => {
+                const chip = document.createElement('span');
+                chip.className = 'res-missing';
+                chip.textContent = `${title} — ${i18n('chat.resourceMissing')}`;
+                a.replaceWith(chip);
+            };
+            a.appendChild(img);
+            return a;
+        }
+
+        // text/html previews inline (same scheme as viewer.html: Bearer fetch
+        // + srcdoc sandbox, the api key never enters a URL a page's own
+        // scripts could read). Oversized pages fall back to the card — a
+        // heavy page in every reloaded session would drag the whole chat.
+        const isHtml = mime === 'text/html';
+        if (isHtml && (r.size || 0) <= 512 * 1024) {
+            return this._htmlPreview(r, title);
+        }
+
+        // Non-image: a small card. HTML opens through viewer.html; anything
+        // else is a download link.
+        const a = document.createElement('a');
+        a.className = 'res-card';
+        a.target = '_blank';
+        a.rel = 'noopener';
+        if (isHtml) {
+            a.href = 'viewer.html?path=' + encodeURIComponent(r.path)
+                + '&title=' + encodeURIComponent(title);
+        } else {
+            a.href = App.fileUrl(r.path, true);
+        }
+        const icon = document.createElement('i');
+        icon.className = isHtml ? 'bi bi-window-fullscreen'
+                                : 'bi bi-file-earmark-arrow-down';
+        a.appendChild(icon);
+        const label = document.createElement('span');
+        label.className = 'res-title';
+        label.textContent = title;
+        a.appendChild(label);
+        const hint = document.createElement('span');
+        hint.className = 'res-hint';
+        hint.textContent = isHtml
+            ? i18n('chat.resourceOpen')
+            : `${i18n('chat.resourceDownload')}${r.size ? ' · ' + this._humanSize(r.size) : ''}`;
+        a.appendChild(hint);
+        return a;
+    },
+
+    // Collapsible inline preview of an HTML resource. The iframe is
+    // sandbox="allow-scripts" WITHOUT allow-same-origin and fed via srcdoc:
+    // the page's own scripts run, but in an opaque origin — no localStorage
+    // (where the api key lives), no credentialed calls. Content is fetched
+    // with the Bearer header, so no URL ever carries the key.
+    _htmlPreview(r, title) {
+        const det = document.createElement('details');
+        det.className = 'res-html';
+        det.open = true;
+        const sum = document.createElement('summary');
+        const icon = document.createElement('i');
+        icon.className = 'bi bi-window-fullscreen';
+        sum.appendChild(icon);
+        const label = document.createElement('span');
+        label.className = 'res-title';
+        label.textContent = title;
+        sum.appendChild(label);
+        const open = document.createElement('a');
+        open.className = 'res-open';
+        open.href = 'viewer.html?path=' + encodeURIComponent(r.path)
+            + '&title=' + encodeURIComponent(title);
+        open.target = '_blank';
+        open.rel = 'noopener';
+        open.textContent = i18n('chat.resourceOpen');
+        // A link inside <summary> would also toggle the fold.
+        open.onclick = (e) => e.stopPropagation();
+        sum.appendChild(open);
+        det.appendChild(sum);
+        const body = document.createElement('div');
+        body.className = 'res-html-body';
+        body.textContent = '…';
+        det.appendChild(body);
+        const p = r.path.split('/').map(encodeURIComponent).join('/');
+        fetch(App.apiUrl('/files/' + p), { headers: App.authHeaders() })
+            .then(res => {
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                return res.text();
+            })
+            .then(html => {
+                const f = document.createElement('iframe');
+                f.setAttribute('sandbox', 'allow-scripts');
+                f.className = 'res-iframe';
+                // Grow the iframe to its content so the preview has no inner
+                // scrollbar. The parent CANNOT measure it (no
+                // allow-same-origin — reading contentDocument back would cost
+                // exactly the isolation that keeps the api key safe), so a
+                // probe injected into the page posts its height out instead.
+                this._ensureIframeResizer();
+                f.srcdoc = html + this._HEIGHT_PROBE;
+                body.textContent = '';
+                body.appendChild(f);
+            })
+            .catch(() => {
+                const chip = document.createElement('span');
+                chip.className = 'res-missing';
+                chip.textContent = `${title} — ${i18n('chat.resourceMissing')}`;
+                body.textContent = '';
+                body.appendChild(chip);
+            });
+        return det;
+    },
+
+    // Appended to every previewed page: reports the document height to the
+    // parent on load and on every resize (charts render late, images load
+    // late — the two timeouts catch what ResizeObserver misses at startup).
+    // targetOrigin must be '*': from inside the opaque origin the page cannot
+    // know who embeds it.
+    _HEIGHT_PROBE:
+        '<script>(function(){var p=function(){try{parent.postMessage({myagentResourceHeight:' +
+        'document.documentElement.scrollHeight},"*")}catch(e){}};' +
+        'addEventListener("load",p);setTimeout(p,50);setTimeout(p,500);' +
+        'if(window.ResizeObserver)new ResizeObserver(p).observe(document.documentElement)})()' +
+        '<' + '/script>',
+
+    // One window-level listener for every preview iframe. The sender is
+    // untrusted (it IS the generated page): the only thing taken from the
+    // message is a number, clamped — past the ceiling the iframe keeps its
+    // own scrollbar, so a huge report cannot swallow the chat.
+    _ensureIframeResizer() {
+        if (this._iframeResizerBound) return;
+        this._iframeResizerBound = true;
+        window.addEventListener('message', (e) => {
+            const h = e.data && e.data.myagentResourceHeight;
+            if (typeof h !== 'number' || !isFinite(h) || h <= 0) return;
+            for (const f of document.querySelectorAll('iframe.res-iframe')) {
+                if (f.contentWindow === e.source) {
+                    const max = Math.round(window.innerHeight * 0.65);
+                    f.style.height = Math.max(120, Math.min(Math.ceil(h) + 4, max)) + 'px';
+                    break;
+                }
+            }
+        });
+    },
+
+    _humanSize(n) {
+        if (!n && n !== 0) return '';
+        if (n < 1024) return `${n} B`;
+        if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
+        return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+    },
+
     // Inline markdown: bold, italic, strikethrough, inline code, links.
     // Operates on already HTML-escaped text.
     renderInline(s) {
@@ -1179,6 +1408,13 @@ const ChatPage = {
             .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
             .replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em>$2</em>')
             .replace(/~~([^~]+)~~/g, '<del>$1</del>')
+            // Images: ONLY our own delivered resources (_resources/<name>, one
+            // path segment, safe charset) render as <img> — the model can place
+            // a tool's image inside its answer. External URLs and any other
+            // path stay escaped text: no tracking pixels, no traversal.
+            .replace(/!\[([^\]]*)\]\((_resources\/[A-Za-z0-9_.-]+)\)/g, (m, alt, path) =>
+                `<img class="md-img" src="${App.fileUrl(path).replace(/"/g, '%22')}"` +
+                ` alt="${alt.replace(/"/g, '&quot;')}" loading="lazy">`)
             // Links: the URL is untrusted (model/tool output). App.esc only
             // escapes <>&, NOT quotes, so a " in the URL could break out of the
             // href attribute and inject event handlers — neutralize quotes.

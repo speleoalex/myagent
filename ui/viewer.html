@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MyAgent</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🤖</text></svg>">
+<!--
+  Sandboxed viewer for HTML files a tool delivered to the chat (the resource
+  channel). Why a page of our own instead of linking /api/files directly:
+
+  - The api key must never enter a URL. A generated page can read its own
+    location (and exfiltrate it); this page is same-origin with the UI, takes
+    the key from localStorage like app.js does, and fetches the file with a
+    Bearer header.
+  - The content renders in an <iframe sandbox="allow-scripts"> WITHOUT
+    allow-same-origin: srcdoc + sandbox = opaque origin, so the page's own
+    scripts run (interactive generated pages keep working) but it cannot touch
+    localStorage or make credentialed calls.
+
+  Standalone on purpose (no app.js, no vendor CSS): it must stay a single file
+  that opens fast in a bare tab.
+-->
+<style>
+  :root { color-scheme: light dark; }
+  html, body { height: 100%; margin: 0; }
+  body { display: flex; flex-direction: column;
+         font: 14px system-ui, sans-serif;
+         background: #212529; color: #dee2e6; }
+  @media (prefers-color-scheme: light) {
+    body { background: #f8f9fa; color: #212529; }
+  }
+  #frame { flex: 1; border: 0; width: 100%; background: #fff; display: none; }
+  #status { padding: 2rem; text-align: center; }
+</style>
+</head>
+<body>
+<div id="status">…</div>
+<iframe id="frame" sandbox="allow-scripts"></iframe>
+<script>
+(async () => {
+    const qs = new URLSearchParams(location.search);
+    const path = qs.get('path') || '';
+    const title = qs.get('title') || path.split('/').pop() || 'MyAgent';
+    document.title = title;
+    const status = document.getElementById('status');
+    const frame = document.getElementById('frame');
+    const it = (localStorage.getItem('myagent_locale') || navigator.language || 'en')
+        .slice(0, 2) === 'it';
+    const t = {
+        loading: it ? 'Caricamento…' : 'Loading…',
+        badPath: it ? 'Percorso non valido.' : 'Invalid path.',
+        auth: it ? 'Accesso negato: apri prima l’interfaccia di MyAgent e inserisci la chiave API.'
+                 : 'Unauthorized: open the MyAgent UI first and enter the API key.',
+        missing: it ? 'File non trovato (potrebbe essere stato ripulito dal workspace).'
+                    : 'File not found (it may have been cleaned from the workspace).',
+        error: it ? 'Errore nel caricamento' : 'Failed to load',
+    };
+    status.textContent = t.loading;
+
+    // Same lexical guard as the server route: nothing above the workspace.
+    if (!path || path.startsWith('/') || path.split('/').includes('..')) {
+        status.textContent = t.badPath;
+        return;
+    }
+    // Same localStorage contract as app.js (serverBase + api key).
+    const server = (localStorage.getItem('myagent_server') || '').replace(/\/+$/, '');
+    const key = localStorage.getItem('myagent_api_key') || '';
+    const url = server + '/api/files/'
+        + path.split('/').map(encodeURIComponent).join('/');
+    try {
+        const res = await fetch(url, {
+            headers: key ? { 'Authorization': 'Bearer ' + key } : {},
+        });
+        if (res.status === 401) { status.textContent = t.auth; return; }
+        if (res.status === 404) { status.textContent = t.missing; return; }
+        if (!res.ok) { status.textContent = `${t.error} (HTTP ${res.status})`; return; }
+        frame.srcdoc = await res.text();
+        frame.style.display = 'block';
+        status.remove();
+    } catch (e) {
+        status.textContent = `${t.error}: ${e.message}`;
+    }
+})();
+</script>
+</body>
+</html>

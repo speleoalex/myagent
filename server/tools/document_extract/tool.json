@@ -16,10 +16,20 @@
         "type": "string",
         "description": "Where to write extracted images. Default: a per-file folder under /tmp."
       },
+      "from_page": {
+        "type": "integer",
+        "description": "PDF only: first page to read. The output ends with the page to continue from, so a long manual is read in windows instead of always from the start.",
+        "default": 1
+      },
       "max_pages": {
         "type": "integer",
-        "description": "PDF only: maximum pages to process.",
+        "description": "PDF only: how many pages to read starting at from_page.",
         "default": 50
+      },
+      "images": {
+        "type": "boolean",
+        "description": "PDF only: also extract the page images and link them. Pass false when you only need the text.",
+        "default": true
       },
       "ocr": {
         "type": "boolean",

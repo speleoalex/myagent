@@ -16,10 +16,11 @@ upgrading or redeploying never touches your data:
 ├── plugins/     # installed plugins — code, replaceable (see PLUGINS.md)
 ├── tools/       # your tools: the ones you (or the AI) create, plus your edits to the built-in ones
 ├── library/     # your offline knowledge: Wikipedia ZIM archives + notes/documents
-├── workspace/   # working directory for agents' file operations
+├── workspace/   # working directory for agents' file operations (+ _attachments/ scratch, _resources/ files shown in chat)
 ├── sessions/    # chat state: current, history, connector channels
 ├── memory/      # per-agent long-term memory (only for agents that enable it)
 ├── autonomy/    # live agents' state and event queues (only for started agents)
+├── cache/       # derived data, safe to delete (pdftext/: PDF text layers, for library search)
 └── logs/        # debug.log (only with MYAGENT_DEBUG=1)
 ```
 
@@ -57,6 +58,7 @@ with [`library/fetch.py`](../library/README.md).
 | `MYAGENT_MEMORY` | `~/myagent/memory` | per-agent long-term memory |
 | `MYAGENT_AUTONOMY` | `~/myagent/autonomy` | live agents' state and event queues |
 | `MYAGENT_LIBRARY` | `~/myagent/library` | offline knowledge folder (library tools) |
+| `MYAGENT_CACHE` | `~/myagent/cache` | derived data — currently the PDF text layers the library search reads; deleting it only costs one re-extraction |
 | `MYAGENT_PLUGINS` | `~/myagent/plugins` | installed plugins |
 
 Pointing `MYAGENT_LIBRARY` at an external disk is the common case — the library

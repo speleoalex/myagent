@@ -6,8 +6,12 @@ from a broken server exactly as it does from a broken script tool.
 
 Binary content (image/audio/blob resources) is NEVER inlined as base64: it would
 land both in the LLM context and in the persisted session file. It is written to
-the workspace with the same content-addressed naming the executor uses for user
-attachments, and referenced by a note the model already knows how to act on.
+``workspace/_resources/`` with the same content-addressed naming the executor
+uses for user attachments, and referenced by a resource marker
+(``app/tools/resources.py``) — the executor turns the marker into a short note
+for the model and structured metadata for the UI, so MCP images actually SHOW
+in the chat. ``_resources`` and not ``_attachments`` because sessions keep the
+reference indefinitely while ``_attachments`` is pruned at 24h.
 """
 
 from __future__ import annotations
@@ -20,6 +24,8 @@ import mimetypes
 import os
 import re
 from pathlib import Path
+
+from app.tools import resources as resource_channel
 
 log = logging.getLogger(__name__)
 
@@ -151,7 +157,7 @@ def _store(data: object, mime: object, kind: str, workspace: Path, label: str,
 
     size = _human_size(len(raw))
     try:
-        target_dir = workspace / "_attachments"
+        target_dir = workspace / "_resources"
         target_dir.mkdir(parents=True, exist_ok=True)
         stem, ext = os.path.splitext(label or kind)
         if not ext:
@@ -165,11 +171,8 @@ def _store(data: object, mime: object, kind: str, workspace: Path, label: str,
         log.warning("cannot store MCP %s content: %s", kind, e)
         return f"[{kind} ({mime}, {size}) could not be saved: {e}]"
 
-    origin = f" from {uri}" if uri else ""
-    return (
-        f"[{kind}{origin} saved: _attachments/{fname} ({mime}, {size}) — "
-        f"use document_extract on this path to read it]"
-    )
+    title = f"{kind} from {uri}" if uri else (label or kind)
+    return resource_channel.marker(f"_resources/{fname}", mime, title)
 
 
 def _stem_from_uri(uri: object) -> str:

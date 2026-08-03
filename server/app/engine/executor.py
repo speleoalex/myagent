@@ -16,6 +16,7 @@ from app.engine.default_model import resolve_default
 from app.engine.llm_provider import LLMProvider
 from app.engine.reasoning import ReasoningSplitter
 from app.engine.toolcall_parser import parse_tool_calls_from_text
+from app.tools import resources as resource_channel
 from app.tools.registry import ToolRegistry
 from app.storage.attachments import store_attachment
 from app.storage.memory import MemoryStore
@@ -68,8 +69,13 @@ def _tool_call_args(tc: dict) -> dict:
 
 def _step_summary(step: dict) -> dict:
     """The lightweight projection of a trace step used for SSE tool_result
-    events and ChatResponse.tool_results (full results stay in the trace)."""
-    return {k: step[k] for k in ("tool", "arguments", "result_preview")}
+    events and ChatResponse.tool_results (full results stay in the trace).
+    `resources` rides along when present: it IS the lightweight form (path +
+    metadata, never content) and the UI renders it live from this event."""
+    out = {k: step[k] for k in ("tool", "arguments", "result_preview")}
+    if step.get("resources"):
+        out["resources"] = step["resources"]
+    return out
 
 
 def _tool_call_key(tc: dict) -> tuple[str, str]:
@@ -203,7 +209,8 @@ class AgentExecutor:
         return (self.agent.response_temperature
                 if self.agent.response_temperature is not None else self.agent.temperature)
 
-    def _make_step(self, tool: str, arguments, result: str) -> dict:
+    def _make_step(self, tool: str, arguments, result: str,
+                   resources: list[dict] | None = None) -> dict:
         """Build one rich trace step (full result + nested sub-agent trace for
         call_agent). Consumes the next queued sub-trace when tool == call_agent."""
         step = {
@@ -213,6 +220,8 @@ class AgentExecutor:
             "result_preview": (result or "")[:200],
             "ts": _now_iso(),
         }
+        if resources:
+            step["resources"] = resources
         if tool == "call_agent" and self._sub_traces:
             step["sub_trace"] = self._sub_traces.pop(0)
         return step
@@ -429,10 +438,12 @@ class AgentExecutor:
             self._pending_sub_events.append(
                 {"type": "tool_start",
                  "data": {"tool": tool, "arguments": tr.get("arguments")}})
+            data = {"tool": tool, "arguments": tr.get("arguments"),
+                    "result_preview": tr.get("result_preview", "")}
+            if tr.get("resources"):
+                data["resources"] = tr["resources"]
             self._pending_sub_events.append(
-                {"type": "tool_result",
-                 "data": {"tool": tool, "arguments": tr.get("arguments"),
-                          "result_preview": tr.get("result_preview", "")}})
+                {"type": "tool_result", "data": data})
 
     def _build_agents_directory(self) -> str:
         """Compact directory of the agents this one may call: one line per
@@ -1250,13 +1261,21 @@ class AgentExecutor:
                 )
                 total_tool_calls += 1
 
+                # Resource markers come out HERE, before the result flows
+                # anywhere: the model (and the text protocol's replay) sees the
+                # short note, the UI gets {path, mime, title, size} on the step.
+                result, step_resources = resource_channel.extract(
+                    result, config.WORKSPACE_DIR
+                )
+
                 executed_calls.add(_tool_call_key(tc))
                 # Rich trace step (full result + nested sub-agent trace). Built
                 # here so the call_agent sub-trace queued by call_agent_handler
                 # is consumed in the same order it was produced. The SSE/
                 # tool_results summary is a projection of the same step —
                 # single source of truth.
-                step = self._make_step(func_name, func_args, result)
+                step = self._make_step(func_name, func_args, result,
+                                       resources=step_resources)
                 trace_steps.append(step)
                 yield {"type": "tool_result", "data": _step_summary(step)}
                 self._debug_log(f"  Tool result: {func_name} -> {self._dbg_content(result)}")

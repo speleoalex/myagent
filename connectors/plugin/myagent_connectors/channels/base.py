@@ -12,6 +12,8 @@ import contextlib
 import logging
 import re
 
+from app import config as app_config
+
 from myagent_connectors.models import Binding, _as_handle
 from myagent_connectors.core import CoreClient
 from myagent_connectors.storage import GrantStore
@@ -19,6 +21,11 @@ from myagent_connectors.storage import GrantStore
 log = logging.getLogger("connectors.channel")
 
 _UNSAFE = re.compile(r"[^A-Za-z0-9._-]")
+
+# Files delivered per reply (resource channel): a runaway tool must not turn
+# one Telegram answer into an album, and each send is a full upload.
+MAX_FILES_PER_REPLY = 5
+MAX_FILE_BYTES = 15 * 1024 * 1024
 
 
 class Unreachable(RuntimeError):
@@ -120,6 +127,15 @@ class BaseConnector:
         an agent (and through it the user) that a message was sent: without a
         return value it reported success on a dead token."""
         raise NotImplementedError
+
+    async def send_file(self, chat_id, name: str, data: bytes, mime: str,
+                        title: str) -> bool:
+        """Deliver a file the turn produced (resource channel). Optional
+        transport hook: the default says "not supported", which is the RIGHT
+        answer for a voice satellite — the spoken reply already names the
+        file, and the channel session keeps it visible in the web UI. Same
+        best-effort contract as send()."""
+        return False
 
     async def verify(self) -> dict:
         """Check the binding's credentials and describe the account they open.
@@ -261,12 +277,13 @@ class BaseConnector:
         # turn — a single action would expire after ~5s and look stalled.
         typing = asyncio.create_task(self._typing_loop(chat_id))
         try:
-            reply = await self.client.chat(self.binding.agent_id, text, sid,
-                                           attachments=attachments,
-                                           source=self.type,
-                                           sender_id=user_id,
-                                           sender_username=username or "",
-                                           sender_name=sender_name or "")
+            reply, resources = await self.client.chat(
+                self.binding.agent_id, text, sid,
+                attachments=attachments,
+                source=self.type,
+                sender_id=user_id,
+                sender_username=username or "",
+                sender_name=sender_name or "")
         except Exception as e:
             log.exception("agent call failed (%s): %s", self.binding.id, e)
             await self.send(chat_id, "⚠️ Error generating the reply. Please try again later.")
@@ -279,6 +296,47 @@ class BaseConnector:
 
         self.status.messages += 1
         await self.send(chat_id, reply or "(no reply)")
+        # Text first, then the files it talks about ("here's your report" and
+        # THEN the report). Best-effort: the reply already went out.
+        if resources:
+            await self._deliver_resources(chat_id, resources)
+
+    async def _deliver_resources(self, chat_id, resources: list[dict]) -> None:
+        """Send the turn's delivered files through the transport hook.
+
+        The paths were validated by the executor when the marker was
+        extracted, but they crossed a session file since — so containment
+        under the workspace is re-checked HERE, where the bytes are read.
+        Stops at the first refusal: a transport that answered "not supported"
+        once will answer it for every file (and the reply text already names
+        them)."""
+        root = app_config.WORKSPACE_DIR.resolve()
+        sent = 0
+        for r in resources:
+            if sent >= MAX_FILES_PER_REPLY:
+                log.info("[%s] resource cap reached, %d file(s) not sent",
+                         self.binding.id, len(resources) - sent)
+                break
+            path = str((r or {}).get("path") or "")
+            if not path or path.startswith("/") or ".." in path.split("/"):
+                continue
+            target = (root / path).resolve()
+            try:
+                if (not target.is_relative_to(root) or not target.is_file()
+                        or target.stat().st_size > MAX_FILE_BYTES):
+                    continue
+                data = target.read_bytes()
+            except OSError as e:
+                log.warning("[%s] cannot read resource %s: %s",
+                            self.binding.id, path, e)
+                continue
+            ok = await self.send_file(
+                chat_id, target.name, data,
+                r.get("mime") or "application/octet-stream",
+                r.get("title") or target.name)
+            if not ok:
+                break
+            sent += 1
 
     async def _typing_loop(self, chat_id) -> None:
         """Transport hook: keep a 'typing…' indicator alive while the agent

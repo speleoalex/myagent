@@ -36,6 +36,12 @@ by THIS agent, for THESE users only."* Configure them at
 - **Built-in commands**: `/start`, `/help`, `/reset`.
 - **Attachments** — photos, text files, PDFs and audio are forwarded to the
   agent; **voice notes are transcribed** to text first (see below).
+- **Files back** — when a turn delivers files to the chat (the
+  [resource channel](../docs/TOOLS.md#returning-files-to-the-user-resources):
+  a generated HTML report, a chart, an image from the offline library), the
+  bot sends them after the text reply — images as photos, everything else as
+  documents (max 5 per reply). A voice satellite skips them: the spoken reply
+  names the file, and the conversation in the web UI shows it.
 - **Address book** — save people once, with one handle per channel (a Telegram
   id, a phone number, …). The bot form offers them as one-click chips, so
   allowlists are built by name instead of pasting ids; the text field stays

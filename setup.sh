@@ -142,7 +142,7 @@ want() {  # want <binary> <feature name>
     MISSING="${MISSING:+$MISSING, }$2"
     [ -n "$PKG_MGR" ] && PKGS="${PKGS:+$PKGS }$(pkg_name "$1")"
 }
-want pdftotext "PDF text extraction"
+want pdftotext "PDF text extraction and search"
 want tesseract "OCR"
 want pandoc    "document conversion"
 want ffmpeg    "audio transcription"
@@ -238,9 +238,11 @@ else
     echo "  [--] web browsing/search  (needs $NEED)"
 fi
 if has pdftotext; then
-    echo "  [ok] PDF text extraction  (poppler-utils)"
+    echo "  [ok] PDF text + search    (poppler-utils)"
 else
-    echo "  [--] PDF text extraction  (install poppler-utils)"
+    # Not just document_extract any more: without pdftotext every PDF in the
+    # library is invisible to local_search.
+    echo "  [--] PDF text + search    (install poppler-utils)"
 fi
 if has tesseract; then
     echo "  [ok] OCR                  (tesseract)"

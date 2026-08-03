@@ -188,6 +188,21 @@ const App = {
         return `${this.serverBase}/api${path}`;
     },
 
+    /** URL of a workspace file served by GET /api/files/ (the resource
+     * channel). The api key rides as a query param because the consumer is an
+     * <img src> or a download link, which cannot send an Authorization header
+     * (the middleware accepts both). Built at render time and never persisted,
+     * so the key doesn't land in session files. For text/html resources use
+     * viewer.html instead: a page's scripts can read their own URL, an image
+     * cannot. */
+    fileUrl(relPath, download) {
+        const p = String(relPath || '').split('/').map(encodeURIComponent).join('/');
+        const q = [];
+        if (download) q.push('download=1');
+        if (this.apiKey) q.push('api_key=' + encodeURIComponent(this.apiKey));
+        return this.apiUrl('/files/' + p) + (q.length ? '?' + q.join('&') : '');
+    },
+
     // API key handling (only enforced when the server sets MYAGENT_API_KEY):
     // accept ?api_key=... in the page URL once — stored locally, then stripped
     // from the address bar so it doesn't linger in bookmarks/history.

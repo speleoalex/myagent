@@ -5,14 +5,15 @@ An agent is `model + system prompt + tools`, stored as a JSON file under
 
 ![The bundled agents in the web UI](images/agents.png)
 
-## The eight bundled agents
+## The nine bundled agents
 
-First run seeds eight, each running on the model chosen in **Settings**:
+First run seeds nine, each running on the model chosen in **Settings**:
 
 | Agent | Does | Needs internet? |
 |---|---|---|
 | **Master** | orchestrator: routes your question to the right agent, and schedules reminders and recurring jobs for itself | no |
 | **Librarian** | answers from the offline library | no |
+| **HTML Designer** | builds HTML pages, reports and dashboards and delivers them to the chat | no |
 | **Home Automation** | drives IoT devices over their local HTTP APIs — fill in with your own | no |
 | **System Administrator** | shell and file operations on the machine; converts PDFs, images and audio to text | no |
 | **Conversation** | plain chat, no tools | no |
@@ -24,6 +25,17 @@ Three are deliberately **not delegatable** (`callable: false`), so Master cannot
 route to them: Tool Manager and Agent Manager, which write code and agents — you
 select those on purpose — and Master itself, which is the entry point rather
 than a target.
+
+**HTML Designer** writes the page as a file in the workspace (`file_write`),
+then delivers it with `show_file`: the page appears in the chat as a card that
+opens in a sandboxed viewer, and the HTML itself never travels through the
+conversation. Its pages are single self-contained files — CSS, JavaScript and
+graphics (inline SVG) all embedded, no CDN — so they render offline and can be
+copied anywhere as one file. Ask it for a report, a dashboard, a presentation,
+or to update a page it made earlier.
+
+If your install predates an agent listed above, it shows in **Agents** as a
+dimmed card — one click on *Import* adds it.
 
 ## Editing never loses anything
 

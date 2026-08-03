@@ -120,6 +120,55 @@ each tool can be ticked individually.
     the app venv: `$MYAGENT_APP_DIR/.venv/bin/python`)
   - `MYAGENT_WORKDIR` — the workspace path
 
+## Returning files to the user (resources)
+
+A tool can deliver a **file** to the chat — an image rendered inline, a
+generated HTML page behind an open button, anything else as a download link —
+without the content ever passing through the model. Write the file under the
+workspace, then print a one-line marker on stdout:
+
+```text
+[[resource:<workspace-relative-path>|<mime type>|<short title>]]
+```
+
+Example (`run` script):
+
+```python
+open("_resources/chart.png", "wb").write(png_bytes)
+print("[[resource:_resources/chart.png|image/png|Sales chart]]")
+print("Chart generated from 42 data points.")
+```
+
+What happens to it:
+
+- the marker line never reaches the model: the executor replaces it with a
+  short note ("file delivered to the user …") and hands the UI the structured
+  reference; the file itself is served by `GET /api/files/<path>`;
+- output truncation (`max_output`) cuts the prose but **never** the marker
+  lines;
+- prefer `_resources/` as the destination: it is never auto-cleaned (unlike
+  `_attachments/`, which is swept after 24h), so the file still renders when
+  the session is reopened. Content-addressed names (`name-<hash>.ext`) keep
+  re-runs from piling up copies;
+- a marker whose file does not exist (or points outside the workspace) is
+  dropped, with a warning in the server log.
+
+To show a file that already exists (e.g. an HTML report the agent just built
+with `file_write`), the bundled **`show_file`** tool in the `file_management/`
+group prints the marker for you — the classic flow is `file_write` the page,
+then `show_file` it. The `library/local_read` tool uses the same channel to
+deliver a ZIM article's images.
+
+How the user receives it depends on where they are:
+
+- **web chat** — images render inline, an HTML page shows a live sandboxed
+  preview (collapsible, with an *Open* button for a full tab), anything else
+  is a download card;
+- **Telegram** — after the text reply, the bot sends the files themselves:
+  images as photos, everything else as documents (max 5 per reply);
+- **voice satellite** — nothing is sent (it's a speaker); the spoken reply
+  names the file, and the conversation in the web UI shows it.
+
 ## Minimal example
 
 ```bash

@@ -62,11 +62,22 @@ Copy Markdown or plain-text files — manuals, procedures, notes, wiki exports �
 straight in; subfolders are scanned recursively, and there is no import step and
 no restart.
 
-PDFs, images and audio are **not** searched directly. Convert them first with
-the `document_extract` tool (ask an agent to extract the file and write the
-Markdown into the library), then they behave like any other note. A scanned PDF
-with a bad OCR layer is worse than no file at all, because it looks like
-coverage.
+**PDFs are searched too**, one page at a time, as long as they carry a text
+layer (`pdftotext` from poppler-utils does the reading). A result looks like
+`p:manuals/clutch.pdf:5` and `local_read` opens the document at that page, so
+an agent can cite the page it quotes. The extracted text is cached under
+`~/myagent/cache/pdftext` and re-extracted by itself when the file changes:
+the first search over a fresh folder pays for it once (measured: 7.7s for 108
+manuals, 0.01s afterwards).
+
+A **scanned** PDF has no text layer, so nothing in it is searchable — OCR it
+first (`ocrmypdf`, or `document_extract`, which OCRs a scan page by page).
+`local_search` names the PDFs it had to skip for this reason when it finds
+nothing, rather than letting them look like covered ground.
+
+Images and audio are still not searched: convert them with the
+`document_extract` tool (ask an agent to extract the file and write the
+Markdown into the library), then they behave like any other note.
 
 ## Choosing what to take
 
@@ -186,8 +197,8 @@ them here would be a list of 404s, so: the source, and what to look for.
 - **Manuals for the equipment you actually own** — pump, generator, inverter,
   vehicle, radio. No generic catalog can contain these.
 
-Convert PDFs to Markdown or text before dropping them in the library (the
-`document_extract` tool does this): scanned PDFs are not searched, and a bad
+Drop PDFs in as they are — they are searched page by page — but make sure they
+carry a text layer: a scan without one is invisible to every search, and a bad
 OCR layer is worse than no file, because it looks like coverage.
 
 ## Beyond documents

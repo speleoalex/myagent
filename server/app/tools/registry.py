@@ -11,6 +11,8 @@ import time
 from pathlib import Path, PurePosixPath
 from typing import Callable
 
+from app.tools import resources
+
 log = logging.getLogger(__name__)
 
 # Shebang interpreter -> label shown as the tool's language badge. An
@@ -611,7 +613,10 @@ class ToolRegistry:
             elif not result.strip():
                 result = f"ERROR: Tool '{tool_id}' exited with code {proc.returncode}"
 
+        # Truncate the prose, never the resource markers: a tool that prints
+        # its report first and the [[resource:...]] line last must still
+        # deliver its file to the chat.
         if len(result) > max_output:
-            result = result[:max_output] + "\n... [truncated]"
+            result = resources.truncate_keep_markers(result, max_output)
 
         return result.strip()

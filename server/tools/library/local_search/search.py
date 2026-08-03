@@ -14,6 +14,11 @@ passing the ``id`` verbatim. Two kinds of files are supported side by side:
   * Plain-text / Markdown files (``.md``, ``.txt``, ``.rst`` …) — read from
     disk and scored with a simple keyword scorer, one chunk per paragraph.
     Result ids look like ``f:<relpath>:<line>``.
+  * PDFs — the text layer is extracted with ``pdftotext`` (cached, see
+    ``pdf_pages``) and searched ONE PAGE at a time: a page is what a manual
+    is cited by and what ``local_read`` reopens. Result ids look like
+    ``p:<relpath>:<page>``. A PDF with no text layer (a scan nobody OCR'd)
+    is REPORTED rather than silently skipped.
 
 Reads ``{"query": str, "path"?: str, "lang"?: str, "limit"?: int}`` as JSON on
 stdin. ``path`` may be a directory (scanned recursively) or a single file; it
@@ -26,17 +31,35 @@ NOTE: the helpers below marked "duplicated" are copied in
 ../local_read/read.py — keep them in sync (CoW overrides copy one folder,
 so the two tools cannot share a module).
 """
+import hashlib
 import json
 import math
 import os
 import re
+import shutil
+import subprocess
 import sys
+import time
 from html.parser import HTMLParser
 
 MAX_TOTAL = 2000               # phase-1 budget: compact lines only
 TEXT_EXTS = {".md", ".markdown", ".mdown", ".mkd", ".txt", ".text", ".rst"}
+PDF_EXTS = {".pdf"}
 MAX_TEXT_BYTES = 3_000_000     # skip individual text files larger than this
 MAX_TEXT_FILES = 3000          # cap how many text files we open in one scan
+MAX_PDF_FILES = 2000
+# Extracting a whole folder's text layer is paid ONCE (pdf_pages caches it):
+# measured on a 108-PDF vehicle-manual folder, 7.7s cold against 0.01s warm.
+# The budget is counted from process start so the ZIM phase spends it too, and
+# it stays well under the tool timeout (30s) on purpose: a search that times
+# out returns NOTHING, while one that runs out of budget returns results plus
+# a note naming what it did not reach.
+PDF_BUDGET_S = 18
+PDF_CACHE_MAX_BYTES = 20_000_000
+LONG_TERM = 4                  # below this a query term is usually a function
+                               # word; see search_pdf_file
+
+_DEADLINE = time.monotonic() + PDF_BUDGET_S
 # How many ZIM archives one search may open. Was 6, which predates symlinked
 # libraries: the curated catalog alone offers ~36 archives, so 6 hid most of a
 # stocked library. Measured on 10 archives (12 GB Wikipedia included): 1.3s
@@ -151,6 +174,124 @@ def list_zims(root):
                               path))
     found.sort()
     return [path for _, path in found]
+
+
+# --------------------------------------------------------------------------- #
+# PDF text layer — duplicated in local_read, mirrored in document_extract
+# --------------------------------------------------------------------------- #
+def pdf_cache_dir():
+    # duplicated in local_read
+    base = os.environ.get("MYAGENT_CACHE") or os.path.join(
+        os.path.expanduser("~"), "myagent", "cache")
+    return os.path.join(base, "pdftext")
+
+
+def normalize_layout(text):
+    """Squeeze ``pdftotext -layout`` output: whitespace runs to two spaces, at
+    most one blank line — duplicated in local_read.
+
+    ``-layout`` is kept because it holds a table ROW together ("Clutch cover
+    bolt  15-22  1.5-2.2  11-15"), while plain pdftotext puts every cell on a
+    line of its own and a torque table stops saying which value belongs to
+    which bolt. What ``-layout`` also does is pad with the page geometry:
+    measured on a scanned service manual, 45% of its output was indentation.
+    Collapsing it is free (that specifications page comes out 2157 chars
+    against 2101 plain) and saves 57% on a page of prose.
+    """
+    out, blank = [], 0
+    for line in text.splitlines():
+        line = re.sub(r"[ \t]{2,}", "  ", line).strip()
+        if not line:
+            blank += 1
+            if blank == 1:
+                out.append("")
+            continue
+        blank = 0
+        out.append(line)
+    while out and not out[-1]:
+        out.pop()
+    return "\n".join(out)
+
+
+def _pdf_trim(pages):
+    """Drop trailing blank pages — duplicated in local_read. Applied on BOTH
+    the extraction and the cache-read path, or the same PDF would report a
+    different page count depending on who had warmed the cache."""
+    while pages and not pages[-1].strip():
+        pages.pop()
+    return pages
+
+
+def _pdf_cache_key(path):
+    # duplicated in local_read: realpath + mtime + size, so re-OCRing a file
+    # invalidates its entry by itself.
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    h = hashlib.sha1(os.path.realpath(path).encode("utf-8", "replace")).hexdigest()[:16]
+    return f"{h}-{int(st.st_mtime)}-{st.st_size}.txt"
+
+
+def _pdf_cache_write(dest, key, body):
+    """Best-effort — duplicated in local_read. A cache that cannot be written
+    must never fail a search, so every error here is swallowed."""
+    if len(body) > PDF_CACHE_MAX_BYTES:
+        return
+    folder = os.path.dirname(dest)
+    try:
+        os.makedirs(folder, exist_ok=True)
+        tmp = f"{dest}.{os.getpid()}"          # two searches may race
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(body)
+        os.replace(tmp, dest)
+        stale = key.split("-")[0]              # same file, older mtime/size
+        for name in os.listdir(folder):
+            if name.startswith(stale) and name != os.path.basename(dest):
+                os.unlink(os.path.join(folder, name))
+    except OSError:
+        pass
+
+
+def pdf_pages(path, deadline=None):
+    """``[page_text, …]`` for a PDF, 1-based by position — duplicated in
+    local_read.
+
+    Blank pages are KEPT in place: the index IS the printed page number, which
+    is what a ``p:`` id and document_extract's ``from_page`` both mean.
+
+    Returns None when the text is not cached and *deadline* has passed (the
+    caller reports the file as not searched), and [] when the PDF simply has
+    no text layer.
+    """
+    key = _pdf_cache_key(path)
+    cached = os.path.join(pdf_cache_dir(), key) if key else None
+    if cached:
+        try:
+            with open(cached, "r", encoding="utf-8", errors="replace") as f:
+                return _pdf_trim(f.read().split("\f"))
+        except OSError:
+            pass
+    # The per-file subprocess timeout is the REMAINING budget, not a constant:
+    # a pathological file would otherwise blow past the tool timeout, and a
+    # killed tool returns nothing at all.
+    left = 90 if deadline is None else int(deadline - time.monotonic())
+    if left <= 0:
+        return None
+    try:
+        proc = subprocess.run(["pdftotext", "-layout", str(path), "-"],
+                              capture_output=True, timeout=min(90, max(1, left)))
+    except subprocess.TimeoutExpired:
+        return None
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if proc.returncode != 0 and not proc.stdout:
+        return []
+    pages = _pdf_trim([normalize_layout(p) for p in
+                       proc.stdout.decode("utf-8", "replace").split("\f")])
+    if cached:
+        _pdf_cache_write(cached, key, "\f".join(pages))
+    return pages
 
 
 # --------------------------------------------------------------------------- #
@@ -327,16 +468,136 @@ def search_text_file(path, rel, terms, phrase):
     return results
 
 
-def collect_text_files(root):
-    """Recursively gather candidate text files under *root* (a directory)."""
-    files = []
+def word_patterns(terms):
+    """One matcher per term, anchored at a word START — the PDF scorer's
+    alphabet.
+
+    score_text counts SUBSTRINGS, which is a deliberate cheap stemmer on a
+    paragraph ("cura" finds "curare"). On a document PAGE the same rule
+    inverts: measured on the real library with "come si cura la rosolia?", a
+    2000-char English page about cave protection scored above the Wikipedia
+    article "Rosolia", because 'si' also lives inside "sites", "considerable"
+    and "basins", and 'la' inside "regular" and "clinical". Anchoring at a
+    word start keeps the stemming and drops that noise.
+
+    The last character of a longer term is dropped, which makes the match work
+    in BOTH directions across an inflection — a query says "symptoms" and a
+    manual's table header says "Symptom", a question says "frizioni" and the
+    text says "frizione". Measured on the clutch troubleshooting table: with
+    the strict prefix it did not qualify at all ('symptoms' misses 'Symptom',
+    'worn' misses 'wear'), so the answer page was invisible; with it, the page
+    scores 21 against 15 for the disc-inspection page that used to win.
+    """
+    return [(t, re.compile(r"\b" + re.escape(t[:-1] if len(t) >= 6 else t)))
+            for t in terms]
+
+
+def score_words(hay, pats, phrase):
+    """score_text's shape, word-anchored: (score, distinct terms present)."""
+    low = hay.lower()
+    score, present = 0, 0
+    for _t, pat in pats:
+        c = len(pat.findall(low))
+        if c:
+            present += 1
+            score += c
+    if pats and present == len(pats):
+        score += 3
+    if phrase and len(phrase) > 2 and phrase in low:
+        score += 10
+    return score, present
+
+
+def search_pdf_file(path, rel, terms, phrase, deadline=None):
+    """``(hits, status)`` for one PDF: its matching pages, best first.
+
+    *status* is ``ok``, ``notext`` (no text layer — the file needs OCR) or
+    ``skipped`` (extraction would be needed and the budget is spent). The
+    caller reports the last two: a document nobody could search must not look
+    like a document with no answer in it.
+
+    The unit is the PAGE, for scoring as well as for citing: it is how a
+    manual is cited, what local_read reopens, and — measured — the only unit
+    that finds a TABLE. Chunking the page into paragraphs first, the way text
+    files are chunked, cost exactly the page this whole feature exists for: a
+    troubleshooting table is one thin row per symptom ("Clutch slipping |
+    Insufficient pedal free play | Adjust"), each row carries ONE query term,
+    so every row failed the "half the terms" bar and the page that answers
+    scored 4 against 13 for a page of the automatic-transmission manual that
+    happened to repeat the words in one paragraph.
+
+    What keeps a page-sized haystack honest is dropping the short terms (see
+    word_patterns) and requiring half the remaining ones.
+    """
+    pages = pdf_pages(path, deadline)
+    if pages is None:
+        return [], "skipped"
+    if not any(p.strip() for p in pages):
+        return [], "notext"
+
+    # Short terms are dropped from BOTH the score and the bar. In a natural
+    # question they are function words ('si', 'la', 'the', 'of') and matching
+    # one says nothing about a page, but there are hundreds of pages for them
+    # to say it in: with every term counting, "come si cura la rosolia?"
+    # answered with a page of a cave-protection PDF ('sites', 'large') ahead
+    # of the Wikipedia article "Rosolia" (measured against the real library).
+    long_terms = [t for t in terms if len(t) >= LONG_TERM] or terms
+    pats = word_patterns(long_terms)
+    needed = max(1, (len(long_terms) + 1) // 2)
+    name = os.path.basename(rel)
+    # No weak fallback here, unlike search_text_file: that exists so a loose
+    # query still gets something out of a handful of notes, while a folder of
+    # manuals always has SOME page mentioning SOME word, and offering it
+    # displaces a real answer from another source.
+    strong = []
+    for page_no, page in enumerate(pages, 1):
+        if not page.strip():
+            continue
+        # The same page text in two files is ONE answer: a real folder holds
+        # the same manual twice (measured on a vehicle-manual folder: two
+        # copies of the 4D56 engine manual, all 76 pages byte-identical after
+        # extraction), and without this half the output slots went to
+        # duplicates. Keyed on the PAGE, so the best chunk of a page also
+        # evicts the other chunks of the same page.
+        page_key = hashlib.md5(page.encode("utf-8", "replace")).hexdigest()
+        s, present = score_words(page, pats, phrase)
+        if s <= 0 or present < needed:
+            continue
+        strong.append({
+            "score": s,
+            "id": f"p:{rel}:{page_no}",
+            "title": f"{name} p.{page_no}",
+            "snippet": best_window(page, long_terms, phrase)[0],
+            "dedup": page_key,
+        })
+    strong.sort(key=lambda r: r["score"], reverse=True)
+    return strong, "ok"
+
+
+def collect_files(root):
+    """``(text_files, pdf_files)`` under *root* (a directory), in ONE walk."""
+    text, pdfs = [], []
     for dirpath, dirnames, filenames in _walk(root):
         for name in sorted(filenames):
-            if os.path.splitext(name)[1].lower() in TEXT_EXTS:
-                files.append(os.path.join(dirpath, name))
-                if len(files) >= MAX_TEXT_FILES:
-                    return files
-    return files
+            ext = os.path.splitext(name)[1].lower()
+            if ext in TEXT_EXTS and len(text) < MAX_TEXT_FILES:
+                text.append(os.path.join(dirpath, name))
+            elif ext in PDF_EXTS and len(pdfs) < MAX_PDF_FILES:
+                pdfs.append(os.path.join(dirpath, name))
+    return text, pdfs
+
+
+def pdf_priority(path, terms):
+    """Extraction order while the cache is cold: a file whose NAME carries a
+    query term first, then smallest first. If the budget runs out, the manual
+    called "21A_Clutch" must be the one that got indexed — not whichever file
+    happens to sort first."""
+    name = os.path.basename(path).lower()
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        size = 0
+    return (0 if any(t in name for t in terms) else 1, size)
 
 
 # --------------------------------------------------------------------------- #
@@ -612,10 +873,24 @@ def dedup_key(result):
 
     File hits key on the ID instead: several chunks of ONE note are different
     answers to the query and must all stay eligible.
+
+    A hit may carry its own key in ``dedup`` (PDF pages hash their text — the
+    same manual filed twice is one answer, its page 12 is not two).
     """
+    if result.get("dedup"):
+        return result["dedup"]
     if result["id"].startswith("f:"):
         return result["id"]
     return " ".join(result["title"].lower().split())
+
+
+def name_a_few(items, k=4):
+    """Name a handful of files in a NOTE: the whole list would eat the 2000
+    char budget the results themselves live in."""
+    named = ", ".join(items[:k])
+    if len(items) > k:
+        named += f" +{len(items) - k} more"
+    return named
 
 
 def round_robin(buckets, limit):
@@ -670,12 +945,14 @@ def main():
     # in the FULL sorted listing (before lang filtering), or local_read —
     # which never sees 'lang' — would reconstruct different indices.
     if os.path.isfile(root):
+        ext = os.path.splitext(root)[1].lower()
         zim_files = [(1, root)] if root.lower().endswith(".zim") else []
-        text_files = [root] if os.path.splitext(root)[1].lower() in TEXT_EXTS else []
+        text_files = [root] if ext in TEXT_EXTS else []
+        pdf_files = [root] if ext in PDF_EXTS else []
         text_root = os.path.dirname(root) or "."
     else:
         zim_files = list(enumerate(list_zims(root), 1))
-        text_files = collect_text_files(root)
+        text_files, pdf_files = collect_files(root)
         text_root = root
 
     # ZIM: optionally restrict to a language edition.
@@ -691,9 +968,9 @@ def main():
     dropped_zims = [os.path.basename(z) for _, z in zim_files[MAX_ZIM:]]
     zim_files = zim_files[:MAX_ZIM]
 
-    if not zim_files and not text_files:
+    if not zim_files and not text_files and not pdf_files:
         print(f"No searchable files in {root} "
-              f"(supported: *.zim, {', '.join(sorted(TEXT_EXTS))}).")
+              f"(supported: *.zim, *.pdf, {', '.join(sorted(TEXT_EXTS))}).")
         return
 
     terms, phrase = parse_query(query)
@@ -734,13 +1011,39 @@ def main():
 
     # One combined text bucket, kept diverse by round-robining across files
     # (ordered by each file's best-matching chunk).
+    def rel_id(fp):
+        rel = os.path.relpath(fp, text_root) if os.path.isdir(root) else os.path.basename(fp)
+        return rel.replace(os.sep, "/")
+
     per_file = []
     for fp in text_files:
-        rel = os.path.relpath(fp, text_root) if os.path.isdir(root) else os.path.basename(fp)
-        rel = rel.replace(os.sep, "/")
-        hits = search_text_file(fp, rel, terms, phrase)
+        hits = search_text_file(fp, rel_id(fp), terms, phrase)
         if hits:
             per_file.append(hits)
+
+    # PDFs join the SAME bucket as the text files, and their scores are
+    # comparable because both go through score_text. They are documents the
+    # user deliberately put in this folder: the invariant that those come
+    # before the encyclopedia is about ownership, not about file format.
+    # A missing binary must NOT be reported as "these PDFs need OCR" — that
+    # sends the user off to re-OCR files which are perfectly fine.
+    pdf_no_tool = bool(pdf_files) and not shutil.which("pdftotext")
+
+    pdf_skipped, pdf_notext = [], []
+    candidates = [] if pdf_no_tool else pdf_files
+    for fp in sorted(candidates, key=lambda p: pdf_priority(p, terms)):
+        rel = rel_id(fp)
+        hits, status = search_pdf_file(fp, rel, terms, phrase, _DEADLINE)
+        # Named by relative PATH, not basename: the note exists so the file can
+        # be acted on (OCR'd, or searched again), and a folder of manuals holds
+        # the same basename twice.
+        if status == "skipped":
+            pdf_skipped.append(rel)
+        elif status == "notext":
+            pdf_notext.append(rel)
+        if hits:
+            per_file.append(hits)
+
     per_file.sort(key=lambda hits: hits[0]["score"], reverse=True)
     text_bucket = round_robin(per_file, limit)
     if text_bucket:
@@ -754,25 +1057,60 @@ def main():
         # is why this is a fixed position and not part of the sort above.
         buckets.insert(0, text_bucket)
 
-    skipped = ""
+    notes = []
+    if pdf_no_tool:
+        notes.append(f"{len(pdf_files)} PDF(s) in this folder were NOT searched: "
+                     f"pdftotext (poppler-utils) is not installed.")
     if dropped_zims:
-        named = ", ".join(dropped_zims[:4])
-        if len(dropped_zims) > 4:
-            named += f" +{len(dropped_zims) - 4} more"
-        skipped = (f" NOTE: {len(dropped_zims)} archive(s) not searched "
-                   f"(cap {MAX_ZIM}): {named} — narrow with lang or path.")
+        notes.append(f"{len(dropped_zims)} archive(s) not searched "
+                     f"(cap {MAX_ZIM}): {name_a_few(dropped_zims)} — narrow "
+                     f"with lang or path.")
+    # An INCOMPLETE index is declared on every search, results or not: the
+    # answer may be sitting in a file this run never opened, and a partial
+    # result set otherwise reads as a complete one.
+    if pdf_skipped:
+        notes.append(f"{len(pdf_skipped)} PDF(s) not searched yet (first-run "
+                     f"text extraction ran out of time): "
+                     f"{name_a_few(pdf_skipped, 2)} — repeat the same search "
+                     f"to include them.")
+    skipped = f" NOTE: {' '.join(notes)}" if notes else ""
 
     results = round_robin(buckets, limit)
     if not results:
-        scanned = len(zim_files) + len(text_files)
+        scanned = len(zim_files) + len(text_files) + len(pdf_files)
+        # Un-OCR'd PDFs are listed ONLY here. On every search it would be
+        # noise the model repeats to the user; with nothing found it is the
+        # difference between "not in this folder" and "in a file I cannot
+        # read".
+        unsearchable = ""
+        if pdf_notext:
+            unsearchable = (f" NOTE: {len(pdf_notext)} PDF(s) have no text "
+                            f"layer and cannot be searched (they need OCR): "
+                            f"{name_a_few(pdf_notext)}.")
+        # Ask for the retry HERE, in the same turn, the way local_read's fail()
+        # does: told only "no matches", a small model reports back that the
+        # library has nothing — measured on a folder of English service manuals
+        # asked an Italian question, where the answer was one translated query
+        # away.
         print(f"No matches for \"{query}\" in {root} "
-              f"({scanned} file(s) searched).{skipped}")
+              f"({scanned} file(s) searched). Search again now with fewer or "
+              f"different terms, and in the language the documents are written "
+              f"in — manuals are usually English.{skipped}{unsearchable}")
         return
 
     # Compact rendering: one "id | title | snippet" line per result, total
     # under MAX_TOTAL so a whole search costs the model a few hundred tokens.
     header = f"{len(results)} result(s) for \"{query}\":"
-    footer = f"Read one with local_read(id).{skipped}"
+    # The footer spells out the WHOLE call, path included, when the search ran
+    # somewhere other than the shared library. An id only resolves against the
+    # root that produced it, and the model does not carry that over on its own:
+    # measured end-to-end on a folder of manuals, it called local_read(id) with
+    # no path three times, got "file not found" under ~/myagent/library each
+    # time, and told the user the answer was not in the documents — one line of
+    # search output later.
+    call = "local_read(id)" if not args.get("path") else \
+        f"local_read(id, path=\"{root}\")"
+    footer = f"Read one with {call}.{skipped}"
     per_line = max(140, (MAX_TOTAL - len(header) - len(footer) - 2) // len(results))
     lines = [header]
     for r in results:

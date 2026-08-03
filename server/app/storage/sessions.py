@@ -108,6 +108,8 @@ def tool_message_from_step(step: dict) -> dict:
         "result": step.get("result"),
         "ts": step.get("ts") or now_iso(),
     }
+    if step.get("resources"):
+        msg["resources"] = step["resources"]
     if step.get("sub_trace"):
         msg["sub_trace"] = step["sub_trace"]
     return msg
@@ -124,6 +126,7 @@ def steps_from(trace, tool_events: list[dict] | None) -> list[dict]:
             "arguments": t.get("arguments"),
             "result_preview": t.get("result_preview"),
             "result": t.get("result") or t.get("result_preview"),
+            **({"resources": t["resources"]} if t.get("resources") else {}),
         }
         for t in (tool_events or [])
     ]

@@ -147,6 +147,42 @@ class TelegramConnector(BaseConnector):
         self._menu_shown.add(chat_id)
         return ok
 
+    # Formats Telegram reliably renders inline as a photo. SVG and GIF go as
+    # documents on purpose: sendPhoto re-encodes and rejects/flattens them.
+    _PHOTO_MIMES = {"image/jpeg", "image/png", "image/webp"}
+
+    async def send_file(self, chat_id, name: str, data: bytes, mime: str,
+                        title: str) -> bool:
+        """Deliver a resource file: images inline as photos, the rest as
+        documents. sendPhoto is picky (it re-encodes, and refuses odd sizes or
+        formats with a 400), so a refused photo is retried once as a plain
+        document instead of being lost."""
+        attempts = ([("sendPhoto", "photo")] if mime in self._PHOTO_MIMES else [])
+        attempts.append(("sendDocument", "document"))
+        caption = (title or name)[:1024]      # Telegram's caption hard limit
+        assert self._http is not None
+        for method, field in attempts:
+            url = API.format(token=self.binding.token, method=method)
+            try:
+                resp = await self._http.post(
+                    url,
+                    data={"chat_id": str(chat_id), "caption": caption},
+                    files={field: (name, data,
+                                   mime or "application/octet-stream")},
+                    timeout=60.0,
+                )
+                out = resp.json()
+                if out.get("ok"):
+                    return True
+                log.warning("%s refused (%s): %s", method, self.binding.id,
+                            redact(str(out.get("description")), self.binding.token))
+            except Exception as e:
+                # Redacted: the failure text can quote a URL holding the token.
+                log.warning("%s failed (%s): %s", method, self.binding.id,
+                            redact(str(e), self.binding.token))
+                return False
+        return False
+
     async def _typing_loop(self, chat_id) -> None:
         # Telegram's "typing…" lasts ~5s; refresh it until the reply is ready
         # (loop is cancelled by the caller when the agent turn finishes).

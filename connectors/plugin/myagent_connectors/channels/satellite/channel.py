@@ -161,7 +161,11 @@ class SatelliteConnector(BaseConnector):
             if handled is not None:
                 return handled
             sid = self.session_id_for(chat_key)
-            reply = await self.client.chat(
+            # Delivered files are deliberately dropped: this is a speaker —
+            # the spoken reply already names them, and the channel session
+            # keeps them visible from the web UI. (send_file stays at the
+            # base's "not supported" default for the same reason.)
+            reply, _resources = await self.client.chat(
                 self.binding.agent_id, text, sid,
                 source=self.type,
                 sender_id=chat_key,

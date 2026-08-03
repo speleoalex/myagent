@@ -67,6 +67,20 @@ locally**, as the server user, and its tool descriptions become part of your
 agents' prompts — a prompt-injection surface as well as a code-execution one.
 Only add servers you trust. See [MCP.md](MCP.md).
 
+## Files served to the browser
+
+`GET /api/files/{path}` serves workspace files read-only (it is how images and
+pages a tool delivered to the chat reach the browser). It sits behind the API
+key like the rest of `/api/`, and grants nothing the key holder could not
+already read through an agent with `file_read`. Every response carries
+`Content-Security-Policy: sandbox`, so a generated HTML page opened from there
+runs in an **opaque origin**: its scripts work, but it cannot read the UI's
+localStorage (where the browser keeps the API key) or make authenticated calls.
+The chat opens HTML resources through `viewer.html`, which fetches with the key
+in a header and renders in a sandboxed iframe — the key never enters a URL.
+Image tags do append `?api_key=` (an image cannot read its own URL); those URLs
+are built at render time and never persisted.
+
 ## Where the secrets are
 
 | What | Where | Mode |
