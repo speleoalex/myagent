@@ -618,5 +618,43 @@ class LLMProvider:
         if err_msg:
             log.error("LLM %serror detail: %s", "stream " if streaming else "", err_msg)
 
+    def explain_error(self, e: Exception) -> str:
+        """Turn a transport exception into a sentence that names the fix.
+
+        The raw httpx text is "All connection attempts failed" — no provider, no
+        URL, nothing to act on — and it travels untouched from the executor to
+        the chat bubble, the Telegram reply and the autonomy log. This is the
+        only class that knows which backend it was talking to and where, so it
+        is the only place that can say so.
+
+        The original message is always appended: httpcore raises ConnectError
+        for TLS and DNS failures too, so "is it running?" must never be the
+        whole answer. Anything that is not a transport error keeps today's text.
+        """
+        try:
+            base = (self.config.base_url or "").rstrip("/")
+            detail = str(e) or type(e).__name__
+            if isinstance(e, (httpx.ConnectError, httpx.ConnectTimeout)):
+                if self.config.provider == "ollama":
+                    fix = (f"Ollama is not answering at {base} — start it with "
+                           f"'ollama serve', or pick another model in Settings.")
+                elif self.config.provider == "llamacpp":
+                    fix = (f"The llama.cpp server is not answering at {base} — "
+                           f"start it with 'llama-server -m <model.gguf> --port "
+                           f"8080 --jinja', or pick another model in Settings.")
+                else:
+                    fix = (f"Cannot reach {base} — check the connection and this "
+                           f"model's base URL under Models.")
+                return f"{fix} ({detail})"
+            if isinstance(e, httpx.ReadTimeout):
+                # The opposite advice: the model is there, it is just slow.
+                timeout = self.config.options.get("request_timeout", 600)
+                return (f"'{self.config.model}' at {base} did not answer within "
+                        f"{timeout}s. Raise request_timeout in the model's "
+                        f"options, or use a smaller model. ({detail})")
+            return detail
+        except Exception:  # pragma: no cover — runs inside an except block
+            return str(e) or type(e).__name__
+
     async def close(self):
         await self._client.aclose()

@@ -296,24 +296,60 @@ const App = {
         });
     },
 
+    /** The one thing the counters can't say: will a message get an answer?
+     * Nothing is drawn when all is well — this page is seen constantly, and a
+     * permanent green banner is noise. Driven strictly off `ready === false`,
+     * never off how many models happen to be configured. */
+    readinessBanner(r) {
+        if (!r) return '';
+        if (r.ready === false) {
+            return `
+                <div class="alert alert-warning text-start mt-3">
+                    <strong>${this.esc(i18n('home.notReady'))}</strong>
+                    <div class="small mt-1">${this.esc(r.detail || '')}</div>
+                    <div class="mt-2">
+                        <a href="#/models" class="btn btn-sm btn-warning">${this.esc(i18n('home.notReadyModels'))}</a>
+                        <a href="#/settings" class="btn btn-sm btn-outline-secondary">${this.esc(i18n('nav.settings'))}</a>
+                    </div>
+                </div>`;
+        }
+        if (r.auto) {
+            return `
+                <div class="alert alert-secondary text-start mt-3 small">
+                    ${this.esc(i18n('home.autoModel', { model: r.model || '' }))}
+                    <a href="#/settings">${this.esc(i18n('home.autoModelFix'))}</a>
+                </div>`;
+        }
+        return '';
+    },
+
     async renderHome() {
-        let agentCount = 0, modelCount = 0, toolCount = 0;
+        let agentCount = 0, modelCount = 0, toolCount = 0, ready = null;
         try {
-            const [agents, models, tools] = await Promise.all([
+            const [agents, models, tools, r] = await Promise.all([
                 this.api('GET', '/agents'),
                 this.api('GET', '/models'),
                 this.api('GET', '/tools'),
+                // Whether a message would actually get an answer. The counters
+                // are non-zero even on a completely broken install (everything
+                // is seeded), so they cannot carry this signal themselves.
+                // Caught on its own: this UI can be pointed at an older server
+                // that has no /system/ready, and one 404 must not collapse the
+                // three counters to zero.
+                this.api('GET', '/system/ready').catch(() => null),
             ]);
             agentCount = agents.length;
             modelCount = models.length;
             toolCount = tools.length;
-        } catch (e) { /* ignore */ }
+            ready = r;
+        } catch (e) { /* ignore: the page below renders exactly as before */ }
 
         this.container.innerHTML = `
             <div class="row mt-4">
                 <div class="col-md-8 mx-auto text-center">
                     <h1><i class="bi bi-robot"></i> MyAgent</h1>
                     <p class="lead text-secondary">${i18n('home.subtitle')}</p>
+                    ${this.readinessBanner(ready)}
                     <div class="row mt-4 g-3">
                         <div class="col-md-4">
                             <a href="#/agents" class="text-decoration-none">

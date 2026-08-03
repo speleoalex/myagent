@@ -4,7 +4,7 @@ from fastapi import APIRouter, HTTPException, Request
 import httpx
 from pydantic import BaseModel
 
-from app.engine import model_probe
+from app.engine import default_model, model_probe
 from app.models import ModelConfig
 from app.routers.crud import get_or_404, require_absent, require_exists
 from app.routers.secrets import SECRET_MASK
@@ -190,6 +190,9 @@ async def create_model(model: ModelConfig, request: Request):
     store = _store(request)
     require_absent(store, model.id, "Model")
     store.save(model.id, model.model_dump())
+    # A new model (typically just imported from Ollama) can be the answer the
+    # fallback resolver was looking for — see _forget_probe.
+    default_model.invalidate()
     return _masked(model.model_dump())
 
 
@@ -199,6 +202,10 @@ def _forget_probe(*cfgs: dict | None) -> None:
     for cfg in cfgs:
         if cfg:
             model_probe.invalidate(cfg)
+    # The default-model fallback memoises which model it picked; the catalogue
+    # it picked from has just changed (a newly imported model may be the right
+    # answer now), so make it choose again.
+    default_model.invalidate()
 
 
 @router.put("/{model_id}")

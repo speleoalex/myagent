@@ -1,10 +1,11 @@
 import secrets as secrets_mod
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from app import config
 from app.config import save_settings, WORKSPACE_DIR
+from app.engine import default_model
 from app.models import Settings
 
 router = APIRouter()
@@ -26,6 +27,23 @@ async def health():
     return {"status": "ok", "workspace": str(WORKSPACE_DIR)}
 
 
+@router.get("/ready")
+async def ready(request: Request):
+    """Can this install actually answer a message right now?
+
+    Separate from /health, which is a liveness probe and must stay instant.
+    This one asks the same resolver the executor uses, so it reports exactly
+    what the next turn will do — and warms its cache before the first message.
+    """
+    stores = request.app.state.stores
+    try:
+        cfg, note = await default_model.resolve_default(
+            stores.models, config.settings.default_model_id)
+    except ValueError as e:
+        return {"ready": False, "model": None, "auto": False, "detail": str(e)}
+    return {"ready": True, "model": cfg.name, "auto": bool(note), "detail": note}
+
+
 @router.get("/settings")
 async def get_settings():
     # Read config.settings live: update_settings rebinds it, so importing the
@@ -37,6 +55,9 @@ async def get_settings():
 async def update_settings(new_settings: Settings):
     save_settings(new_settings)
     config.settings = new_settings
+    # The default model and the backend URLs are exactly what the fallback
+    # resolver keys on: choosing one here must take effect on the next turn.
+    default_model.invalidate()
     return new_settings.model_dump()
 
 

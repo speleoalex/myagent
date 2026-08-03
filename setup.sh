@@ -17,6 +17,17 @@ echo "=== MyAgent setup ==="
 echo "Target: $TARGET_DIR"
 echo ""
 
+# Fail on an old Python here rather than three steps later: the models use
+# PEP-604 annotations (`bool | None`), so 3.9 creates the venv and installs the
+# deps happily and then dies with a pydantic traceback at first import.
+if ! "$PYTHON" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' 2>/dev/null; then
+    FOUND=$("$PYTHON" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || echo "none")
+    echo "MyAgent needs Python 3.10+ (found: $FOUND)." >&2
+    echo "Install it, or point this script at another interpreter:" >&2
+    echo "  PYTHON=/usr/bin/python3.12 $0" >&2
+    exit 1
+fi
+
 # --- [1/3] Python venv + dependencies (backend is self-contained in server/) --
 echo "[1/3] Python venv..."
 if [ ! -d "$TARGET_DIR/server/.venv" ]; then
@@ -40,9 +51,45 @@ else
     echo "  Install Node.js and re-run ./setup.sh to enable them."
 fi
 
-# --- [3/3] optional feature report --------------------------------------------
-echo "[3/3] Optional features:"
+# --- [3/3] LLM backend + optional feature report ------------------------------
+echo "[3/3] LLM backend and optional features:"
 has() { command -v "$1" >/dev/null 2>&1; }
+
+# A backend is the one NON-optional dependency, so it is reported first and not
+# under the "optional" heading. Probed with the venv's Python and urllib (no
+# curl, which can be absent; no httpx import, to stay independent of the deps
+# that were just installed). Read-only, localhost, ~3s worst case — this is not
+# a download, so the "setup.sh never fetches content" rule is intact. The `||
+# true` matters: `set -e` is on and would abort on a failed substitution.
+LLM_INFO=$("$TARGET_DIR/server/.venv/bin/python" - <<'PYEOF' 2>/dev/null || true
+import json, urllib.request
+
+def get(url, timeout=1.5):
+    with urllib.request.urlopen(url, timeout=timeout) as r:
+        return json.loads(r.read().decode())
+
+try:
+    n = len(get("http://localhost:11434/api/tags").get("models") or [])
+    print(f"ok|Ollama, {n} model(s)" if n else "empty|Ollama is running but has no models")
+except Exception:
+    try:
+        urllib.request.urlopen("http://localhost:8080/health", timeout=1.5).read()
+        print("ok|llama.cpp at localhost:8080")
+    except Exception:
+        print("")
+PYEOF
+)
+LLM_STATE="${LLM_INFO%%|*}"
+LLM_TEXT="${LLM_INFO#*|}"
+if [ "$LLM_STATE" = "ok" ]; then
+    echo "  [ok] LLM backend          ($LLM_TEXT)"
+elif [ "$LLM_STATE" = "empty" ]; then
+    echo "  [--] LLM backend          ($LLM_TEXT — run 'ollama pull qwen3')"
+elif has ollama || [ -d "/Applications/Ollama.app" ]; then
+    echo "  [--] LLM backend          (Ollama installed but not running — run 'ollama serve')"
+else
+    echo "  [--] LLM backend          (install Ollama, or start a llama.cpp server)"
+fi
 
 if has chromium || has chromium-browser || has google-chrome || has google-chrome-stable \
    || [ -n "$PUPPETEER_EXECUTABLE_PATH" ] \
@@ -74,7 +121,36 @@ else
     echo "  [--] audio transcription  (install ffmpeg)"
 fi
 
+# The offline library is content, not code: setup never downloads it (this
+# script also runs as root from deploy.sh, and the archives are gigabytes on
+# a disk only the user can pick). It reports the state and names the command.
+LIB_DIR="${MYAGENT_LIBRARY:-$HOME/myagent/library}"
+ZIM_COUNT=$(find "$LIB_DIR" -maxdepth 2 -name '*.zim' 2>/dev/null | wc -l)
+if ! "$TARGET_DIR/server/.venv/bin/python" -c "import libzim" >/dev/null 2>&1; then
+    echo "  [--] offline library      (pip install libzim to read .zim archives)"
+elif [ "$ZIM_COUNT" -gt 0 ]; then
+    echo "  [ok] offline library      ($ZIM_COUNT archive(s) in $LIB_DIR)"
+else
+    echo "  [--] offline library      (no archives yet)"
+fi
+
 echo ""
 echo "=== Setup complete ==="
 echo "Run:  $TARGET_DIR/server/.venv/bin/python $TARGET_DIR/server/main.py"
 echo "Then open http://127.0.0.1:8888"
+# Without a model MyAgent starts and looks healthy, and the first message is
+# the thing that fails. Say so here, while the user is still in the terminal.
+if [ "$LLM_STATE" != "ok" ]; then
+    echo ""
+    echo "No LLM backend yet — MyAgent needs one to answer. Either:"
+    echo "  Ollama:    install from https://ollama.com, then 'ollama pull qwen3'"
+    echo "  llama.cpp: llama-server -m <model.gguf> --port 8080 --jinja"
+    echo "Or add a remote API key under Models once the UI is open."
+fi
+if [ "$ZIM_COUNT" -eq 0 ]; then
+    echo ""
+    echo "No offline knowledge yet. To give the agents a starting library"
+    echo "(~1.4 GB: emergency medicine, water, food, repair):"
+    echo "  $TARGET_DIR/library/fetch.py --list"
+    echo "  $TARGET_DIR/library/fetch.py --preset base [--dest /path/on/another/disk]"
+fi

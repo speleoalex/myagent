@@ -34,6 +34,10 @@ I18n.translations.it = {
     'home.agents': 'Agenti',
     'home.models': 'Modelli',
     'home.tools': 'Strumenti',
+    'home.notReady': 'Nessun modello è in grado di rispondere.',
+    'home.notReadyModels': 'Configura un modello',
+    'home.autoModel': 'Il modello predefinito non è disponibile: le risposte arrivano da {model}.',
+    'home.autoModelFix': 'Scegli un predefinito',
 
     // Agents
     'agents.title': 'Agenti',

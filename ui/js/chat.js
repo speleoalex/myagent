@@ -306,8 +306,8 @@ const ChatPage = {
                 pendingTools.push(m);
             } else if (m.role === 'assistant') {
                 flushAssistant(m.text || '', m.ts, m.reasoning);
-            } else if (m.role === 'error') {
-                this.appendMessage('error', m.text || '', m.ts);
+            } else if (m.role === 'error' || m.role === 'notice') {
+                this.appendMessage(m.role, m.text || '', m.ts);
             }
         }
         this._decorateMessages();
@@ -496,7 +496,11 @@ const ChatPage = {
                 }),
                 signal: this.abortController.signal,
             });
-            if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`);
+            // App.errorText unwraps FastAPI's {"detail": ...}; without it a
+            // "no default model" 404 reaches the bubble as a raw JSON blob.
+            if (!resp.ok) {
+                throw new Error(App.errorText(await resp.text()) || `HTTP ${resp.status}`);
+            }
             await this._consumeStream(resp, ui);
         } catch (err) {
             if (ui.thinking && ui.thinking.parentNode) ui.thinking.remove();
@@ -676,6 +680,11 @@ const ChatPage = {
                         if (!streamedText && !toolsInline.children.length) msgDiv.remove();
                         this.appendMessage('error', i18n('chat.errorPrefix', { msg: event.data }));
                         break;
+                    case 'notice':
+                        // Inserted ABOVE the answer bubble, which already exists:
+                        // it explains the answer the user is about to read.
+                        this.insertNoticeBefore(msgDiv, event.data);
+                        break;
                     case 'idle':
                         idle = true;  // nothing was actually running
                         break;
@@ -764,6 +773,19 @@ const ChatPage = {
         el.textContent = this.fmtTime(ts);
         if (ts) el.title = String(ts).replace('T', ' ');
         return el;
+    },
+
+    /** A server-side notice (e.g. the configured default model was down and
+     * another one answered), placed just above the bubble it explains.
+     * textContent, like every other server string we render. */
+    insertNoticeBefore(anchor, text) {
+        const div = document.createElement('div');
+        div.className = 'msg msg-notice';
+        div.textContent = text || '';
+        div.appendChild(this._timeEl());
+        const container = document.getElementById('chat-messages');
+        if (anchor && anchor.parentNode === container) container.insertBefore(div, anchor);
+        else if (container) container.appendChild(div);
     },
 
     // Only error banners come through here (assistant text streams via the

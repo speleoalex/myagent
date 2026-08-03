@@ -34,6 +34,10 @@ I18n.translations.en = {
     'home.agents': 'Agents',
     'home.models': 'Models',
     'home.tools': 'Tools',
+    'home.notReady': 'No model can answer yet.',
+    'home.notReadyModels': 'Set up a model',
+    'home.autoModel': 'Your default model is unavailable, so answers come from {model}.',
+    'home.autoModelFix': 'Choose a default',
 
     // Agents
     'agents.title': 'Agents',

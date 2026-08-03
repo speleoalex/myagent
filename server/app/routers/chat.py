@@ -92,9 +92,14 @@ def _make_drive(executor, message, prior, attachments, session, session_store, l
                     reasoning_text += event.get("data", "")
                 elif et == "clear_tokens":
                     reply_text = ""
-                elif et == "error":
+                elif et in ("error", "notice"):
+                    # A notice ("answering with X because the default is down")
+                    # is recorded like an error so it survives a reload: it
+                    # explains an answer the user is about to read, and losing
+                    # it makes that answer look like it came from the model
+                    # they configured.
                     session["messages"].append(
-                        {"role": "error", "text": str(event.get("data", "")), "ts": now_iso()}
+                        {"role": et, "text": str(event.get("data", "")), "ts": now_iso()}
                     )
                     await asyncio.to_thread(session_store.persist, session)
                 elif et == "done":

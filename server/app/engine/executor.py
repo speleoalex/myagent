@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from app import config
 from app.engine import prompts
 from app.models import Agent, ChatMessage, ChatResponse, ModelConfig
+from app.engine.default_model import resolve_default
 from app.engine.llm_provider import LLMProvider
 from app.engine.reasoning import ReasoningSplitter
 from app.engine.toolcall_parser import parse_tool_calls_from_text
@@ -134,6 +135,10 @@ class AgentExecutor:
         # Turn-scoped system-prompt suffix (memory digest + attachments
         # manifest), re-appended when the no-tools fallback rebuilds the prompt.
         self._system_suffix: str = ""
+        # Set by create_for_agent when the turn is running on a fallback model
+        # instead of the configured default. Emitted once, as an SSE `notice`:
+        # a silent substitution is a bug the user discovers months later.
+        self.notice: str | None = None
 
     # ------------------------------------------------------------------
     # Small helpers
@@ -267,21 +272,32 @@ class AgentExecutor:
         # Resolve the model. The sentinel "default" (or an unset model_id) means
         # "use the default model configured in Settings". Read config.settings
         # live — it's reassigned when settings are updated.
+        #
+        # An agent on the default goes through resolve_default, which falls back
+        # to a reachable local model when the configured one is down or gone —
+        # otherwise a fresh install (default: llama.cpp on :8080) fails on the
+        # first message even with Ollama running. It never writes settings, so
+        # the user's choice comes back the moment their backend does.
         model_id = agent.model_id
+        notice: str | None = None
         if model_id in ("", "default"):
-            model_id = config.settings.default_model_id
-            if not model_id:
+            model_config, notice = await resolve_default(
+                stores.models, config.settings.default_model_id)
+        else:
+            model_data = stores.models.get(model_id)
+            if model_data is None:
+                known = ", ".join(sorted(
+                    d.get("id", "") for d in stores.models.list_all())) or "none"
                 raise ValueError(
-                    "Agent uses the default model, but no default model is "
-                    "configured in Settings"
+                    f"Model '{model_id}' no longer exists. Point this agent at "
+                    f"an existing model, or set it back to the default "
+                    f"(available: {known})."
                 )
+            model_config = ModelConfig(**model_data)
 
-        model_data = stores.models.get(model_id)
-        if model_data is None:
-            raise ValueError(f"Model not found: {model_id}")
-        model_config = ModelConfig(**model_data)
-
-        return cls(agent, model_config, tool_registry, stores, depth)
+        executor = cls(agent, model_config, tool_registry, stores, depth)
+        executor.notice = notice
+        return executor
 
     # ------------------------------------------------------------------
     # Prompt building
@@ -949,9 +965,15 @@ class AgentExecutor:
     ):
         """The agent loop, as an async generator of SSE-compatible event dicts.
 
-        Event types: token, clear_tokens, tool_start, tool_result, error, done.
+        Event types: token, clear_tokens, tool_start, tool_result, notice,
+        error, done.
         """
         try:
+            # Depth 0 only: every sub-agent resolves the same fallback from the
+            # same memo, so a delegating turn would otherwise emit one identical
+            # notice per sub-agent.
+            if self.notice and self.depth == 0:
+                yield {"type": "notice", "data": self.notice}
             async for event in self._run_stream_inner(user_message, conversation,
                                                       attachments, memory_context):
                 yield event
@@ -1093,7 +1115,9 @@ class AgentExecutor:
                     yield ev
 
             except Exception as e:
-                err_msg = str(e) or type(e).__name__
+                # Ask the provider to explain it: only it knows which backend it
+                # was talking to and at which URL (see LLMProvider.explain_error).
+                err_msg = self.provider.explain_error(e)
                 log.error("LLM stream failed: %s", err_msg)
                 stream_error = err_msg
                 # Break out of the loop; the post-loop code decides whether to

@@ -56,6 +56,16 @@ body {
     color: var(--bs-danger-text-emphasis);
 }
 
+/* "Answering with X because your default model is down." Not a failure — the
+   turn succeeded — so it is warning-coloured, not danger, and full width:
+   it explains the answer below it rather than being part of the conversation. */
+.msg-notice {
+    background: var(--bs-warning-bg-subtle);
+    color: var(--bs-warning-text-emphasis);
+    max-width: 100%;
+    font-size: 0.9em;
+}
+
 /* A thinking model's chain-of-thought: collapsed, above the tool calls. Quieter
    than a tool call (dashed, no fill) — it is context, not something that ran. */
 .msg-reasoning {
