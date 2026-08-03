@@ -1,0 +1,131 @@
+{
+  "$comment": [
+    "Italian overlay — loaded on top of catalog.json with `--lang it`.",
+    "",
+    "An entry with a NEW id is added to the international catalog; an entry",
+    "that REUSES an id from catalog.json replaces it. `ifixit` is the second",
+    "case: the same repair guides in Italian, not a second 3.6 GB copy.",
+    "",
+    "Medicine and encyclopedias are the first case: the English editions are",
+    "several times larger, so an Italian speaker wants both — one to read",
+    "under stress, one to read when the first one is thin.",
+    "",
+    "To start another language, copy this file to catalog.<lang>.json and",
+    "swap the archive names (Kiwix publishes fr/es/de/... editions of most of",
+    "these). Preset names come from catalog.json; add a new one here only if",
+    "it is genuinely language-specific."
+  ],
+
+  "version": 1,
+  "language": "it",
+  "language_name": "Italiano",
+  "presets": {},
+
+  "entries": [
+    {
+      "id": "wikimed-it",
+      "kiwix": "wikipedia_it_medicine",
+      "flavour": "maxi",
+      "lang": "it",
+      "topic": "health",
+      "presets": ["base", "health"],
+      "note": "WikiMed in italiano. Sotto stress non si traduce un protocollo: vale i 400 MB anche nel set base."
+    },
+    {
+      "id": "wikipedia-it",
+      "kiwix": "wikipedia_it_all",
+      "flavour": "nopic",
+      "lang": "it",
+      "topic": "wikipedia",
+      "presets": ["wikipedia"],
+      "note": "Wikipedia italiana, testo integrale. È l'aggiornamento dell'edizione `mini` (che ha solo gli incipit)."
+    },
+    {
+      "id": "wiktionary-it",
+      "kiwix": "wiktionary_it_all",
+      "flavour": "nopic",
+      "lang": "it",
+      "topic": "wikipedia",
+      "presets": ["wikipedia"],
+      "note": "Wikizionario: dizionario italiano."
+    },
+    {
+      "id": "ifixit",
+      "kiwix": "ifixit_it_all",
+      "lang": "it",
+      "topic": "practical",
+      "presets": ["practical"],
+      "note": "iFixit in italiano — sostituisce l'edizione inglese: stesse guide, non una seconda copia."
+    },
+    {
+      "id": "wikibooks-it",
+      "kiwix": "wikibooks_it_all",
+      "flavour": "nopic",
+      "lang": "it",
+      "topic": "practical",
+      "presets": ["practical"],
+      "note": "Wikibooks italiano: manuali veri, non voci enciclopediche. Corpus diverso da quello inglese."
+    },
+    {
+      "id": "scoutwiki-it",
+      "kiwix": "scoutwiki.org_it_all",
+      "flavour": "maxi",
+      "lang": "it",
+      "topic": "practical",
+      "presets": ["practical", "survival"],
+      "note": "ScoutWiki: nodi, fuoco, campo, orientamento, in italiano. 16 MB per una cassetta degli attrezzi."
+    },
+    {
+      "id": "wikivoyage-it",
+      "kiwix": "wikivoyage_it_all",
+      "flavour": "nopic",
+      "lang": "it",
+      "topic": "geo",
+      "presets": ["geo"],
+      "note": "Guide di viaggio in italiano: cosa ha un posto, dove sta l'acqua, come ci si arriva."
+    },
+    {
+      "id": "maps-italy",
+      "kiwix": "maps_en_italy",
+      "lang": "it",
+      "topic": "geo",
+      "presets": ["geo"],
+      "note": "OpenStreetMap dell'Italia come ZIM. Per un lettore Kiwix — l'agente non ci cerca dentro."
+    },
+    {
+      "id": "gutenberg-it",
+      "kiwix": "gutenberg_it_all",
+      "lang": "it",
+      "topic": "reference",
+      "presets": ["reference"],
+      "note": "Progetto Gutenberg in italiano. La cultura è parte di ciò che sopravvive, non un ornamento."
+    },
+    {
+      "id": "vikidia-it",
+      "kiwix": "vikidia_it_all",
+      "flavour": "maxi",
+      "lang": "it",
+      "topic": "reference",
+      "presets": ["reference"],
+      "note": "Enciclopedia per ragazzi, con immagini. Se qualcuno deve studiare, si comincia da qui."
+    },
+    {
+      "id": "wikiversity-it",
+      "kiwix": "wikiversity_it_all",
+      "flavour": "maxi",
+      "lang": "it",
+      "topic": "reference",
+      "presets": ["reference"],
+      "note": "Wikiversità: materiale didattico in italiano."
+    },
+    {
+      "id": "wikisource-it",
+      "kiwix": "wikisource_it_all",
+      "flavour": "nopic",
+      "lang": "it",
+      "topic": "reference",
+      "presets": [],
+      "note": "Fonti primarie e opere fuori copyright in italiano. Grande: si prende di proposito."
+    }
+  ]
+}

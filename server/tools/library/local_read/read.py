@@ -88,13 +88,34 @@ def default_library_dir():
         os.path.expanduser("~"), "myagent", "library")
 
 
+def _walk(root):
+    """os.walk that FOLLOWS directory symlinks — duplicated from local_search.
+
+    A library is normally ASSEMBLED, not copied: the bulky archives live on an
+    external disk and get symlinked under ~/myagent/library. os.walk defaults
+    to followlinks=False, so those trees were skipped in silence.
+
+    followlinks=True can loop forever on a symlink cycle, hence the realpath
+    set. It also DEDUPES: two links to the same directory are walked once, so
+    the same archive cannot show up under two z<N> indices.
+    """
+    seen = set()
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=True):
+        real = os.path.realpath(dirpath)
+        if real in seen:
+            dirnames[:] = []          # already walked under another name
+            continue
+        seen.add(real)
+        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+        yield dirpath, dirnames, filenames
+
+
 def list_zims(root):
     """Sorted recursive listing of *.zim under *root* — duplicated from
     local_search. The sort order DEFINES the ``z<N>`` id indices, so both
     tools must list identically."""
     found = []
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+    for dirpath, dirnames, filenames in _walk(root):
         for name in filenames:
             if name.lower().endswith(".zim"):
                 path = os.path.join(dirpath, name)
@@ -195,11 +216,18 @@ def read_file(root, rid, rel, line, offset, offset_given):
     if os.path.isfile(root):
         target = root
     else:
-        target = os.path.normpath(os.path.join(root, rel))
-        # the id comes from the model: never follow it outside the root
-        if not (os.path.realpath(target) + os.sep).startswith(
-                os.path.realpath(root) + os.sep):
+        # The id comes from the MODEL, which can invent one, so a fabricated
+        # "../../etc/passwd" must never resolve. The check is LEXICAL and not
+        # realpath-based: a library is normally ASSEMBLED from symlinks (see
+        # _walk), so a file local_search just offered legitimately resolves
+        # outside the root — a realpath containment check rejected exactly the
+        # ids the search had produced ("escapes the library root" on every note
+        # under a symlinked folder). Traversal is what we block; a symlink the
+        # library owner installed is topology, not model input.
+        rel = os.path.normpath(rel).replace(os.sep, "/")
+        if os.path.isabs(rel) or rel == ".." or rel.startswith("../"):
             fail(f"path in id escapes the library root: {rel}")
+        target = os.path.normpath(os.path.join(root, rel))
     if not os.path.isfile(target):
         fail(f"file not found: {target}")
     if os.path.getsize(target) > MAX_TEXT_BYTES:

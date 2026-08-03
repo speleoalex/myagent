@@ -1,0 +1,342 @@
+{
+  "$comment": [
+    "International catalog for `fetch.py` — language-neutral or English.",
+    "",
+    "Per-language material lives in a sibling overlay: `catalog.it.json`,",
+    "`catalog.fr.json`, ... loaded on top of this one with `--lang it`.",
+    "An overlay entry with a NEW id is added; an entry reusing an id from this",
+    "file REPLACES it (that is how `ifixit` becomes the Italian edition rather",
+    "than a second 3.6 GB copy of the same guides).",
+    "",
+    "This file holds no URLs. Kiwix archives are date-stamped and there is no",
+    "'latest' symlink, so any URL written here would rot; fetch.py resolves the",
+    "current filename, size and SHA-256 from the live Kiwix catalog instead.",
+    "",
+    "Add your own entries freely — this is data, not code:",
+    "  {\"id\": \"...\", \"kiwix\": \"<zim name>\", \"flavour\": \"maxi|nopic|mini\", ...}",
+    "  {\"id\": \"...\", \"url\": \"https://...\", \"size_mb\": 12, ...}",
+    "Anything with a `url` is downloaded verbatim, so any HTTP source works.",
+    "",
+    "Flavours, for Wikipedia-style archives: `maxi` = full text + images,",
+    "`nopic` = full text, `mini` = lead section only. `mini` is a good index",
+    "and a poor manual: procedures live in the sections it drops."
+  ],
+
+  "version": 1,
+  "kiwix_catalog": "https://library.kiwix.org/catalog/v2/entries?count=-1",
+
+  "presets": {
+    "base": "Starting set (~1.4 GB): emergency medicine, water, food, repair thinking. Fits anywhere.",
+    "health": "Medicine in depth, human and animal.",
+    "survival": "Post-disaster procedures and preparedness.",
+    "practical": "Making, growing, fixing and powering things.",
+    "wikipedia": "Full-text encyclopedia and dictionaries (replaces the `mini` editions).",
+    "reference": "Long-form reference: public-domain books, taxonomy, courses.",
+    "geo": "Maps and travel guides."
+  },
+
+  "entries": [
+    {
+      "id": "zimgit-medicine",
+      "kiwix": "zimgit-medicine_en",
+      "lang": "en",
+      "topic": "health",
+      "presets": ["base", "health"],
+      "note": "Field and emergency medicine books. Tiny, dense, written for no-hospital conditions."
+    },
+    {
+      "id": "zimgit-water",
+      "kiwix": "zimgit-water_en",
+      "lang": "en",
+      "topic": "survival",
+      "presets": ["base", "survival"],
+      "note": "Water collection, storage and purification. The first thing that runs out."
+    },
+    {
+      "id": "zimgit-food",
+      "kiwix": "zimgit-food-preparation_en",
+      "lang": "en",
+      "topic": "survival",
+      "presets": ["base", "survival"],
+      "note": "Preserving and preparing food without a cold chain."
+    },
+    {
+      "id": "zimgit-post-disaster",
+      "kiwix": "zimgit-post-disaster_en",
+      "lang": "en",
+      "topic": "survival",
+      "presets": ["base", "survival"],
+      "note": "The post-disaster resource library: shelter, sanitation, safety, salvage."
+    },
+    {
+      "id": "zimgit-knots",
+      "kiwix": "zimgit-knots_en",
+      "lang": "en",
+      "topic": "practical",
+      "presets": ["base", "survival", "practical"],
+      "note": "Knots, lashings, ladders and sutures, illustrated. Absurdly small for what it covers."
+    },
+    {
+      "id": "appropedia",
+      "kiwix": "appropedia_en_all",
+      "flavour": "maxi",
+      "lang": "en",
+      "topic": "practical",
+      "presets": ["base", "practical"],
+      "note": "Appropriate technology: build it from what exists locally. The core 'rebuild' wiki."
+    },
+    {
+      "id": "nhs-medicines",
+      "kiwix": "nhs.uk_en_medicines",
+      "lang": "en",
+      "topic": "health",
+      "presets": ["base", "health"],
+      "note": "NHS drugs A-Z: doses, interactions, contraindications."
+    },
+
+    {
+      "id": "wikem",
+      "kiwix": "wikem_en_all",
+      "lang": "en",
+      "topic": "health",
+      "presets": ["health"],
+      "note": "WikEM: the largest open emergency-medicine reference. Written for the acute case."
+    },
+    {
+      "id": "wikimed",
+      "kiwix": "wikipedia_en_medicine",
+      "flavour": "maxi",
+      "lang": "en",
+      "topic": "health",
+      "presets": ["health"],
+      "note": "WikiMed, Wikipedia's medical corpus. `maxi`: in medicine the diagrams are the content."
+    },
+    {
+      "id": "mdwiki",
+      "kiwix": "mdwiki_en_all",
+      "flavour": "maxi",
+      "lang": "en",
+      "topic": "health",
+      "presets": ["health"],
+      "note": "MDWiki medical encyclopedia: deeper clinical detail than WikiMed."
+    },
+    {
+      "id": "military-medicine",
+      "kiwix": "irp.fas.org_en_military-medicine",
+      "lang": "en",
+      "topic": "health",
+      "presets": ["health"],
+      "note": "Military medical manuals: surgery and trauma care without a hospital behind you."
+    },
+    {
+      "id": "wikivet",
+      "kiwix": "wikivet.net_en_all",
+      "flavour": "maxi",
+      "lang": "en",
+      "topic": "health",
+      "presets": ["health"],
+      "note": "Veterinary reference. Where there are animals they are food, transport and work."
+    },
+    {
+      "id": "ready-gov",
+      "kiwix": "www.ready.gov_en",
+      "lang": "en",
+      "topic": "survival",
+      "presets": ["survival"],
+      "note": "US civil-protection preparedness guidance, hazard by hazard."
+    },
+
+    {
+      "id": "energypedia",
+      "kiwix": "energypedia_en_all",
+      "flavour": "nopic",
+      "lang": "en",
+      "topic": "practical",
+      "presets": ["practical"],
+      "note": "Off-grid energy: solar, micro-hydro, biogas, storage."
+    },
+    {
+      "id": "ifixit",
+      "kiwix": "ifixit_en_all",
+      "lang": "en",
+      "topic": "practical",
+      "presets": ["practical"],
+      "note": "Step-by-step repair guides. Replaces nothing, keeps everything running."
+    },
+    {
+      "id": "wikibooks",
+      "kiwix": "wikibooks_en_all",
+      "flavour": "nopic",
+      "lang": "en",
+      "topic": "practical",
+      "presets": ["practical"],
+      "note": "Wikibooks: actual manuals rather than encyclopedia entries."
+    },
+    {
+      "id": "armypubs",
+      "kiwix": "armypubs_en_all",
+      "lang": "en",
+      "topic": "practical",
+      "presets": [],
+      "note": "US Army field manuals: survival, first aid, engineering, water. Big; take it deliberately."
+    },
+    {
+      "id": "se-diy",
+      "kiwix": "diy.stackexchange.com_en_all",
+      "lang": "en",
+      "topic": "practical",
+      "presets": ["practical"],
+      "note": "Home Improvement Q&A: plumbing, electrics, structure — someone had your exact problem."
+    },
+    {
+      "id": "se-gardening",
+      "kiwix": "gardening.stackexchange.com_en_all",
+      "lang": "en",
+      "topic": "practical",
+      "presets": ["practical"],
+      "note": "Gardening & landscaping Q&A: growing food, pests, soil."
+    },
+    {
+      "id": "se-outdoors",
+      "kiwix": "outdoors.stackexchange.com_en_all",
+      "lang": "en",
+      "topic": "survival",
+      "presets": ["practical", "survival"],
+      "note": "The Great Outdoors Q&A: navigation, shelter, cold, water in the field."
+    },
+    {
+      "id": "se-woodworking",
+      "kiwix": "woodworking.stackexchange.com_en_all",
+      "lang": "en",
+      "topic": "practical",
+      "presets": ["practical"],
+      "note": "Woodworking Q&A: hand-tool technique when the power tools stop."
+    },
+    {
+      "id": "se-sustainability",
+      "kiwix": "sustainability.stackexchange.com_en_all",
+      "lang": "en",
+      "topic": "practical",
+      "presets": ["practical"],
+      "note": "Sustainable living Q&A: low-input households."
+    },
+    {
+      "id": "se-cooking",
+      "kiwix": "cooking.stackexchange.com_en_all",
+      "lang": "en",
+      "topic": "practical",
+      "presets": ["practical"],
+      "note": "Cooking Q&A: substitutions, preservation, food safety."
+    },
+    {
+      "id": "se-homebrew",
+      "kiwix": "homebrew.stackexchange.com_en_all",
+      "lang": "en",
+      "topic": "practical",
+      "presets": ["practical"],
+      "note": "Fermentation Q&A. Fermenting is preservation before it is a hobby."
+    },
+    {
+      "id": "se-ham",
+      "kiwix": "ham.stackexchange.com_en_all",
+      "lang": "en",
+      "topic": "practical",
+      "presets": ["practical"],
+      "note": "Amateur radio Q&A: antennas and propagation, i.e. communication after the network."
+    },
+    {
+      "id": "se-electronics",
+      "kiwix": "electronics.stackexchange.com_en_all",
+      "lang": "en",
+      "topic": "practical",
+      "presets": [],
+      "note": "Electronics Q&A. Large; take it if you repair boards rather than swap them."
+    },
+
+    {
+      "id": "wikipedia-en",
+      "kiwix": "wikipedia_en_top1m",
+      "flavour": "nopic",
+      "lang": "en",
+      "topic": "wikipedia",
+      "presets": ["wikipedia"],
+      "note": "Top 1M English articles, full text. A third of `en_all_nopic`, most of the value."
+    },
+    {
+      "id": "wikivoyage",
+      "kiwix": "wikivoyage_en_all",
+      "flavour": "nopic",
+      "lang": "en",
+      "topic": "geo",
+      "presets": ["geo"],
+      "note": "Travel guides: what a place has, where its water is, how to reach it."
+    },
+
+    {
+      "id": "gutenberg-agriculture",
+      "kiwix": "gutenberg_en_lcc-s",
+      "lang": "en",
+      "topic": "reference",
+      "presets": ["reference"],
+      "note": "Public-domain agriculture. Pre-industrial methods, written when they were the method."
+    },
+    {
+      "id": "gutenberg-technology",
+      "kiwix": "gutenberg_en_lcc-t",
+      "lang": "en",
+      "topic": "reference",
+      "presets": [],
+      "note": "Public-domain technology: forges, mills, machining, construction. Large."
+    },
+    {
+      "id": "gutenberg-medicine",
+      "kiwix": "gutenberg_en_lcc-r",
+      "lang": "en",
+      "topic": "reference",
+      "presets": ["reference"],
+      "note": "Public-domain medicine. Historical — read it next to WikiMed, not instead of it."
+    },
+    {
+      "id": "wikispecies",
+      "kiwix": "wikispecies_en_all",
+      "flavour": "nopic",
+      "lang": "en",
+      "topic": "reference",
+      "presets": ["reference"],
+      "note": "Taxonomy of everything living. Identification still needs a regional field guide."
+    },
+    {
+      "id": "wikiversity",
+      "kiwix": "wikiversity_en_all",
+      "flavour": "nopic",
+      "lang": "en",
+      "topic": "reference",
+      "presets": ["reference"],
+      "note": "Course material: teaching, not just looking up."
+    },
+    {
+      "id": "se-biology",
+      "kiwix": "biology.stackexchange.com_en_all",
+      "lang": "en",
+      "topic": "reference",
+      "presets": ["reference"],
+      "note": "Biology Q&A."
+    },
+    {
+      "id": "se-chemistry",
+      "kiwix": "chemistry.stackexchange.com_en_all",
+      "lang": "en",
+      "topic": "reference",
+      "presets": ["reference"],
+      "note": "Chemistry Q&A: what reacts with what, and what that costs you."
+    },
+    {
+      "id": "se-physics",
+      "kiwix": "physics.stackexchange.com_en_all",
+      "lang": "en",
+      "topic": "reference",
+      "presets": [],
+      "note": "Physics Q&A. Large."
+    }
+  ]
+}
