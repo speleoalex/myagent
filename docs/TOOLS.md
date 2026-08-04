@@ -157,7 +157,9 @@ To show a file that already exists (e.g. an HTML report the agent just built
 with `file_write`), the bundled **`show_file`** tool in the `file_management/`
 group prints the marker for you — the classic flow is `file_write` the page,
 then `show_file` it. The `library/local_read` tool uses the same channel to
-deliver a ZIM article's images.
+deliver a ZIM article's images — and, with `export=true`, the full document
+itself (a ZIM article as a self-contained HTML page, a PDF or text file as the
+original).
 
 How the user receives it depends on where they are:
 

@@ -18,10 +18,12 @@ length, paged. Ids are self-locating (both tools are stateless subprocesses):
     markers, so the model can cite the page it quotes. Reading starts at the
     matched page unless an explicit offset says otherwise.
 
-Reads ``{"id": str, "offset"?: int, "path"?: str}`` as JSON on stdin.
-``offset`` is a character offset into the extracted plain text (extraction is
-deterministic, so offsets stay valid across calls). ``path`` must be the same
-root passed to local_search, if any.
+Reads ``{"id": str, "offset"?: int, "path"?: str, "images"?: bool,
+"export"?: bool}`` as JSON on stdin. ``offset`` is a character offset into the
+extracted plain text (extraction is deterministic, so offsets stay valid
+across calls). ``path`` must be the same root passed to local_search, if any.
+``export`` delivers the FULL document to the user as a file through the
+resource channel instead of printing a page (see the export section below).
 
 NOTE: the helpers marked "duplicated" are copied from
 ../local_search/search.py — keep them in sync (CoW overrides copy one
@@ -30,8 +32,10 @@ this copy of ``_TextExtractor`` also collects ``<img>`` tags (src + alt) so
 article images can be delivered to the chat — local_search's copy must NOT
 gain that (snippets don't need images); don't "fix" the divergence.
 """
+import base64
 import hashlib
 import json
+import mimetypes
 import os
 import posixpath
 import re
@@ -39,6 +43,7 @@ import shutil
 import subprocess
 import sys
 import time
+import unicodedata
 from html.parser import HTMLParser
 
 PAGE = 8000                    # chars per page, cut back to a word boundary
@@ -56,6 +61,26 @@ MAX_IMAGES_TOTAL_BYTES = 5_000_000
 # to WebP but keeps the original filename, so "_assets_/x.JPG" is image/webp.
 IMG_EXT = {"image/webp": ".webp", "image/png": ".png", "image/jpeg": ".jpg",
            "image/gif": ".gif", "image/svg+xml": ".svg"}
+
+# Full-document export (export=true): the whole document goes to the USER as a
+# file through the resource channel; the tool result stays tiny, because tool
+# results are re-sent on every iteration — the reason the search is two-phase
+# applies doubly to full documents.
+MAX_EXPORT_BYTES = 25_000_000   # f:/p: copy cap — _resources/ is never pruned
+HTML_EXPORT_BUDGET = 400_000    # exported article incl. inlined images: keeps
+                                # an illustrated article under the web UI's
+                                # 512 KB inline-preview cap (ui/js/chat.js)
+# mimetypes.guess_type misses .md on some systems.
+EXPORT_MIME = {".md": "text/markdown", ".txt": "text/plain",
+               ".rst": "text/x-rst"}
+# Injected at the top of exported articles. The <meta charset> is deliberate:
+# the content is re-encoded UTF-8 here, and a stale declaration deeper in the
+# original <head> must lose (the first one in the document wins in browsers).
+EXPORT_STYLE = ('<meta charset="utf-8"><style>body{max-width:46em;'
+                'margin:1em auto;padding:0 1em;font-family:sans-serif;'
+                'line-height:1.5}img{max-width:100%;height:auto}'
+                'table{border-collapse:collapse}td,th{border:1px solid #ccc;'
+                'padding:.2em .5em}</style>')
 
 BLOCK_TAGS = {"p", "div", "li", "br", "tr", "h1", "h2", "h3", "h4", "h5", "h6",
               "section", "article", "ul", "ol", "table", "blockquote"}
@@ -314,7 +339,14 @@ def render(rid, title, label, text, offset, note=""):
     if note:
         header += f"  ({note})"
     if end < total:
-        footer = f"…more — call local_read with offset={end}"
+        # The export clause rides the footer because models follow it
+        # LITERALLY (observed: given only the offset hint, a 4B model paged
+        # twice and then claimed the full document had been delivered). The
+        # offset clause stays FIRST: with export first, the same model
+        # stopped paging and claimed delivery after a single read.
+        footer = (f"…more — call local_read with offset={end}; if the user "
+                  f"wants the WHOLE document as a file, call again with "
+                  f"export=true instead")
     else:
         footer = "— end of document —"
     print(f"{header}\n\n{body.strip()}\n\n{footer}")
@@ -346,7 +378,8 @@ def fail_bad_id(rid):
 # --------------------------------------------------------------------------- #
 # The two id branches
 # --------------------------------------------------------------------------- #
-def read_zim(root, rid, n, entry_path, offset, images, path_given=True):
+def read_zim(root, rid, n, entry_path, offset, images, path_given=True,
+             export=False):
     try:
         from libzim.reader import Archive
     except ImportError as e:
@@ -378,6 +411,11 @@ def read_zim(root, rid, n, entry_path, offset, images, path_given=True):
         if mime and not mime.startswith("text/"):
             fail(f"entry '{entry_path}' is {mime}, not a readable document — "
                  f"read the article that references it instead")
+        if export:
+            # Full document to the user, nothing to the conversation; the
+            # exported HTML embeds its own images, so emit_images is skipped.
+            export_zim_entry(archive, entry, entry_path, rid, zim_path)
+            return
         html = bytes(item.content).decode("utf-8", "replace")
         parser = _TextExtractor()
         try:
@@ -446,10 +484,183 @@ def emit_images(archive, entry_path, images, title):
                     f.write(raw)
         except OSError:
             continue
-        label = " ".join((alt or title or "").split())
+        # Never label a bare image with the ARTICLE title: the model then
+        # reads "file delivered: <article>" and claims the full document was
+        # delivered without ever exporting it (observed on a 4B model).
+        label = " ".join((alt or f"image from {title}" or "").split())
         label = label.replace("|", "/").replace("]]", ")")
         print(f"[[resource:_resources/{fname}|{mime}|{label}]]")
         done += 1
+
+
+# --------------------------------------------------------------------------- #
+# Full-document export (export=true) — this section exists ONLY here, never in
+# local_search: exporting is a read-side concern, and the shared duplicated
+# helpers above stay byte-identical.
+# --------------------------------------------------------------------------- #
+def fail_export(msg):
+    # Same contract as fail(): a self-explanatory refusal plus the next step,
+    # or a small model reports "delivered" for a file that never landed.
+    print(f"NOTHING WAS EXPORTED — {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def safe_stem(name, fallback="document"):
+    """Filename stem from a title: ASCII-folded ('Città' -> 'Citta') then
+    sanitized. The full Unicode title still travels in the marker — the
+    filename is just an address."""
+    name = unicodedata.normalize("NFKD", name or "")
+    name = name.encode("ascii", "ignore").decode()
+    name = re.sub(r"[^A-Za-z0-9_.-]+", "_", name).strip("_.")
+    return name[:60] or fallback
+
+
+def write_resource(data, stem, ext):
+    """Write content-addressed under <workspace>/_resources/ (same naming
+    scheme as emit_images; existing file = re-export is a no-op) and return
+    the workspace-relative path for the marker."""
+    workdir = os.environ.get("MYAGENT_WORKDIR") or os.getcwd()
+    out_dir = os.path.join(workdir, "_resources")
+    fname = f"{stem}-{hashlib.md5(data).hexdigest()[:8]}{ext}"
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+        dest = os.path.join(out_dir, fname)
+        if not os.path.exists(dest):
+            with open(dest, "wb") as f:
+                f.write(data)
+    except OSError as e:
+        fail_export(f"could not write into the workspace: {e}")
+    return f"_resources/{fname}"
+
+
+def print_export(rid, title, label, relpath, mime, size):
+    """The ENTIRE tool result for an export: header + marker + one coaching
+    line, NO document body. The executor swaps the marker for its own "file
+    delivered" note; the one thing that note does not say is the one thing a
+    small model needs told — don't paste."""
+    title = " ".join((title or "").split()) or "document"
+    header = title
+    if label:
+        header += f"  [{label}]"
+    header += f"  — id {rid} — full document exported ({size:,} bytes)"
+    safe_title = title.replace("|", "/").replace("]]", ")")
+    print(header)
+    print(f"[[resource:{relpath}|{mime}|{safe_title}]]")
+    print("The document was delivered to the user as a file. Do not paste its "
+          "contents — answer by referring to it.")
+
+
+def sanitize_html(html):
+    """Make a ZIM article safe to serve standalone: scripts and stylesheet
+    <link>s point at archive paths that resolve nowhere outside the ZIM (and
+    /api/files serves the export raw, not only inside the sandboxed preview);
+    srcset would shadow the inlined src; inline handlers go as belt and
+    braces. <style> blocks are inline and kept."""
+    html = re.sub(r"<script\b.*?</script\s*>", "", html, flags=re.S | re.I)
+    html = re.sub(r"<script\b[^>]*>", "", html, flags=re.I)   # unclosed tail
+    html = re.sub(r"<link\b[^>]*>", "", html, flags=re.I)
+    html = re.sub(r"\ssrcset\s*=\s*(\"[^\"]*\"|'[^']*')", "", html, flags=re.I)
+    html = re.sub(r"\son\w+\s*=\s*(\"[^\"]*\"|'[^']*'|[^\s>]+)", "", html,
+                  flags=re.I)
+    return html
+
+
+def inline_images(archive, entry_path, html):
+    """Rewrite <img> tags to self-contained data: URIs, resolving srcs exactly
+    like emit_images, until HTML_EXPORT_BUDGET. Unresolvable or over-budget
+    tags are DROPPED — cleaner than a broken-image icon in the exported page.
+    data-src is checked first: mwoffliner lazy-loads images through it, and
+    the scripts that would populate src are stripped by sanitize_html."""
+    base = posixpath.dirname(entry_path)
+    cache = {}
+    spent = [len(html)]
+
+    def attr(tag, name):
+        m = re.search(rf"(?<![-\w]){name}\s*=\s*(\"([^\"]*)\"|'([^']*)')",
+                      tag, flags=re.I)
+        if not m:
+            return ""
+        return (m.group(2) if m.group(2) is not None else m.group(3)).strip()
+
+    def repl(m):
+        tag = m.group(0)
+        src = attr(tag, "data-src") or attr(tag, "src")
+        if not src or src.startswith(("http:", "https:", "//")):
+            return tag                     # offline: the alt text shows
+        if src.startswith("data:"):
+            return tag                     # already inline
+        if src not in cache:
+            cache[src] = None
+            tries = [posixpath.normpath(posixpath.join(base, src)), src]
+            if src.startswith("./"):
+                tries.append(src[2:])
+            for path in dict.fromkeys(tries):
+                try:
+                    item = archive.get_entry_by_path(path).get_item()
+                except Exception:
+                    continue
+                mime = (item.mimetype or "").lower().split(";")[0].strip()
+                if not mime.startswith("image/"):
+                    break
+                try:
+                    raw = bytes(item.content)
+                except Exception:
+                    break
+                cache[src] = (f"data:{mime};base64,"
+                              + base64.b64encode(raw).decode("ascii"))
+                break
+        uri = cache[src]
+        if uri is None or spent[0] + len(uri) > HTML_EXPORT_BUDGET:
+            return ""
+        spent[0] += len(uri)
+        alt = attr(tag, "alt").replace('"', "&quot;")
+        return f'<img src="{uri}" alt="{alt}">'
+
+    return re.sub(r"<img\b[^>]*>", repl, html, flags=re.I)
+
+
+def export_zim_entry(archive, entry, entry_path, rid, zim_path):
+    """Write the full article into _resources/ and print the marker. HTML is
+    exported self-contained (sanitized, images inlined, reading style
+    injected); other text/* entries (zimgit-style plain text) go as-is."""
+    item = entry.get_item()
+    mime = (item.mimetype or "").lower().split(";")[0].strip()
+    raw = bytes(item.content)
+    title = entry.title or posixpath.basename(entry_path)
+    if mime == "text/html":
+        html = sanitize_html(raw.decode("utf-8", "replace"))
+        html = inline_images(archive, entry_path, html)
+        head = re.search(r"<head\b[^>]*>", html, flags=re.I)
+        if head:
+            html = html[:head.end()] + EXPORT_STYLE + html[head.end():]
+        else:
+            html = EXPORT_STYLE + html
+        data, ext, out_mime = html.encode("utf-8"), ".html", "text/html"
+    else:
+        data, ext, out_mime = raw, ".txt", "text/plain"
+    relpath = write_resource(data, safe_stem(title), ext)
+    print_export(rid, title, os.path.basename(zim_path), relpath, out_mime,
+                 len(data))
+
+
+def export_copy(target, rid, rel, mime):
+    """Copy an f:/p: source file into _resources/ and print the marker."""
+    try:
+        size = os.path.getsize(target)
+    except OSError as e:
+        fail_export(f"cannot read '{rel}': {e}")
+    if size > MAX_EXPORT_BYTES:
+        fail_export(
+            f"'{rel}' is {size / 1_000_000:.0f} MB, over the "
+            f"{MAX_EXPORT_BYTES // 1_000_000} MB export limit — read it in "
+            f"pages with local_read instead, or tell the user the file is at "
+            f"{os.path.abspath(target)}")
+    with open(target, "rb") as f:
+        data = f.read()
+    name = os.path.basename(rel)
+    stem, ext = os.path.splitext(name)
+    relpath = write_resource(data, safe_stem(stem), ext.lower())
+    print_export(rid, name, "", relpath, mime, size)
 
 
 def wrong_root_hint(path_given, certain=True):
@@ -496,11 +707,18 @@ def resolve_in_root(root, rel, path_given=True):
     return target
 
 
-def read_pdf(root, rid, rel, page, offset, offset_given, path_given=True):
+def read_pdf(root, rid, rel, page, offset, offset_given, path_given=True,
+             export=False):
+    target = resolve_in_root(root, rel, path_given)
+    if export:
+        # The ORIGINAL file: for reading in full it beats the text layer, it
+        # needs neither pdftotext nor OCR — a scan nobody OCR'd is exactly
+        # the case where handing over the file is the only useful answer.
+        export_copy(target, rid, rel, "application/pdf")
+        return
     if not shutil.which("pdftotext"):
         fail("pdftotext (poppler-utils) is not installed, so PDFs cannot be "
              "read on this machine")
-    target = resolve_in_root(root, rel, path_given)
     pages = pdf_pages(target) or []
     if not any(p.strip() for p in pages):
         fail(f"'{rel}' has no text layer — it is a scan nobody OCR'd, so there "
@@ -517,8 +735,17 @@ def read_pdf(root, rid, rel, page, offset, offset_given, path_given=True):
     render(rid, rel, f"PDF, {len(pages)} pages", text, offset, note)
 
 
-def read_file(root, rid, rel, line, offset, offset_given, path_given=True):
+def read_file(root, rid, rel, line, offset, offset_given, path_given=True,
+              export=False):
     target = resolve_in_root(root, rel, path_given)
+    if export:
+        # Before the MAX_TEXT_BYTES guard: that cap protects the model's
+        # context, which an export never enters (its cap is MAX_EXPORT_BYTES).
+        ext = os.path.splitext(rel)[1].lower()
+        export_copy(target, rid, rel,
+                    EXPORT_MIME.get(ext) or mimetypes.guess_type(rel)[0]
+                    or "text/plain")
+        return
     if os.path.getsize(target) > MAX_TEXT_BYTES:
         fail(f"file too large to read: {target}")
     with open(target, "r", encoding="utf-8", errors="replace") as f:
@@ -564,20 +791,25 @@ def main():
     if isinstance(images, str):
         images = images.strip().lower() in ("1", "true", "yes")
 
+    export = args.get("export")
+    if isinstance(export, str):
+        export = export.strip().lower() in ("1", "true", "yes")
+    export = bool(export)              # offset is simply ignored when exporting
+
     m = re.match(r"z(\d+):(.+)$", rid)
     if m:
         read_zim(root, rid, int(m.group(1)), m.group(2), offset, images,
-                 bool(given))
+                 bool(given), export)
         return
     if rid.startswith(("f:", "p:")):
         rel, sep, tail = rid[2:].rpartition(":")
         if sep and tail.isdigit():
             if rid.startswith("p:"):
                 read_pdf(root, rid, rel, int(tail), offset, offset_given,
-                         bool(given))
+                         bool(given), export)
             else:
                 read_file(root, rid, rel, int(tail), offset, offset_given,
-                          bool(given))
+                          bool(given), export)
             return
     fail_bad_id(rid)
 

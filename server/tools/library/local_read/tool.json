@@ -1,6 +1,6 @@
 {
   "name": "Local Read",
-  "description": "Read a document from the offline library by id, as returned by local_search. Long documents are paged: repeat the call with the offset printed at the end.",
+  "description": "Read a document from the offline library by id, as returned by local_search. Long documents are paged: repeat the call with the offset printed at the end. Set export=true to deliver the full document to the user as a file instead.",
   "parameters": {
     "type": "object",
     "properties": {
@@ -20,6 +20,11 @@
       "images": {
         "type": "boolean",
         "description": "Deliver the article's images to the user's chat. Default: automatic on the first page only (max 3); true forces them on any page, false disables"
+      },
+      "export": {
+        "type": "boolean",
+        "description": "Deliver the FULL document to the user as a file (a ZIM article becomes a readable HTML page; PDFs and text files go as the original file). Use when the user asks for the whole article or document. The tool prints only a confirmation — never paste the content yourself",
+        "default": false
       }
     },
     "required": [

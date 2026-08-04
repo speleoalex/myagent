@@ -97,7 +97,7 @@ anni. Anche quando internet no.
 | ------------ | ----------- |
 | **Qualsiasi backend LLM** | llama.cpp, Ollama, qualsiasi API compatibile OpenAI e l'API Anthropic, parlata nativamente; la finestra di contesto viene *sondata*, non indovinata |
 | **Pensato per i modelli locali piccoli** | chiamate ai tool interpretate dal testo puro per i modelli senza function calling nativo, protezione dai loop, ritentativi sulle chiamate malformate ([perché](docs/DESIGN.md)) |
-| **Biblioteca offline** | archivi ZIM di Wikipedia e i tuoi documenti in `~/myagent/library/`, cercati full-text ([dettagli](library/README.md)) |
+| **Biblioteca offline** | archivi ZIM di Wikipedia e i tuoi documenti in `~/myagent/library/`, cercati full-text; articoli e documenti interi consegnabili in chat come file ([dettagli](library/README.md)) |
 | **Agenti atomici** | un agente è solo `modello + prompt di sistema + tool`, modificabile dalla UI e salvato come file JSON |
 | **Agenti autonomi** | task programmati, esecuzioni non presidiate, agenti che si programmano il lavoro futuro e ti avvisano ([dettagli](docs/AUTONOMY.md)) |
 | **Delega tra agenti** | un agente ne chiama un altro, con permessi per agente |

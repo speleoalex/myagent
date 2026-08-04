@@ -51,6 +51,12 @@ it searches, reads the best hit and answers from what it finds — citing the
 article or file — or tells you the library doesn't cover it. The **Master**
 agent routes general-knowledge questions to it before touching the web.
 
+Ask for the **whole document** ("give me the full article") and the Librarian
+delivers it into the chat as a file: `local_read`'s `export` flag writes a ZIM
+article as a self-contained HTML page (readable inline, images included) and a
+PDF or note as the original file. The text goes to *you*, never through the
+model's context.
+
 Several archives can coexist (English + Italian, say); an agent can restrict a
 search to one edition with the tools' `lang` parameter, and each agent can have
 its **own** knowledge folder instead of the shared one (both tools take an
