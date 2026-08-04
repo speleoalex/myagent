@@ -91,6 +91,16 @@ deliberately not shipped by `deploy.sh`: see
 [connectors/README.md](../connectors/README.md) and
 [satellite/README.md](../satellite/README.md).
 
+## Updating
+
+From the git checkout, `./update.sh` fetches GitHub and compares by git
+ancestry, never by date: only when GitHub is strictly ahead does it
+fast-forward the checkout and re-run the deploy script (when an installed
+service is found). If the checkout has commits GitHub does not have, or
+uncommitted edits to tracked files, **nothing is overwritten** — the script
+explains why and exits with code 2. `--check` reports what would happen
+without changing anything; `--no-deploy` updates the checkout only.
+
 ## Install it as an app
 
 Open *Settings → Install app* and MyAgent installs like a native application:
