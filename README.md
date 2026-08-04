@@ -22,11 +22,11 @@ one component:
                │
        Autonomous agents
                │
-       ┌───────┴───────┐
-       │               │
+       ┌──────┴───────┐
+       │                │
   Local tools     IoT devices
-       │               │
-       └───────┬───────┘
+       │                │
+       └──────┬───────┘
                │
         Your computer
 ```
