@@ -290,7 +290,7 @@ async def notify_user_handler(
     applied first, so an agent with a default target delivered every notification
     there and silently dropped ``to``. Observed live — the model was asked to
     message Sylvia, the message reached Alessandro, and the tool's own answer
-    ("sent to 471091560") gave nothing away. Hence also the recipient DISPLAY names
+    ("sent to 123456789") gave nothing away. Hence also the recipient DISPLAY names
     in the result: a raw id is unauditable by the one reader who could catch this.
 
     The connector is reached in-process; ``_state`` is the app state, read at
@@ -333,7 +333,7 @@ async def notify_user_handler(
         return error
 
     # One send per recipient. Never hand a comma-joined string to the transport:
-    # Telegram ACCEPTS "471091560,1489486090", parses the leading digits,
+    # Telegram ACCEPTS "123456789,987654321", parses the leading digits,
     # delivers to the first chat only and returns ok:true. No error, no warning,
     # second recipient silently dropped (verified against the live API).
     sent, failed = [], []

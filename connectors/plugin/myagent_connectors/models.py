@@ -55,7 +55,7 @@ class Binding(BaseModel):
     @field_validator("allowed_ids", mode="before")
     @classmethod
     def normalize_ids(cls, v):
-        """Coerce to strings, so a stored ``[471091560, …]`` (written when these
+        """Coerce to strings, so a stored ``[123456789, …]`` (written when these
         were ints) loads without rewriting the file."""
         if not isinstance(v, (list, tuple)):
             return v
@@ -99,7 +99,7 @@ class Contact(BaseModel):
     """
     id: str
     name: str = ""
-    # channel type -> identifier on that channel, e.g. {"telegram": "471091560"}
+    # channel type -> identifier on that channel, e.g. {"telegram": "123456789"}
     handles: dict[str, str] = {}
     notes: str = ""
 
