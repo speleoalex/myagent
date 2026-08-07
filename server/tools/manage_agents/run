@@ -4,11 +4,18 @@
 Operates directly on the JSON agent files under the config dir (one file per
 agent, ``<config>/agents/<id>.json``) so it does not depend on the HTTP API
 being reachable. Paths follow the same env overrides as the server (config.py):
-  MYAGENT_CONFIG -> config dir (default ~/myagent/config)
-  MYAGENT_TOOLS  -> tools dir  (default ~/myagent/tools)
+  MYAGENT_CONFIG   -> config dir (default ~/myagent/config)
+  MYAGENT_TOOLS    -> user tools dir (default ~/myagent/tools)
+  MYAGENT_APP_DIR  -> the app's server/ dir, whose tools/ is the bundled catalog
 The agent store reads files fresh on every request, so writes here take effect
 immediately (no restart needed).
+
+bundled_dir/_walk_layer/catalogue are DUPLICATED from manage_tools/run on
+purpose: a copy-on-write override copies one leaf tool folder, so a module
+shared by the two tools would break the moment either is edited. Behaviour must
+stay aligned — tests/test_tool_catalogue_sync.py compares the code.
 """
+import copy
 import json
 import os
 import re
@@ -18,8 +25,16 @@ from pathlib import Path
 # Mirrors app.storage.store._VALID_ID: ids become filenames, so keep them safe.
 _VALID_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
-# The full Agent schema with defaults (mirrors app.models.Agent) so a written
-# file looks exactly like one produced by the API's agent.model_dump().
+# An MCP tool lives on an external server the app discovers at runtime, so
+# there is nothing on disk to check a grant against — only its shape.
+_VALID_MCP = re.compile(r"^mcp:[^/\s:]+/(\*|[^/\s]+)$")
+
+# The full Agent schema with defaults (mirrors app.models.Agent, same field
+# order) so a written file looks exactly like one produced by the API's
+# agent.model_dump(). schedule_others is defaulted here but deliberately NOT
+# exposed in tool.json: it is the one escalation flag in the model — it grants
+# power over OTHER agents — and an agent writing agents must not be able to
+# hand it out. Set it from the UI.
 _AGENT_DEFAULTS = {
     "id": "",
     "name": "",
@@ -32,9 +47,12 @@ _AGENT_DEFAULTS = {
     "temperature": None,
     "response_temperature": None,
     "enabled": True,
+    "callable": True,
+    "callable_agents": ["*"],
     "memory_enabled": False,
     "memory_threshold": 4000,
     "live": False,
+    "schedule_others": False,
     "autonomous": None,
 }
 
@@ -62,11 +80,130 @@ def slugify(text: str) -> str:
     return re.sub(r"^-|-$", "", re.sub(r"[^a-z0-9]+", "-", (text or "").lower()))
 
 
-def available_tools() -> list[str]:
-    d = tools_dir()
-    if not d.is_dir():
-        return []
-    return sorted(e.name for e in d.iterdir() if e.is_dir() and (e / "tool.json").exists())
+def bundled_dir() -> Path | None:
+    """The app's read-only native catalog (server/tools). Located through
+    MYAGENT_APP_DIR (exported by the registry to every tool subprocess); when
+    absent, fall back to this script's own location, which IS the bundled
+    catalog unless the user has an override copy of manage_agents."""
+    app_dir = os.environ.get("MYAGENT_APP_DIR")
+    root = Path(app_dir) / "tools" if app_dir else Path(__file__).resolve().parent.parent
+    try:
+        if not root.is_dir() or root.resolve() == tools_dir().resolve():
+            return None
+    except OSError:
+        return None
+    return root
+
+
+def _walk_layer(root: Path | None) -> dict:
+    """One layer's tools as id -> (folder, category). A subfolder WITHOUT a
+    tool.json is a group (category); its subfolders are tools, one level deep.
+    Flat tools first, so on a duplicate id within the layer the flat copy
+    wins — same precedence as the server's registry."""
+    out = {}
+    if root is None or not root.is_dir():
+        return out
+    entries = sorted(e for e in root.iterdir() if e.is_dir())
+    for e in entries:
+        if (e / "tool.json").exists():
+            out.setdefault(e.name, (e, None))
+    for e in entries:
+        if (e / "tool.json").exists():
+            continue
+        for sub in sorted(e.iterdir()):
+            if sub.is_dir() and (sub / "tool.json").exists():
+                out.setdefault(sub.name, (sub, e.name))
+    return out
+
+
+def catalogue() -> dict:
+    """Every visible tool: the bundled catalog overlaid by the user dir.
+    id -> dict(path=resolved folder (user copy wins), category (the bundled
+    layout owns it for native tools), origin='native'|'custom',
+    has_override=bool, native_path, user_path)."""
+    native = _walk_layer(bundled_dir())
+    user = _walk_layer(tools_dir())
+    out = {}
+    for tid in set(native) | set(user):
+        u, ucat = user.get(tid, (None, None))
+        n, ncat = native.get(tid, (None, None))
+        out[tid] = {
+            "path": u if u is not None else n,
+            "category": ncat if n is not None else ucat,
+            "origin": "native" if n is not None else "custom",
+            "has_override": u is not None and n is not None,
+            "native_path": n,
+            "user_path": u,
+        }
+    return out
+
+
+def parse_category_wildcard(entry: str) -> str | None:
+    """``<category>/*`` -> category name, else None.
+
+    Mirrors ToolRegistry.parse_category_wildcard: the agent file this tool
+    writes is read back by that registry, so the two must agree on what
+    ``<group>/*`` means. Category names share the tool-id charset (no ``:``),
+    so this can never swallow an ``mcp:<server>/*`` entry."""
+    if entry.endswith("/*"):
+        cat = entry[:-2]
+        if cat and "/" not in cat and ":" not in cat and ".." not in cat:
+            return cat
+    return None
+
+
+def available_tools() -> tuple[list[str], dict]:
+    """Every tool id an agent may reference, plus group -> its tool ids.
+
+    BOTH LAYERS and BOTH LEVELS. Scanning only the top level of the user tools
+    dir — what this did before — made every bundled tool 'unknown', so on a
+    normal install (where that dir holds only the user's own tools, or nothing
+    at all) agent-manager could not grant a single tool."""
+    cat = catalogue()
+    groups: dict[str, list[str]] = {}
+    for tool_id, info in cat.items():
+        if info["category"]:
+            groups.setdefault(info["category"], []).append(tool_id)
+    return sorted(cat), {g: sorted(v) for g, v in sorted(groups.items())}
+
+
+def render_catalogue(ids: list[str], groups: dict) -> str:
+    """The grantable ids, grouped. The model reads this right before retrying,
+    so it has to teach the wildcard as well as list the names."""
+    grouped = {t for v in groups.values() for t in v}
+    lines = []
+    flat = [t for t in ids if t not in grouped]
+    if flat:
+        lines.append(f"  (top level) {', '.join(flat)}")
+    for g, members in groups.items():
+        lines.append(f"  {g}/* : {', '.join(members)}")
+    lines.append("  A whole group can be granted at once as '<group>/*'.")
+    return "\n".join(lines)
+
+
+def check_tools(requested: list) -> None:
+    ids, groups = available_tools()
+    known, unknown = set(ids), []
+    for entry in requested:
+        if not isinstance(entry, str) or not entry.strip():
+            fail("'tools' must be a list of tool ids (strings).")
+        entry = entry.strip()
+        if entry.startswith("mcp:"):
+            if not _VALID_MCP.match(entry):
+                fail(f"Invalid MCP entry {entry!r}. Use 'mcp:<server>/<tool>' "
+                     f"or 'mcp:<server>/*' for a whole server.")
+            continue
+        cat = parse_category_wildcard(entry)
+        if cat is not None:
+            if cat not in groups:
+                fail(f"Unknown tool group {entry!r}. Groups: "
+                     f"{', '.join(f'{g}/*' for g in groups) or '(none)'}")
+            continue
+        if entry not in known:
+            unknown.append(entry)
+    if unknown:
+        fail(f"Unknown tool(s): {', '.join(unknown)}. Available tools:\n"
+             + render_catalogue(ids, groups))
 
 
 def available_models() -> list[str]:
@@ -100,6 +237,10 @@ def do_list() -> None:
                          + (f"\n  {desc}" if desc else ""))
     print(f"OK: {len(lines)} agent(s)")
     print("\n".join(lines))
+    ids, groups = available_tools()
+    if ids:
+        print("Tools that can be granted:")
+        print(render_catalogue(ids, groups))
 
 
 def read_agent(path: Path) -> dict | None:
@@ -119,13 +260,9 @@ def do_save(args: dict) -> None:
 
     # Validate requested tools against the ones actually installed.
     if "tools" in args and args["tools"] is not None:
-        requested = args["tools"]
-        if not isinstance(requested, list):
-            fail("'tools' must be a list of tool folder names.")
-        avail = available_tools()
-        unknown = [t for t in requested if t not in avail]
-        if unknown:
-            fail(f"Unknown tool(s): {', '.join(unknown)}. Available tools: {', '.join(avail) or '(none)'}")
+        if not isinstance(args["tools"], list):
+            fail("'tools' must be a list of tool ids.")
+        check_tools(args["tools"])
 
     # Validate model_id when explicitly given (skip the 'default' sentinel).
     model_id = args.get("model_id")
@@ -142,7 +279,7 @@ def do_save(args: dict) -> None:
     copy_from = (args.get("copy_from") or "").strip()
     if existed:
         # Updating an existing agent: start from its current config.
-        agent = read_agent(path) or dict(_AGENT_DEFAULTS)
+        agent = read_agent(path) or copy.deepcopy(_AGENT_DEFAULTS)
     elif copy_from:
         # Cloning: start from the source agent's config, then apply overrides.
         base = read_agent(dst / f"{copy_from}.json")
@@ -151,7 +288,7 @@ def do_save(args: dict) -> None:
             fail(f"copy_from agent not found: {copy_from!r}. Available agents: {', '.join(ids) or '(none)'}")
         agent = base
     else:
-        agent = dict(_AGENT_DEFAULTS)
+        agent = copy.deepcopy(_AGENT_DEFAULTS)
 
     # Backfill any missing schema fields (older files may lack newer keys).
     for k, v in _AGENT_DEFAULTS.items():
@@ -173,6 +310,16 @@ def do_save(args: dict) -> None:
         agent["autonomous"] = v
     if "tools" in args and args["tools"] is not None:
         agent["tools"] = list(args["tools"])
+    if "callable" in args and args["callable"] is not None:
+        if not isinstance(args["callable"], bool):
+            fail("'callable' must be true or false.")
+        agent["callable"] = args["callable"]
+    if "callable_agents" in args and args["callable_agents"] is not None:
+        v = args["callable_agents"]
+        if not isinstance(v, list) or any(not isinstance(x, str) for x in v):
+            fail("'callable_agents' must be a list of agent ids, [\"*\"] for all, "
+                 "or [] for none.")
+        agent["callable_agents"] = list(v)
     # Tuning fields. temperature/response_temperature accept a number or null
     # (null = use the provider default). max_* must be positive integers.
     for key in ("temperature", "response_temperature"):

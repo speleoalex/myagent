@@ -25,7 +25,18 @@
         "items": {
           "type": "string"
         },
-        "description": "Tool folder names the agent may use (e.g. 'web_search', 'file_write'). An unknown name comes back with the valid list."
+        "description": "Tool ids the agent may use (e.g. 'web_search', 'file_write'). A whole group at once as '<group>/*' (e.g. 'file_management/*'), an MCP server as 'mcp:<server>/*'. action='list' prints every valid id; an unknown one comes back with the full list."
+      },
+      "callable": {
+        "type": "boolean",
+        "description": "Whether other agents may delegate to this one (default true). false = only a human can select it in the chat."
+      },
+      "callable_agents": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Which agents this one may delegate to via call_agent: ['*'] = any (default), [] = none, or an explicit list of agent ids. Only matters if the agent is granted call_agent."
       },
       "id": {
         "type": "string",
