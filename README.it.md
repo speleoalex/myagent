@@ -155,6 +155,31 @@ dei problemi: **[docs/INSTALL.md](docs/INSTALL.md)**.
 Modello di minaccia, dove stanno i segreti e come esporlo in sicurezza:
 **[docs/SECURITY.md](docs/SECURITY.md)**.
 
+## A cosa serve, e a cosa non serve
+
+MyAgent è un **assistente personale generalista**: cerca nei documenti che
+possiedi, esegue tool sulla tua macchina, parla con i dispositivi della tua rete
+e risponde in linguaggio naturale. Questa è la sua destinazione d'uso, e tutto
+il resto ne discende.
+
+Risponde **a partire da materiale di riferimento, come strumento di
+consultazione**. Quando la rete non c'è e consulti gli archivi di primo
+soccorso, medicina, riparazione o agricoltura, MyAgent fa quello che fa uno
+scaffale di libri: trova la pagina e la cita, con la sua fonte. **Non** è un
+dispositivo medico e non fornisce consulenza medica, legale o finanziaria: un
+modello linguistico può sbagliare con grande sicurezza, e nulla di ciò che
+produce è un parere professionale né lo sostituisce.
+
+Non è nemmeno fatto per decidere sulle persone. Selezionare candidati,
+valutare il merito creditizio, classificare studenti, fare triage di pazienti,
+smistare i soccorsi: tutto **fuori dalla destinazione d'uso**. Sono usi
+regolamentati (nell'UE ad alto rischio secondo l'AI Act), e configurare MyAgent
+per farlo rende *te* il fornitore di un sistema ad alto rischio, con gli
+obblighi che ne conseguono.
+
+Chi è responsabile di cosa, quali parti dell'AI Act si applicano e cosa è già
+integrato per aiutarti: **[docs/COMPLIANCE.md](docs/COMPLIANCE.md)**.
+
 ## Documentazione
 
 > La documentazione tecnica è **in inglese**. Questa pagina è l'unica tradotta.
@@ -167,6 +192,8 @@ Modello di minaccia, dove stanno i segreti e come esporlo in sicurezza:
   `~/myagent/`, cosa salvare nei backup
 - [Sicurezza](docs/SECURITY.md) — modello di minaccia, chiave API, trasporto,
   segreti
+- [Responsabilità e AI Act europeo](docs/COMPLIANCE.md) — destinazione d'uso,
+  chi è fornitore e chi utilizzatore, trasparenza, cosa è già integrato
 
 ### Usarlo
 

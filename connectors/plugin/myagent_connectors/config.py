@@ -28,6 +28,9 @@ STATE_DIR = Path(
 BINDINGS_DIR = STATE_DIR / "bindings"
 GRANTS_DIR = STATE_DIR / "grants"  # password-mode authorized user ids per binding
 CONTACTS_DIR = STATE_DIR / "contacts"  # address book (name + messaging ids)
+# Chats already told the replies come from an AI (see Binding.disclose_ai).
+# State, not config: it records what has been said, not what should be.
+DISCLOSED_DIR = STATE_DIR / "disclosed"
 # Plugin-level runtime state (currently the persisted kill switch). A file, not
 # a directory: it is a single small document.
 STATE_FILE = STATE_DIR / "state.json"
@@ -53,3 +56,4 @@ def ensure_dirs() -> None:
     BINDINGS_DIR.mkdir(parents=True, exist_ok=True)
     GRANTS_DIR.mkdir(parents=True, exist_ok=True)
     CONTACTS_DIR.mkdir(parents=True, exist_ok=True)
+    DISCLOSED_DIR.mkdir(parents=True, exist_ok=True)

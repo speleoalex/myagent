@@ -160,7 +160,7 @@ const ConnectorsPage = {
             id: '', name: '', type: 'telegram', enabled: true, agent_id: '',
             token: '', url: '', access_mode: 'allowlist', allowed_ids: [],
             allowed_usernames: [], password: '', session_prefix: '',
-            welcome: '', help_text: '',
+            welcome: '', help_text: '', disclose_ai: true, ai_disclosure: '',
         };
         if (isEdit) {
             try {
@@ -285,6 +285,21 @@ const ConnectorsPage = {
                 <div class="mb-3">
                     <label class="form-label" for="f-help">${i18n('connectors.help')}</label>
                     <textarea class="form-control" id="f-help" rows="2">${App.esc(b.help_text)}</textarea>
+                </div>
+
+                <div class="mb-3" id="block-disclosure">
+                    <div class="form-check">
+                        <input class="form-check-input" type="checkbox" id="f-disclose"
+                               ${b.disclose_ai ? 'checked' : ''}>
+                        <label class="form-check-label" for="f-disclose">
+                            ${i18n('connectors.discloseAi')}
+                        </label>
+                    </div>
+                    <div class="form-text mb-2">${i18n('connectors.discloseAiHint')}</div>
+                    <textarea class="form-control" id="f-ai-disclosure" rows="2"
+                              placeholder="${App.escAttr(i18n('connectors.aiDisclosurePlaceholder'))}"
+                              >${App.esc(b.ai_disclosure)}</textarea>
+                    <div class="form-text">${i18n('connectors.aiDisclosureHint')}</div>
                 </div>
 
                 <div class="form-check mb-4">
@@ -546,6 +561,11 @@ const ConnectorsPage = {
         const mode = document.getElementById('f-access').value;
         document.getElementById('block-access').classList.toggle('d-none', device);
         document.getElementById('block-welcome').classList.toggle('d-none', device);
+        // Same reason as the welcome message: a device connector answers through
+        // its own ask() path and never runs process_message, so the disclosure
+        // would never fire. It is also the case where the Act's "obvious from
+        // the context" exception applies — the owner installed the speaker.
+        document.getElementById('block-disclosure').classList.toggle('d-none', device);
         document.getElementById('block-allowed').classList.toggle('d-none', device || mode !== 'allowlist');
         document.getElementById('block-password').classList.toggle('d-none', device || mode !== 'password');
     },
@@ -647,6 +667,8 @@ const ConnectorsPage = {
             session_prefix: val('f-prefix'),
             welcome: document.getElementById('f-welcome').value,
             help_text: document.getElementById('f-help').value,
+            disclose_ai: document.getElementById('f-disclose').checked,
+            ai_disclosure: document.getElementById('f-ai-disclosure').value,
         };
     },
 

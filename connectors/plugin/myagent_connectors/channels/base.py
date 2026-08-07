@@ -14,13 +14,24 @@ import re
 
 from app import config as app_config
 
+from myagent_connectors import config
 from myagent_connectors.models import Binding, _as_handle
 from myagent_connectors.core import CoreClient
-from myagent_connectors.storage import GrantStore
+from myagent_connectors.storage import DisclosureStore, GrantStore
 
 log = logging.getLogger("connectors.channel")
 
 _UNSAFE = re.compile(r"[^A-Za-z0-9._-]")
+
+# Sent once per chat when Binding.disclose_ai is on (see the field's comment for
+# why it exists). Deliberately three short lines: it lands before the answer the
+# person is waiting for, so anything longer gets scrolled past, which is the one
+# outcome that makes it worthless. The second line is not decoration — "it can
+# be wrong" is what turns a label into something the reader can act on.
+DEFAULT_AI_DISCLOSURE = (
+    "🤖 Heads up: you're chatting with an AI assistant, not a person.\n"
+    "It can be wrong or incomplete — double-check anything that matters."
+)
 
 # Files delivered per reply (resource channel): a runaway tool must not turn
 # one Telegram answer into an album, and each send is a full upload.
@@ -100,6 +111,16 @@ class BaseConnector:
         # requests (and hammering a slow local model) by firing many messages
         # before the previous answer is ready.
         self._busy: set = set()
+        # Built here rather than injected like ``grants``: nothing outside this
+        # class reads it, and create_connector's signature is the one every
+        # channel has to absorb — the registry promises that adding a channel
+        # needs no changes elsewhere.
+        self._disclosed = DisclosureStore(config.DISCLOSED_DIR)
+        # Mirror of the persisted set. If the disk copy cannot be written, this
+        # still stops the notice from repeating on every single message until
+        # the next restart — a disclosure that spams is one the operator turns
+        # off, and then it protects nobody.
+        self._disclosed_here: set = set()
 
     def session_id_for(self, chat_id) -> str:
         """The myagent session key this chat maps to.
@@ -197,14 +218,62 @@ class BaseConnector:
             return False, "🔒 This bot is protected. Send: /start <password>"
         return False, "⛔ Access is not configured."
 
+    # ---------------------------------------------------------- AI disclosure
+    async def _ensure_disclosed(self, chat_id) -> None:
+        """Tell this chat once that it is talking to an AI (EU AI Act art. 50).
+
+        Its own message rather than a prefix on the first answer: the Act asks
+        for a "clear and distinguishable" notice, and a line glued to the top of
+        a long reply is neither. It also keeps the disclosure out of what the
+        agent said, which is the text the operator may forward or quote.
+
+        Sent from HERE — the moment the sender is known to be authorized — and
+        not from the welcome/help texts, because those only fire when someone
+        types ``/start`` or ``/help``. In ``open`` and ``allowlist`` mode a
+        person can simply write a question and get an answer, and that path used
+        to reach the model without ever saying what was on the other end.
+
+        Best-effort by construction: a chat that cannot be marked is told again
+        later, and a transport that cannot deliver the notice must not swallow
+        the question. Never let this raise into the message path.
+        """
+        if not self.binding.disclose_ai:
+            return
+        chat_key = _as_handle(chat_id)
+        if chat_key in self._disclosed_here:
+            return
+        try:
+            already = chat_key in self._disclosed.get(self.binding.id)
+        except Exception as e:  # unreadable store: better to repeat than to skip
+            log.warning("[%s] disclosure state unreadable: %s", self.binding.id, e)
+            already = False
+        if already:
+            self._disclosed_here.add(chat_key)
+            return
+        try:
+            await self.send(chat_id, self.binding.ai_disclosure or DEFAULT_AI_DISCLOSURE)
+        except Exception as e:
+            # Not marked as disclosed: the next message tries again.
+            log.warning("[%s] could not send AI disclosure: %s", self.binding.id, e)
+            return
+        self._disclosed_here.add(chat_key)
+        try:
+            self._disclosed.add(self.binding.id, chat_key)
+        except Exception as e:
+            log.warning("[%s] could not persist disclosure state: %s", self.binding.id, e)
+
     # ------------------------------------------------------- command handling
     async def _handle_command(self, chat_id, text: str) -> str | None:
         """Handle built-in slash commands. Returns a reply string if the message
         was a command (and thus fully handled), else None."""
         cmd = text.strip().split()[0].lower() if text.strip() else ""
         if cmd == "/help":
+            # Says "AI assistant", not "assistant": this is the one text a
+            # person reads when they explicitly ask what they are talking to,
+            # and the old wording answered that question wrongly.
             return self.binding.help_text or (
-                "I'm an assistant. Send me a message.\n"
+                "I'm an AI assistant — replies are generated by a language "
+                "model and can be wrong.\n"
                 "Commands: /reset to clear the conversation."
             )
         if cmd == "/reset":
@@ -250,6 +319,13 @@ class BaseConnector:
             if note:
                 await self.send(chat_id, note)
             return
+
+        # First thing an authorized sender hears from us, on every path into the
+        # agent: commands, greeting and plain questions all pass through here.
+        # A DENIED sender is deliberately above this line — they never reach the
+        # model, so there is no AI interaction to disclose.
+        await self._ensure_disclosed(chat_id)
+
         if note:  # e.g. password just accepted
             await self.send(chat_id, note)
             # A bare "/start <pw>" carries no real question — stop here.

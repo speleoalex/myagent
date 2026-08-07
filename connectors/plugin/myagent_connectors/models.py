@@ -74,6 +74,25 @@ class Binding(BaseModel):
     welcome: str = ""
     help_text: str = ""
 
+    # Tell the person they are talking to an AI, once per chat, before the first
+    # answer. Defaults ON because the requirement is on the side of disclosing:
+    # EU AI Act art. 50(1) asks that a natural person interacting with an AI
+    # system be informed of it unless that is obvious from the context, and
+    # art. 50(5) wants it no later than the first interaction. A messaging bot
+    # is exactly the case where it is NOT obvious — the account is marked "bot",
+    # which a scripted menu would be too.
+    #
+    # It stays a switch, not a hard rule, because the honest disclosure may
+    # already live somewhere this code cannot see (the bot's profile
+    # description, a sign next to a kiosk) and because MyAgent runs outside the
+    # EU as well. Turning it off is the operator's call, and their
+    # responsibility; the UI says so.
+    disclose_ai: bool = True
+    # Custom wording; empty means the built-in text. The built-ins on this path
+    # are English-only, so this doubles as the way to disclose in the language
+    # the bot actually speaks.
+    ai_disclosure: str = ""
+
     @field_validator("id")
     @classmethod
     def validate_id(cls, v: str) -> str:

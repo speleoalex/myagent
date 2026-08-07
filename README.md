@@ -148,6 +148,29 @@ troubleshooting: **[docs/INSTALL.md](docs/INSTALL.md)**.
 Threat model, where the secrets live, and how to expose it safely:
 **[docs/SECURITY.md](docs/SECURITY.md)**.
 
+## What it is for, and what it is not
+
+MyAgent is a **general-purpose personal assistant**: it searches documents you
+own, runs tools on your machine, talks to devices on your network, and answers
+in natural language. That is its intended purpose, and the rest follows from it.
+
+It answers **from reference material, as a reference tool**. When the network is
+gone and you consult the first-aid, medicine, repair or agriculture archives,
+MyAgent does what a shelf of books does — find the page and quote it, with its
+source. It is **not** a medical device, and it offers no medical, legal or
+financial advice: a language model can be confidently wrong, and nothing it
+produces is a professional opinion or a substitute for one.
+
+It is also not built to decide things about people. Screening job applicants,
+scoring creditworthiness, ranking students, triaging patients, dispatching
+emergency services — all **outside its intended purpose**. Those uses are
+regulated (in the EU, high-risk under the AI Act), and configuring MyAgent to
+perform one makes *you* the provider of a high-risk system, with the obligations
+that come with it.
+
+Who is responsible for what, which parts of the EU AI Act apply, and what is
+already built in to help: **[docs/COMPLIANCE.md](docs/COMPLIANCE.md)**.
+
 ## Documentation
 
 ### Getting it running
@@ -157,6 +180,8 @@ Threat model, where the secrets live, and how to expose it safely:
 - [Configuration](docs/CONFIGURATION.md) — environment variables, the
   `~/myagent/` layout, what to back up
 - [Security](docs/SECURITY.md) — threat model, API key, transport, secrets
+- [Responsibility and the EU AI Act](docs/COMPLIANCE.md) — intended purpose,
+  who counts as provider or deployer, transparency, what is built in
 
 ### Using it
 
