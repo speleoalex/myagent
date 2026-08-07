@@ -1,4 +1,4 @@
-# MyAgent
+# Open MyAgent
 
 ***English** · [Italiano](README.it.md)*
 
@@ -30,6 +30,7 @@ one component:
                │
         Your computer
 ```
+
 
 No account, no subscription, no telemetry, no vendor lock-in. Point it at a
 remote API if you prefer — that's a choice, not a dependency.
