@@ -292,17 +292,22 @@ const ChatPage = {
             const msgDiv = this.createMessageDiv('assistant');
             msgDiv._md = text || '';  // raw markdown, for the copy / source view
             this.setReasoning(msgDiv, reasoning || '', false);
+            // Same .msg-flow anatomy as the live bubble (one tool group + one
+            // text segment: the stored turn has no finer chronology).
+            const flow = document.createElement('div');
+            flow.className = 'msg-flow';
+            msgDiv.appendChild(flow);
             if (pendingTools.length) {
                 const tc = document.createElement('div');
                 tc.className = 'tool-calls';
                 // Expandable tool calls, with nested sub-agent flows (recursive).
                 for (const t of pendingTools) this.renderToolCall(tc, t);
-                msgDiv.appendChild(tc);
+                flow.appendChild(tc);
             }
             const c = document.createElement('div');
             c.className = 'msg-content';
             c.innerHTML = this.renderMarkdown(text || '');
-            msgDiv.appendChild(c);
+            flow.appendChild(c);
             // Persisted tool messages carry the same resources/sub_trace shape
             // as trace steps, so a reloaded session shows the same strip.
             this.renderResources(msgDiv, this.collectResources(pendingTools));
@@ -551,22 +556,24 @@ const ChatPage = {
         }
     },
 
-    // Build the streaming assistant bubble (tool area + content + thinking dots).
+    // Build the streaming assistant bubble. The body is a .msg-flow: an ordered
+    // sequence of .msg-content text segments and .tool-calls groups appended in
+    // arrival order, so a multi-iteration turn (text → tools → text → …) reads
+    // top-to-bottom in real chronology. Segments and groups are created lazily
+    // by _consumeStream; session reload builds the same anatomy (one group +
+    // one segment — the stored turn has no finer order).
     _newAssistantBubble() {
         const msgDiv = this.createMessageDiv('assistant');
-        const toolsInline = document.createElement('div');
-        toolsInline.className = 'tool-calls';
-        msgDiv.appendChild(toolsInline);
-        const contentDiv = document.createElement('div');
-        contentDiv.className = 'msg-content';
-        msgDiv.appendChild(contentDiv);
+        const flow = document.createElement('div');
+        flow.className = 'msg-flow';
+        msgDiv.appendChild(flow);
         const thinking = document.createElement('div');
         thinking.className = 'typing-indicator';
         thinking.innerHTML = '<span></span><span></span><span></span>';
-        contentDiv.appendChild(thinking);
+        flow.appendChild(thinking);
         const c = document.getElementById('chat-messages');
         if (c) c.scrollTop = c.scrollHeight;
-        return { msgDiv, contentDiv, toolsInline, thinking };
+        return { msgDiv, flow, thinking };
     },
 
     // A thinking model's chain-of-thought, collapsed above the tool calls and
@@ -600,14 +607,45 @@ const ChatPage = {
     // If the bubble leaves the DOM (user navigated away) it stops consuming but
     // the server keeps generating, so we can re-attach later.
     async _consumeStream(resp, ui) {
-        const { msgDiv, contentDiv, toolsInline, thinking } = ui;
+        const { msgDiv, flow, thinking } = ui;
         const clearThinking = () => { if (thinking && thinking.parentNode) thinking.remove(); };
         const mc = document.getElementById('chat-messages');
         const scroll = () => { if (mc) mc.scrollTop = mc.scrollHeight; };
         const reader = resp.body.getReader();
         const decoder = new TextDecoder();
-        let buffer = '', streamedText = '', errored = false, stopped = false, idle = false;
+        let buffer = '', errored = false, stopped = false, idle = false;
         let reasoningText = '', reasoningLive = false;
+        // Interleaved flow state: tokens go into the current text segment, tool
+        // entries into the current .tool-calls group — opening one closes the
+        // other, so the bubble preserves the turn's real text/tool chronology.
+        // A segment never spans two LLM calls: an iteration only continues when
+        // it made tool calls, and those open a group in between.
+        let curSeg = null;      // {div, text} — open text segment
+        let curTools = null;    // group open for NEW tool entries
+        let lastTools = null;   // latest group: where tool_result / agent_event land
+        const textSegs = [];
+        const allText = () => textSegs.map(s => s.text).filter(Boolean).join('\n\n');
+        const textSeg = () => {
+            if (!curSeg) {
+                const div = document.createElement('div');
+                div.className = 'msg-content';
+                flow.appendChild(div);
+                curSeg = { div, text: '' };
+                textSegs.push(curSeg);
+                curTools = null;  // next tool_start opens a group BELOW this text
+            }
+            return curSeg;
+        };
+        const toolGroup = () => {
+            if (!curTools) {
+                curTools = document.createElement('div');
+                curTools.className = 'tool-calls';
+                flow.appendChild(curTools);
+                lastTools = curTools;
+                curSeg = null;  // next token opens a segment BELOW this group
+            }
+            return curTools;
+        };
         // Live sub-agent containers keyed by delegation path ("A" or "A/B").
         // Stream-local on purpose: a re-attach replays the whole event buffer,
         // so the nested blocks rebuild identically from the events alone.
@@ -624,7 +662,7 @@ const ChatPage = {
         while (true) {
             const { done, value } = await reader.read();
             if (done) break;
-            if (!document.body.contains(contentDiv)) { this._abortClient(); return; }  // navigated away
+            if (!document.body.contains(flow)) { this._abortClient(); return; }  // navigated away
             buffer += decoder.decode(value, { stream: true });
             const lines = buffer.split('\n');
             buffer = lines.pop() || '';
@@ -633,14 +671,16 @@ const ChatPage = {
                 let event;
                 try { event = JSON.parse(line.slice(6)); } catch (e) { continue; }
                 switch (event.type) {
-                    case 'token':
+                    case 'token': {
                         clearThinking();
                         settleReasoning();
-                        streamedText += event.data;
-                        msgDiv._md = streamedText;
-                        contentDiv.innerHTML = this.renderMarkdown(streamedText);
+                        const seg = textSeg();
+                        seg.text += event.data;
+                        msgDiv._md = allText();
+                        seg.div.innerHTML = this.renderMarkdown(seg.text);
                         scroll();
                         break;
+                    }
                     case 'reasoning':
                         // Collapsed while it streams: the typing dots already
                         // say "working", and an auto-expanding block would push
@@ -650,27 +690,40 @@ const ChatPage = {
                         if (this.setReasoning(msgDiv, reasoningText, true)) scroll();
                         break;
                     case 'clear_tokens':
-                        streamedText = '';
-                        msgDiv._md = '';
-                        contentDiv.innerHTML = '';
+                        // Reclassify: what streamed as answer was thought. The
+                        // splitter is per LLM call, and a segment never spans
+                        // calls — dropping the open segment drops exactly the
+                        // reclassified tokens (earlier segments are earlier
+                        // calls' text and stay).
+                        if (curSeg) {
+                            curSeg.div.remove();
+                            textSegs.pop();       // curSeg is always the newest
+                            curSeg = null;
+                            curTools = lastTools; // reuse the adjacent group, not a twin
+                        }
+                        msgDiv._md = allText();
                         break;
                     case 'tool_start':
                         clearThinking();
-                        this.addLiveTool(toolsInline, event.data);
+                        this.addLiveTool(toolGroup(), event.data);
                         scroll();
                         break;
                     case 'agent_event':
                         // A delegated sub-agent's live activity, nested inside
-                        // the running call_agent entry. Replaced by the
-                        // authoritative sub_trace render on 'done'.
+                        // the running call_agent entry (in the latest group).
+                        // Replaced by the authoritative sub_trace on 'done'.
                         clearThinking();
-                        this.handleAgentEvent(toolsInline, subAgents, event.data, msgDiv);
+                        this.handleAgentEvent(lastTools, subAgents, event.data, msgDiv);
                         scroll();
                         break;
                     case 'tool_result':
-                        this.completeLiveTool(toolsInline, event.data);
+                        this.completeLiveTool(lastTools || toolGroup(), event.data);
+                        // A settled delegation is over: forget its live paths,
+                        // or a LATER call_agent to the same agent would stream
+                        // into this finished block instead of its own.
+                        if (event.data && event.data.tool === 'call_agent') subAgents.clear();
                         // Resources render the moment the tool finishes, before
-                        // the answer streams; the 'done' rebuild below replaces
+                        // the answer streams; the 'done' settle below replaces
                         // this with the authoritative list from the trace.
                         if (event.data && event.data.resources) {
                             msgDiv._resources = this.collectResources(
@@ -683,21 +736,24 @@ const ChatPage = {
                         clearThinking();
                         settleReasoning();
                         if (errored) break;
-                        if (!streamedText && event.data && event.data.reply) {
-                            msgDiv._md = event.data.reply;
-                            contentDiv.innerHTML = this.renderMarkdown(event.data.reply);
+                        if (!allText() && event.data && event.data.reply) {
+                            const seg = textSeg();
+                            seg.text = event.data.reply;
+                            msgDiv._md = allText();
+                            seg.div.innerHTML = this.renderMarkdown(seg.text);
                         }
                         const trace = event.data && event.data.trace;
                         if (trace && trace.steps && trace.steps.length) {
-                            toolsInline.innerHTML = '';
-                            this.renderTraceSteps(toolsInline, trace);
-                            // Authoritative resource strip: same rebuild-from-
-                            // trace rule as the tool area, and the only source
-                            // that sees sub-agent resources (via sub_trace).
+                            // Authoritative settle IN PLACE: live entries are
+                            // upgraded to the full trace render, the interleaved
+                            // layout streaming built is kept as-is.
+                            this._settleFlowTools(flow, trace.steps);
+                            // Authoritative resource strip: same settle-from-
+                            // trace rule as the tool entries, and the only
+                            // source that sees sub-agent resources (sub_trace).
                             msgDiv._resources = this.collectResources(trace.steps);
                             this.renderResources(msgDiv, msgDiv._resources);
                         }
-                        if (!toolsInline.children.length) toolsInline.remove();
                         msgDiv.appendChild(this._timeEl());
                         break;
                     }
@@ -705,16 +761,15 @@ const ChatPage = {
                         clearThinking();
                         settleReasoning();
                         stopped = true;
-                        contentDiv.insertAdjacentHTML('beforeend',
+                        textSeg().div.insertAdjacentHTML('beforeend',
                             `<div class="text-secondary small fst-italic mt-1">${i18n('chat.stopped')}</div>`);
-                        if (!toolsInline.children.length) toolsInline.remove();
                         msgDiv.appendChild(this._timeEl());
                         break;
                     case 'error':
                         errored = true;
                         clearThinking();
                         settleReasoning();
-                        if (!streamedText && !toolsInline.children.length) msgDiv.remove();
+                        if (!allText() && !flow.querySelector('.tool-calls')) msgDiv.remove();
                         this.appendMessage('error', i18n('chat.errorPrefix', { msg: event.data }));
                         break;
                     case 'notice':
@@ -732,8 +787,11 @@ const ChatPage = {
         clearThinking();
         if (idle) {
             msgDiv.remove();  // attach found no live run
-        } else if (!errored && !stopped && !streamedText && !contentDiv.innerHTML) {
-            contentDiv.innerHTML = `<em class="text-secondary">${i18n('chat.noResponse')}</em>`;
+        } else if (!errored && !stopped && !allText()) {
+            const seg = textSeg();
+            if (!seg.div.innerHTML) {
+                seg.div.innerHTML = `<em class="text-secondary">${i18n('chat.noResponse')}</em>`;
+            }
         }
     },
 
@@ -911,7 +969,7 @@ const ChatPage = {
             add('clipboard', i18n('chat.copyMarkdown'), (btn) => this.copyMarkdown(div, btn));
             // The bubble may already be showing its source: keep the toggle's
             // icon in sync, since the bar is rebuilt on every render.
-            const src = div.querySelector(':scope > .msg-content')?.dataset.source === '1';
+            const src = !!div.querySelector(':scope > .msg-flow > pre.md-source');
             add(src ? 'eye' : 'markdown',
                 i18n(src ? 'chat.viewRendered' : 'chat.viewMarkdown'),
                 (btn) => this.toggleSource(div, btn));
@@ -926,8 +984,9 @@ const ChatPage = {
     // bubbles that predate _md (or were built by another path).
     _markdownOf(div) {
         if (typeof div._md === 'string') return div._md;
-        const c = div.querySelector(':scope > .msg-content');
-        return c ? c.innerText : '';
+        const segs = div.querySelectorAll(
+            ':scope > .msg-flow > .msg-content, :scope > .msg-content');
+        return Array.from(segs).map(s => s.innerText).join('\n\n');
     },
 
     async copyMarkdown(div, btn) {
@@ -968,23 +1027,24 @@ const ChatPage = {
     },
 
     // Swap an assistant bubble between the rendered answer and its raw markdown
-    // source (readable and selectable as plain text).
+    // source (readable and selectable as plain text). The text segments hide
+    // and ONE source block appears; tool blocks stay visible, as before.
     toggleSource(div, btn) {
-        const c = div.querySelector(':scope > .msg-content');
-        if (!c) return;
+        const flow = div.querySelector(':scope > .msg-flow');
+        if (!flow) return;
         const icon = btn.querySelector('i');
-        if (c.dataset.source === '1') {
-            delete c.dataset.source;
-            c.innerHTML = this.renderMarkdown(this._markdownOf(div));
+        const pre = flow.querySelector(':scope > pre.md-source');
+        if (pre) {
+            pre.remove();
+            flow.querySelectorAll(':scope > .msg-content').forEach(s => { s.style.display = ''; });
             if (icon) icon.className = 'bi bi-markdown';
             btn.title = i18n('chat.viewMarkdown');
         } else {
-            c.dataset.source = '1';
-            const pre = document.createElement('pre');
-            pre.className = 'md-source';
-            pre.textContent = this._markdownOf(div);
-            c.innerHTML = '';
-            c.appendChild(pre);
+            const p = document.createElement('pre');
+            p.className = 'md-source';
+            p.textContent = this._markdownOf(div);
+            flow.querySelectorAll(':scope > .msg-content').forEach(s => { s.style.display = 'none'; });
+            flow.appendChild(p);
             if (icon) icon.className = 'bi bi-eye';
             btn.title = i18n('chat.viewRendered');
         }
@@ -1252,6 +1312,15 @@ const ChatPage = {
             }
             case 'tool_result':
                 this.completeLiveTool(entry.root, inner.data || {});
+                // A nested delegation settled: drop its live path keys, so a
+                // later call to the same agent gets a fresh block (same rule
+                // as the parent's subAgents.clear()).
+                if (inner.data && inner.data.tool === 'call_agent') {
+                    const prefix = path.join('/') + '/';
+                    for (const k of [...subAgents.keys()]) {
+                        if (k.startsWith(prefix)) subAgents.delete(k);
+                    }
+                }
                 // Same live resource strip as the parent's tool_result case.
                 if (inner.data && inner.data.resources) {
                     msgDiv._resources = this.collectResources([inner.data], msgDiv._resources);
@@ -1268,9 +1337,40 @@ const ChatPage = {
         }
     },
 
-    // Render the top-level steps of a trace (the connected agent — no header).
-    renderTraceSteps(container, trace) {
-        for (const step of ((trace && trace.steps) || [])) this.renderToolCall(container, step);
+    // Authoritative settle on 'done': replace each live tool entry with its
+    // trace step render (full result instead of the preview, recursive
+    // sub_trace instead of the live approximation) — IN PLACE, so the
+    // interleaved text/tool layout built during streaming survives. Steps map
+    // 1:1 in document order to live entries: the executor emits exactly one
+    // tool_start per trace step (dedup-skipped calls emit neither).
+    _settleFlowTools(flow, steps) {
+        const groups = Array.from(flow.querySelectorAll(':scope > .tool-calls'));
+        const lives = [];
+        for (const g of groups) {
+            lives.push(...g.querySelectorAll(':scope > details.tool-call'));
+        }
+        const scratch = document.createElement('div');
+        steps.forEach((step, i) => {
+            const det = this.renderToolCall(scratch, step);
+            const live = lives[i];
+            if (live) {
+                det.open = live.open;  // don't collapse what the user expanded
+                live.replaceWith(det);
+            } else {
+                // No live entry for this step (an attach that raced the event
+                // buffer): still show it, appended to the last group.
+                let g = groups[groups.length - 1];
+                if (!g) {
+                    g = document.createElement('div');
+                    g.className = 'tool-calls';
+                    flow.appendChild(g);
+                    groups.push(g);
+                }
+                g.appendChild(det);
+            }
+        });
+        // Extra live entries beyond the steps (a stopped/raced stream) are
+        // left as-is: they still show what actually ran.
     },
 
     // Render one tool call as an expandable <details>. For call_agent, recurses
@@ -1367,8 +1467,10 @@ const ChatPage = {
         if (!strip) {
             strip = document.createElement('div');
             strip.className = 'msg-resources';
-            const content = msgDiv.querySelector(':scope > .msg-content');
-            msgDiv.insertBefore(strip, content || null);
+            // Right after the flow (text before files, same rule as the
+            // connectors), before the timestamp when it exists.
+            const flow = msgDiv.querySelector(':scope > .msg-flow');
+            msgDiv.insertBefore(strip, flow ? flow.nextSibling : null);
         }
         strip.innerHTML = '';
         for (const r of list) strip.appendChild(this._resourceItem(r));
@@ -1541,6 +1643,112 @@ const ChatPage = {
         return `${(n / (1024 * 1024)).toFixed(1)} MB`;
     },
 
+    // ---- Math -----------------------------------------------------------
+    //
+    // KaTeX needs the RAW LaTeX, so math is pulled OUT of the source before
+    // App.esc() runs and put back as rendered MathML at the very end, under
+    // \x02 placeholders. The vendored KaTeX is MathML-only: no stylesheet and
+    // no font files, the browser draws the <math> it emits.
+
+    // Opening delimiter -> [closing, display mode]. Longest first: `$$` must
+    // be tried before `$`.
+    _MATH_DELIMS: [
+        ['$$', '$$', true],
+        ['\\[', '\\]', true],
+        ['\\(', '\\)', false],
+        ['$', '$', false],
+    ],
+
+    // Rewrite `text`, replacing every math span with a \x02<n>\x02 placeholder
+    // and pushing {html, display} onto `math`. Fenced blocks and code spans are
+    // copied verbatim: a `$` inside code is a dollar sign, never a delimiter.
+    _extractMath(text, math) {
+        if (typeof katex === 'undefined' || !/[$\\]/.test(text)) return text;
+        let out = '';
+        let i = 0;
+        while (i < text.length) {
+            if (text.startsWith('```', i)) {
+                const end = text.indexOf('```', i + 3);
+                const stop = end === -1 ? text.length : end + 3;
+                out += text.slice(i, stop); i = stop; continue;
+            }
+            if (text[i] === '`') {
+                const end = text.indexOf('`', i + 1);
+                const stop = end === -1 ? text.length : end + 1;
+                out += text.slice(i, stop); i = stop; continue;
+            }
+            if (text[i] === '\\' && text[i + 1] === '$') { out += '$'; i += 2; continue; }
+            const delim = this._MATH_DELIMS.find(d => text.startsWith(d[0], i));
+            if (delim) {
+                const [open, close, display] = delim;
+                const span = this._mathBody(text, i + open.length, close, display);
+                const html = span && this._renderMath(span.body, display);
+                if (html) {
+                    out += `\x02${math.push({ html, display }) - 1}\x02`;
+                    i = span.end;
+                    continue;
+                }
+            }
+            out += text[i]; i++;
+        }
+        return out;
+    },
+
+    // Locate the closing delimiter and return {body, end}, or null when this is
+    // not math after all — unterminated (which is the normal state mid-stream:
+    // it stays literal text until the closing delimiter arrives) or a stray `$`
+    // in prose.
+    _mathBody(text, from, close, display) {
+        const single = close === '$';
+        // "costa $5 e $10 euro": a `$` hugging whitespace is currency, not math.
+        if (single && /^\s|^$/.test(text[from] || '')) return null;
+        let j = from;
+        for (;;) {
+            j = text.indexOf(close, j);
+            if (j === -1) return null;
+            if (single && text[j - 1] === '\\') { j += 1; continue; }
+            break;
+        }
+        const body = text.slice(from, j);
+        if (!body.trim()) return null;
+        if (single && (/\s$/.test(body) || /\d/.test(text[j + 1] || ''))) return null;
+        // Inline math never crosses a blank line.
+        if (!display && /\n\s*\n/.test(body)) return null;
+        return { body, end: j + close.length };
+    },
+
+    // Rendered formulas are memoized: renderMarkdown re-runs on EVERY streamed
+    // token, so without this a message with ten formulas re-parses all ten of
+    // them hundreds of times over one answer. Keyed on the exact source, so a
+    // formula still growing mid-stream simply misses until it settles.
+    _mathCache: new Map(),
+    _MATH_CACHE_MAX: 300,
+
+    _renderMath(tex, display) {
+        const key = (display ? 'D' : 'I') + tex;
+        if (this._mathCache.has(key)) return this._mathCache.get(key);
+        const html = this._renderMathUncached(tex, display);
+        if (this._mathCache.size >= this._MATH_CACHE_MAX) this._mathCache.clear();
+        this._mathCache.set(key, html);
+        return html;
+    },
+
+    _renderMathUncached(tex, display) {
+        try {
+            const html = katex.renderToString(tex, {
+                output: 'mathml',     // no CSS, no fonts: the browser renders it
+                displayMode: display,
+                throwOnError: false,  // bad LaTeX shows in red, never breaks the turn
+                trust: false,         // \href / \includegraphics stay disabled
+                strict: false,
+            });
+            // Wrapped, so a long equation scrolls instead of widening the bubble.
+            return display ? `<div class="math-block">${html}</div>` : html;
+        } catch (e) {
+            return null;              // fall back to the literal source text
+        }
+    },
+
     // Inline markdown: bold, italic, strikethrough, inline code, links.
     // Operates on already HTML-escaped text.
     renderInline(s) {
@@ -1575,7 +1783,10 @@ const ChatPage = {
     // so partial markdown during token streaming still displays sensibly.
     renderMarkdown(text) {
         if (!text) return '';
-        let src = App.esc(text);
+        // Math first: it is read from the UNESCAPED source and comes back as
+        // MathML at the bottom of this function.
+        const math = [];
+        let src = App.esc(this._extractMath(text, math));
 
         // Protect fenced code blocks
         const blocks = [];
@@ -1588,6 +1799,11 @@ const ChatPage = {
         const out = [];
         const inline = (s) => this.renderInline(s);
         const isTableSep = (l) => l && l.includes('-') && /^\s*\|?[\s:|-]+\|?\s*$/.test(l);
+        // Display math standing on its own line is a block, not a paragraph.
+        const displayMath = (l) => {
+            const m = (l || '').trim().match(/^\x02(\d+)\x02$/);
+            return m && math[parseInt(m[1], 10)].display ? math[parseInt(m[1], 10)].html : null;
+        };
         const parseRow = (r) => r.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => c.trim());
         let i = 0;
 
@@ -1597,6 +1813,10 @@ const ChatPage = {
 
             // Protected code block
             if (/^\x00\d+\x00$/.test(trimmed)) { out.push(trimmed); i++; continue; }
+
+            // Display math on a line of its own
+            const dm = displayMath(line);
+            if (dm) { out.push(dm); i++; continue; }
 
             // Table: a row with pipes followed by a separator row
             if (line.includes('|') && isTableSep(lines[i + 1])) {
@@ -1654,7 +1874,7 @@ const ChatPage = {
             const para = [];
             while (i < lines.length) {
                 const l = lines[i];
-                if (l.trim() === '' || /^\x00\d+\x00$/.test(l.trim()) ||
+                if (l.trim() === '' || /^\x00\d+\x00$/.test(l.trim()) || displayMath(l) ||
                     /^(#{1,6})\s+/.test(l.trim()) || /^\s*[-*+]\s+/.test(l) ||
                     /^\s*\d+[.)]\s+/.test(l) || /^\s*&gt;\s?/.test(l) ||
                     (l.includes('|') && isTableSep(lines[i + 1]))) break;
@@ -1666,6 +1886,7 @@ const ChatPage = {
 
         let html = out.join('\n');
         html = html.replace(/\x00(\d+)\x00/g, (m, n) => blocks[parseInt(n, 10)]);
+        html = html.replace(/\x02(\d+)\x02/g, (m, n) => math[parseInt(n, 10)].html);
         return html;
     },
 };

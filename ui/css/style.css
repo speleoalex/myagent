@@ -150,6 +150,15 @@ body {
     overflow: auto;
 }
 
+/* Interleaved answer flow: .msg-content text segments and .tool-calls groups
+   appended in turn order (text → tools → text → …) inside the bubble */
+.msg-flow > .tool-calls {
+    margin: 0.4rem 0;
+}
+.msg-flow > .tool-calls:first-child {
+    margin-top: 0;
+}
+
 /* Inline expandable tool calls (rendered in the chat, nesting recursively) */
 .tool-calls {
     display: flex;
@@ -723,6 +732,32 @@ body {
 .msg-assistant table {
     display: block;
     overflow-x: auto;
+}
+
+/* Math. The vendored KaTeX emits MathML only, so there is no KaTeX stylesheet
+   to load and nothing here restyles the formula itself — the browser draws it,
+   inheriting the bubble's color. This only handles size and overflow. */
+.msg-content .katex {
+    /* Math renders in a serif face with a smaller x-height than the UI font,
+       so at 1em it reads as fine print next to the prose around it. */
+    font-size: 1.15em;
+}
+
+.msg-content .math-block {
+    /* A wide equation scrolls inside its own box instead of widening the
+       bubble; overflow-y stays hidden or the scrollbar clips tall fractions. */
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 0.15rem 0;
+    margin: 0.4rem 0;
+    text-align: center;
+}
+
+/* KaTeX ships its own inline color:#cc0000 on parse errors — readable on both
+   themes — but the source it echoes must not break the bubble's width. */
+.msg-content .katex-error {
+    white-space: pre-wrap;
+    word-break: break-word;
 }
 
 .msg-assistant p:last-child {

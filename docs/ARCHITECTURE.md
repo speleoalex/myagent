@@ -712,6 +712,16 @@ UI strings go through `i18n('key')` with dictionaries in `ui/js/i18n/en.js`
 and `it.js` (both must be kept in sync). No build step; Bootstrap is vendored
 under `ui/vendor/`.
 
+Assistant answers go through a small hand-rolled Markdown renderer in
+`chat.js`. LaTeX math (`$…$`, `$$…$$`, `\(…\)`, `\[…\]`) is rendered by KaTeX,
+vendored in `ui/vendor/katex/` — **MathML output only**, so no stylesheet and
+no font files ship with it and the browser draws the formula. Math is lifted
+out of the *unescaped* source before the Markdown pass (KaTeX needs raw LaTeX)
+and substituted back as MathML at the end; fenced blocks and code spans are
+skipped, so a `$` inside code stays a dollar sign, and an unterminated
+delimiter — the normal state mid-stream — is left as literal text. Rendered
+formulas are memoized because `renderMarkdown` re-runs on every streamed token.
+
 The UI does not have to be served by MyAgent: it is plain static HTML with
 relative asset paths, so any web server can host it, and `App.serverBase`
 (Settings → *MyAgent server*, or a one-shot `?server=` URL parameter; stored
