@@ -84,6 +84,10 @@ def _make_drive(executor, message, prior, attachments, session, session_store, l
             async for event in executor.run_stream(message, prior, attachments,
                                                    memory_context(session)):
                 et = event.get("type")
+                # agent_event (a sub-agent's live tokens/tools) is deliberately
+                # pass-through: it must reach SSE via run.emit below but never
+                # touch reply_text/tool_events — the sub-agent's activity is
+                # persisted via the trace's sub_trace, not here.
                 if et == "tool_result":
                     tool_events.append(event.get("data", {}))
                 elif et == "token":

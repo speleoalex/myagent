@@ -518,6 +518,7 @@ I18n.translations.en = {
     'chat.stopped': '⏹ Stopped',
     'chat.archivedPlaceholder': 'Archived session (read-only)',
     'chat.subAgent': 'Sub-agent: {id}',
+    'chat.subAgentLive': 'Sub-agent {id} is working...',
     'chat.pastedImage': 'Pasted image',
     'chat.fileTooLarge': 'File "{name}" too large (max 20 MB)',
     'chat.readError': 'Could not read "{name}": {error}',

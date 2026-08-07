@@ -18,6 +18,31 @@ log = logging.getLogger(__name__)
 
 MAX_AGENT_DEPTH = 5
 
+# Sub-agent events forwarded live to the parent's stream. `done` is dropped
+# (its payload is the returned reply + record_sub_trace) and `notice` never
+# fires below depth 0. `error` IS forwarded so the user sees a sub-agent fail
+# while it happens, not only in the parent's tool result.
+_FORWARDED_SUB_EVENTS = {"token", "reasoning", "clear_tokens",
+                         "tool_start", "tool_result", "error"}
+
+
+def _forward_sub_event(executor, agent_id: str, event: dict) -> None:
+    """Wrap one sub-agent event as agent_event and push it onto the parent's
+    live queue. An event that is already an agent_event (from a deeper
+    delegation) is re-rooted — its path gets this sub-agent prepended — never
+    double-wrapped, so consumers see one envelope shape at any depth."""
+    et = event.get("type")
+    if et == "agent_event":
+        data = event.get("data") or {}
+        executor.push_sub_event({"type": "agent_event", "data": {
+            "path": [agent_id] + list(data.get("path") or []),
+            "event": data.get("event"),
+        }})
+    elif et in _FORWARDED_SUB_EVENTS:
+        executor.push_sub_event({"type": "agent_event", "data": {
+            "path": [agent_id], "event": event,
+        }})
+
 
 def _resolve_attachments(executor, indices) -> list[dict]:
     """Map attachment_indices (from a call_agent tool-call) to the parent turn's
@@ -92,11 +117,17 @@ async def call_agent_handler(
             depth=depth + 1,
         )
         forwarded = _resolve_attachments(executor, attachment_indices)
-        response = await sub_executor.run(message, attachments=forwarded or None)
+        # The event_sink streams the sub-agent's activity (tokens + tools)
+        # into the parent's SSE stream WHILE it runs — the parent's tool loop
+        # drains the queue concurrently (see executor._execute_streaming).
+        response = await sub_executor.run(
+            message,
+            attachments=forwarded or None,
+            event_sink=lambda ev: _forward_sub_event(executor, agent_id, ev),
+        )
 
         # Hand the sub-agent's full trace to the parent so the whole flow is
-        # persisted recursively (consumed by the parent's call_agent step), and
-        # forward its tool activity to the parent's SSE stream.
+        # persisted recursively (consumed by the parent's call_agent step).
         executor.record_sub_trace(
             response.trace or {
                 "agent_id": agent_id,
@@ -105,7 +136,6 @@ async def call_agent_handler(
                 "steps": [],
             }
         )
-        executor.emit_sub_events(agent_id, response.tool_results)
 
         return response.reply
     except Exception as e:

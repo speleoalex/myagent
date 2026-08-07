@@ -608,6 +608,10 @@ const ChatPage = {
         const decoder = new TextDecoder();
         let buffer = '', streamedText = '', errored = false, stopped = false, idle = false;
         let reasoningText = '', reasoningLive = false;
+        // Live sub-agent containers keyed by delegation path ("A" or "A/B").
+        // Stream-local on purpose: a re-attach replays the whole event buffer,
+        // so the nested blocks rebuild identically from the events alone.
+        const subAgents = new Map();
         // Drop the "reasoning..." label once the model moves on to the answer.
         // Guarded: this runs on every token, and rewriting the whole block
         // each time would be O(reasoning) per character of the answer.
@@ -653,6 +657,14 @@ const ChatPage = {
                     case 'tool_start':
                         clearThinking();
                         this.addLiveTool(toolsInline, event.data);
+                        scroll();
+                        break;
+                    case 'agent_event':
+                        // A delegated sub-agent's live activity, nested inside
+                        // the running call_agent entry. Replaced by the
+                        // authoritative sub_trace render on 'done'.
+                        clearThinking();
+                        this.handleAgentEvent(toolsInline, subAgents, event.data, msgDiv);
                         scroll();
                         break;
                     case 'tool_result':
@@ -1086,6 +1098,15 @@ const ChatPage = {
 
     // --- Inline expandable tool calls (rendered directly in the chat) --------
 
+    // Summary label markup shared by the live entry and the settled render,
+    // so a running delegation already reads "call_agent → <agent>".
+    _toolLabel(tool, args) {
+        if (tool === 'call_agent' && args && args.agent_id) {
+            return `<i class="bi bi-diagram-3"></i> ${App.esc(tool)} <span class="tc-arrow">→</span> ${App.esc(args.agent_id)}`;
+        }
+        return `<i class="bi bi-gear-wide-connected"></i> ${App.esc(tool || 'tool')}`;
+    },
+
     // Add a live "running" tool-call entry during streaming (spinner in the
     // summary). Completed/filled in by completeLiveTool on tool_result. The
     // whole area is replaced by the authoritative recursive trace on 'done'.
@@ -1093,13 +1114,17 @@ const ChatPage = {
         const det = document.createElement('details');
         det.className = 'tool-call running';
         det.innerHTML =
-            `<summary><span class="tc-name"><i class="bi bi-gear-wide-connected"></i> ${App.esc(data.tool || 'tool')}</span>` +
+            `<summary><span class="tc-name">${this._toolLabel(data.tool, data.arguments)}</span>` +
             ` <span class="spinner-border spinner-border-sm ms-1"></span></summary>`;
         container.appendChild(det);
+        return det;
     },
 
     completeLiveTool(container, data) {
-        const running = container.querySelectorAll('details.tool-call.running');
+        // :scope > : a running sub-agent's tools live INSIDE this level's
+        // call_agent entry (.tool-call-body), so an unscoped query would close
+        // the wrong <details> when parent and sub tools are interleaved.
+        const running = container.querySelectorAll(':scope > details.tool-call.running');
         const det = running[running.length - 1];
         if (!det) {
             this.renderToolCall(container, {
@@ -1108,11 +1133,20 @@ const ChatPage = {
             return;
         }
         det.classList.remove('running');
-        const sp = det.querySelector('.spinner-border');
+        const sp = det.querySelector(':scope > summary .spinner-border');
         if (sp) sp.remove();
-        const icon = det.querySelector('.tc-name i');
+        const icon = det.querySelector(':scope > summary .tc-name i');
         if (icon) icon.className = 'bi bi-check-circle text-success';
-        const body = document.createElement('div');
+        let body = det.querySelector(':scope > .tool-call-body');
+        if (body) {
+            // call_agent whose sub-agent streamed live: its reply is already
+            // in the body (renderToolCall's sub_trace branch also omits the
+            // redundant result) — just settle the live header.
+            const live = body.querySelector(':scope > .sub-agent.sub-agent-live');
+            if (live) this._settleSubAgent(live);
+            return;
+        }
+        body = document.createElement('div');
         body.className = 'tool-call-body';
         const args = document.createElement('div');
         args.className = 'tc-args';
@@ -1123,6 +1157,115 @@ const ChatPage = {
         pre.textContent = data.result_preview || '';
         body.appendChild(pre);
         det.appendChild(body);
+    },
+
+    // --- Live sub-agent activity (agent_event envelopes) ---------------------
+    //
+    // A delegated sub-agent's tokens/tools stream as
+    // {path: [ids...], event: {inner}} while the parent's call_agent entry is
+    // still running. The live block mirrors the shape renderAgentTrace builds
+    // from sub_trace, so the authoritative 'done' rebuild looks the same.
+
+    _settleSubAgent(root) {
+        root.classList.remove('sub-agent-live');
+        const label = root.querySelector(':scope > .sub-agent-head .sa-label');
+        if (label) label.textContent = i18n('chat.subAgent', { id: root.dataset.agentId || '?' });
+    },
+
+    // Resolve (or lazily create) the live .sub-agent container for a
+    // delegation path, nesting inside the running call_agent <details> at
+    // each level (recursive on the parent path, so depth ≥ 2 just nests).
+    _liveSubContainer(toolsInline, subAgents, path) {
+        const key = path.join('/');
+        let entry = subAgents.get(key);
+        if (entry) return entry;
+        const parentScope = path.length === 1
+            ? toolsInline
+            : this._liveSubContainer(toolsInline, subAgents, path.slice(0, -1)).root;
+        const running = parentScope.querySelectorAll(':scope > details.tool-call.running');
+        const det = running[running.length - 1] || null;
+        let host = parentScope;  // fallback: append flat, degrade but never break
+        if (det) {
+            let body = det.querySelector(':scope > .tool-call-body');
+            if (!body) {
+                body = document.createElement('div');
+                body.className = 'tool-call-body';
+                det.appendChild(body);
+            }
+            host = body;
+            det.open = true;  // the whole point: show the activity while it runs
+        }
+        const id = path[path.length - 1] || '?';
+        const root = document.createElement('div');
+        root.className = 'sub-agent sub-agent-live';
+        root.dataset.agentId = id;
+        const head = document.createElement('div');
+        head.className = 'sub-agent-head';
+        head.innerHTML = `<i class="bi bi-robot"></i> <span class="sa-label"></span>`;
+        head.querySelector('.sa-label').textContent = i18n('chat.subAgentLive', { id });
+        root.appendChild(head);
+        const replyEl = document.createElement('div');
+        replyEl.className = 'sub-agent-reply';
+        root.appendChild(replyEl);
+        host.appendChild(root);
+        entry = { root, head, replyEl, replyText: '', reasonEl: null, reasonText: '' };
+        subAgents.set(key, entry);
+        return entry;
+    },
+
+    handleAgentEvent(toolsInline, subAgents, data, msgDiv) {
+        const path = (data && data.path) || [];
+        const inner = (data && data.event) || {};
+        if (!path.length || !toolsInline || !document.body.contains(toolsInline)) return;
+        const entry = this._liveSubContainer(toolsInline, subAgents, path);
+        switch (inner.type) {
+            case 'token':
+                // Plain text on purpose: cheap per-token, and it matches the
+                // final renderAgentTrace shape ('↳ ' + reply, textContent).
+                entry.replyText += inner.data || '';
+                entry.replyEl.textContent = '↳ ' + entry.replyText;
+                break;
+            case 'clear_tokens':
+                entry.replyText = '';
+                entry.replyEl.textContent = '';
+                break;
+            case 'reasoning':
+                // Same collapsed idiom as setReasoning, scoped to this block.
+                if (!entry.reasonEl) {
+                    const box = document.createElement('details');
+                    box.className = 'msg-reasoning';
+                    box.innerHTML = '<summary><i class="bi bi-lightbulb"></i> ' +
+                        `<span class="rs-label">${App.esc(i18n('chat.reasoning'))}</span></summary>`;
+                    const bodyEl = document.createElement('div');
+                    bodyEl.className = 'reasoning-body';
+                    box.appendChild(bodyEl);
+                    entry.root.insertBefore(box, entry.head.nextSibling);
+                    entry.reasonEl = bodyEl;
+                }
+                entry.reasonText += inner.data || '';
+                entry.reasonEl.textContent = entry.reasonText;
+                break;
+            case 'tool_start': {
+                const det = this.addLiveTool(entry.root, inner.data || {});
+                entry.root.insertBefore(det, entry.replyEl);  // reply stays last
+                break;
+            }
+            case 'tool_result':
+                this.completeLiveTool(entry.root, inner.data || {});
+                // Same live resource strip as the parent's tool_result case.
+                if (inner.data && inner.data.resources) {
+                    msgDiv._resources = this.collectResources([inner.data], msgDiv._resources);
+                    this.renderResources(msgDiv, msgDiv._resources);
+                }
+                break;
+            case 'error': {
+                const err = document.createElement('div');
+                err.className = 'text-danger small';
+                err.textContent = String(inner.data || '');
+                entry.root.insertBefore(err, entry.replyEl);
+                break;
+            }
+        }
     },
 
     // Render the top-level steps of a trace (the connected agent — no header).
@@ -1136,15 +1279,11 @@ const ChatPage = {
     renderToolCall(container, step) {
         if (!container) return;
         const args = step.arguments || {};
-        const isAgent = step.tool === 'call_agent';
         const det = document.createElement('details');
         det.className = 'tool-call';
 
         const summary = document.createElement('summary');
-        const label = (isAgent && args.agent_id)
-            ? `<i class="bi bi-diagram-3"></i> ${App.esc(step.tool)} <span class="tc-arrow">→</span> ${App.esc(args.agent_id)}`
-            : `<i class="bi bi-gear-wide-connected"></i> ${App.esc(step.tool || 'tool')}`;
-        summary.innerHTML = `<span class="tc-name">${label}</span>`;
+        summary.innerHTML = `<span class="tc-name">${this._toolLabel(step.tool, args)}</span>`;
         det.appendChild(summary);
 
         const body = document.createElement('div');

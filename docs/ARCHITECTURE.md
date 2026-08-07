@@ -55,7 +55,12 @@ connectors/            # optional Telegram plugin: source only, NOT deployed
    to an external subprocess or an internal Python handler.
 
 SSE events emitted: `token`, `reasoning`, `tool_start`, `tool_result`,
-`clear_tokens`, `error`, `done` (plus `stopped` from the live-run manager).
+`clear_tokens`, `error`, `done` (plus `stopped` from the live-run manager),
+and `agent_event` — a delegated sub-agent's live activity, wrapped as
+`{"path": ["agent", "ids"], "event": {inner event}}`. The `path` is the
+delegation chain seen from the top level and is *flattened*: each delegation
+level prepends its sub-agent's id to an inner `agent_event` instead of
+re-wrapping it, so consumers handle exactly one envelope shape at any depth.
 A `tool_result` may carry `resources` — files the tool delivered to the chat
 (see *Resources* under [Tool system](#tool-system)); `GET /api/files/{path}`
 serves them.
@@ -107,6 +112,15 @@ serves them.
   call, so the advertised list and the permitted list cannot drift. Between
   agents only the essentials travel: the caller's `message` in, the sub-agent's
   `reply` out — a sub-agent never receives the parent's conversation history.
+  The sub-agent's *activity* streams live: `call_agent_handler` passes an
+  `event_sink` to the sub-executor's `run()`, which forwards every token /
+  tool event as an `agent_event` envelope onto the parent's queue
+  (`push_sub_event`), and the parent's tool loop drains that queue *while*
+  the tool task runs (`_execute_streaming` races the task against the queue).
+  The events land between the parent's `tool_start` and `tool_result` for the
+  `call_agent` step — exactly where the UI nests them in a collapsible
+  sub-agent block — and the forwarded `tool_result` events are the real
+  `_step_summary` projections, so live and persisted views cannot drift.
 - **Thinking is a separate channel** (`server/app/engine/reasoning.py`) — a
   reasoning model's chain-of-thought arrives either in a dedicated delta field
   (`reasoning_content`, `reasoning`) or inline as `<think>…</think>` inside the

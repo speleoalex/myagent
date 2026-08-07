@@ -243,6 +243,22 @@ body {
     white-space: pre-wrap;
     font-size: 0.78rem;
 }
+/* Live delegation: the reply div exists before any token arrives */
+.sub-agent-reply:empty { display: none; }
+.sub-agent-live > .sub-agent-head::after {
+    content: '';
+    display: inline-block;
+    width: 0.45em;
+    height: 0.45em;
+    margin-left: 0.35em;
+    border-radius: 50%;
+    background: currentColor;
+    animation: sub-agent-pulse 1.2s ease-in-out infinite;
+}
+@keyframes sub-agent-pulse {
+    0%, 100% { opacity: 0.25; }
+    50% { opacity: 1; }
+}
 
 /* Files a tool delivered to the chat (resource channel): rendered OUTSIDE the
    collapsed tool <details>, between the tool area and the answer. */

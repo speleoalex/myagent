@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import copy
 import json
@@ -129,7 +130,11 @@ class AgentExecutor:
         self.tool_registry = tool_registry
         self.stores = stores
         self.depth = depth
-        self._pending_sub_events: list[dict] = []  # sub-agent tool events for SSE forwarding
+        # Live sub-agent events (agent_event envelopes pushed by
+        # call_agent_handler's event_sink); drained by _execute_streaming's
+        # race WHILE the call_agent tool task runs, so the user watches the
+        # sub-agent work instead of a frozen spinner.
+        self._sub_events: asyncio.Queue[dict] = asyncio.Queue()
         # Full traces of sub-agents invoked via call_agent this turn, in call
         # order. Consumed (popped) when building the parent's trace steps so the
         # whole flow is captured recursively.
@@ -429,21 +434,49 @@ class AgentExecutor:
         step so the whole multi-agent flow is persisted recursively."""
         self._sub_traces.append(trace)
 
-    def emit_sub_events(self, agent_id: str, tool_results: list[dict]) -> None:
-        """Forward a sub-agent's tool activity to this run's SSE stream,
-        namespaced as ``<agent_id>/<tool>``. This is the ONE place the
-        sub-event envelope is built — it mirrors _step_summary's field set."""
-        for tr in tool_results or []:
-            tool = f"{agent_id}/{tr.get('tool')}"
-            self._pending_sub_events.append(
-                {"type": "tool_start",
-                 "data": {"tool": tool, "arguments": tr.get("arguments")}})
-            data = {"tool": tool, "arguments": tr.get("arguments"),
-                    "result_preview": tr.get("result_preview", "")}
-            if tr.get("resources"):
-                data["resources"] = tr["resources"]
-            self._pending_sub_events.append(
-                {"type": "tool_result", "data": data})
+    def push_sub_event(self, event: dict) -> None:
+        """Queue one wrapped sub-agent event ({"type": "agent_event", ...})
+        for live forwarding; drained by _execute_streaming while the
+        call_agent tool task runs (the envelope is built in
+        internal._forward_sub_event, the only producer)."""
+        self._sub_events.put_nowait(event)
+
+    async def _execute_streaming(self, func_name: str, func_args: dict):
+        """Run one tool concurrently and yield ("event", ev) for every
+        sub-agent event pushed while it runs; the final item is
+        ("result", str).
+
+        tool_registry.execute() never raises (its outer guard returns an
+        ERROR string), so task.result() is safe. Cancellation (Stop button →
+        GeneratorExit/CancelledError at our await) must reach the tool task,
+        or a delegated sub-agent would keep generating headless after the
+        user stopped the turn — hence the finally.
+        """
+        task = asyncio.create_task(
+            self.tool_registry.execute(func_name, func_args, executor=self))
+        try:
+            while True:
+                getter = asyncio.create_task(self._sub_events.get())
+                done, _ = await asyncio.wait(
+                    {task, getter}, return_when=asyncio.FIRST_COMPLETED)
+                if getter in done:
+                    # If task finished in the same wait, the next iteration's
+                    # wait returns immediately — no event is ever lost.
+                    yield ("event", getter.result())
+                    continue
+                getter.cancel()
+                try:
+                    await getter
+                except asyncio.CancelledError:
+                    pass
+                break
+            # Flush events queued between the last wait wake-up and now.
+            while not self._sub_events.empty():
+                yield ("event", self._sub_events.get_nowait())
+            yield ("result", task.result())
+        finally:
+            if not task.done():
+                task.cancel()
 
     def _build_agents_directory(self) -> str:
         """Compact directory of the agents this one may call: one line per
@@ -943,9 +976,15 @@ class AgentExecutor:
         conversation: list[ChatMessage] | None = None,
         attachments: list[dict] | None = None,
         memory_context: list | None = None,
+        event_sink=None,
     ) -> ChatResponse:
         """Non-streaming entry point: drain run_stream() and return the final
-        ChatResponse (single implementation of the loop lives there)."""
+        ChatResponse (single implementation of the loop lives there).
+
+        ``event_sink`` (optional callable) receives every non-``done`` event
+        as it happens — how call_agent forwards a sub-agent's live activity
+        to the parent's stream. ``error`` is both sinked (shown live) and
+        captured (drives the degenerate-reply repair below)."""
         response: ChatResponse | None = None
         error: str | None = None
         async for event in self.run_stream(user_message, conversation, attachments,
@@ -953,8 +992,11 @@ class AgentExecutor:
             et = event.get("type")
             if et == "done":
                 response = ChatResponse(**event.get("data", {}))
-            elif et == "error":
+                continue
+            if et == "error":
                 error = str(event.get("data") or "unknown error")
+            if event_sink:
+                event_sink(event)
 
         if response is None:
             # Defensive: run_stream always ends with 'done', but never return None
@@ -977,7 +1019,10 @@ class AgentExecutor:
         """The agent loop, as an async generator of SSE-compatible event dicts.
 
         Event types: token, clear_tokens, tool_start, tool_result, notice,
-        error, done.
+        error, done, plus agent_event — a delegated sub-agent's live activity,
+        wrapped as {"path": [agent ids from the top level down], "event":
+        {inner event}}. The path is flattened (never nested envelopes): each
+        delegation level prepends its sub-agent's id.
         """
         try:
             # Depth 0 only: every sub-agent resolves the same fallback from the
@@ -1256,9 +1301,15 @@ class AgentExecutor:
 
                 yield {"type": "tool_start", "data": {"tool": func_name, "arguments": func_args}}
 
-                result = await self.tool_registry.execute(
-                    func_name, func_args, executor=self
-                )
+                # Concurrent execution: agent_event envelopes pushed by a
+                # delegated sub-agent stream out HERE, between this step's
+                # tool_start and tool_result — exactly where the UI nests them.
+                result = ""
+                async for kind, item in self._execute_streaming(func_name, func_args):
+                    if kind == "event":
+                        yield item
+                    else:
+                        result = item
                 total_tool_calls += 1
 
                 # Resource markers come out HERE, before the result flows
@@ -1279,10 +1330,6 @@ class AgentExecutor:
                 trace_steps.append(step)
                 yield {"type": "tool_result", "data": _step_summary(step)}
                 self._debug_log(f"  Tool result: {func_name} -> {self._dbg_content(result)}")
-
-                # Forward sub-agent tool events (populated by call_agent_handler)
-                while self._pending_sub_events:
-                    yield self._pending_sub_events.pop(0)
 
                 if self.provider.supports_tools is False:
                     call_result_parts.append(f"- {func_name}: {result}")
