@@ -1,0 +1,330 @@
+#!/usr/bin/env python3
+"""Surgical replacement inside one file: old_string -> new_string.
+
+Two invariants make this safe to hand to a small local model:
+
+ 1. NOTHING IS EVER WRITTEN unless old_string matches EXACTLY and — outside
+    replace_all — exactly once. Replacing "the first occurrence" is the worst
+    option available: it is plausible, it succeeds, and it silently edits the
+    wrong place half the time. A refusal costs one round trip; a wrong edit
+    costs a broken file nobody sees.
+
+ 2. THE REFUSAL CARRIES THE TRUTH. A 4B model gets the indentation wrong
+    almost every time, so the tool locates the near-miss with a whitespace
+    tolerant probe and prints the file's REAL bytes there, verbatim, ready to
+    be copied back into old_string.
+
+Those two together are why the tolerant match lives ONLY in the diagnostic and
+never in the edit: the model gets what a tolerant match would have given it
+(the right indentation) without any heuristic ever deciding on its behalf. If
+the probe finds more than one candidate it lists them and still refuses —
+tolerance never arbitrates.
+
+Unlike file_write this tool NEVER creates a file: a mistyped path must not
+quietly materialise a new one somewhere.
+"""
+import difflib
+import json
+import os
+import sys
+
+MAX_EDIT_BYTES = 5_000_000
+CHAR_BUDGET = 2_500          # under max_output 3000 (the registry's truncation
+                             # says only "... [truncated]", which a small model
+                             # cannot tell apart from "that was everything")
+DIFF_CONTEXT = 2
+DIAG_MAX_LINES = 12
+PROBE_MAX_HITS = 3
+
+
+def fail(msg):
+    """True faults: bad input, missing file, unreadable/unwritable."""
+    print(f"ERROR: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def inband(msg):
+    """Nothing was written and the model can fix it by calling again, so this
+    DECLINED, it did not break (same channel as show_file's bad-path branch)."""
+    print(msg)
+    sys.exit(0)
+
+
+def human(n):
+    for unit, size in (("G", 1 << 30), ("M", 1 << 20), ("K", 1 << 10)):
+        if n >= size:
+            return f"{n / size:.1f}{unit}"
+    return f"{n}B"
+
+
+# --- read ------------------------------------------------------------------
+
+def load(path):
+    if os.path.isdir(path):
+        fail(f"{path} is a directory, not a file.")
+    if not os.path.exists(path):
+        fail(f"File not found: {path}. file_edit changes an existing file; "
+             f"create a new one with file_write.")
+    size = os.path.getsize(path)
+    if size > MAX_EDIT_BYTES:
+        fail(f"{path} is {human(size)}, above the {human(MAX_EDIT_BYTES)} edit limit.")
+    try:
+        raw = open(path, "rb").read()
+    except OSError as e:
+        fail(f"cannot read {path}: {e}")
+    if b"\x00" in raw:
+        fail(f"{path} is not a text file (binary content) and cannot be edited.")
+    return raw.decode("utf-8", errors="replace")
+
+
+def align_newlines(text, old, new):
+    """Convert old/new to the file's dominant line ending.
+
+    A CRLF file plus an LF old_string never matches, and the model has no way
+    to see why. This conversion is LOSSLESS and UNAMBIGUOUS — it cannot make a
+    DIFFERENT piece of text match, only the intended one — which is why it is
+    the single normalisation allowed to touch the real edit.
+    """
+    crlf = text.count("\r\n")
+    if crlf and crlf >= text.count("\n") - crlf:
+        conv = lambda s: s.replace("\r\n", "\n").replace("\n", "\r\n")
+        if "\r\n" not in old:
+            return conv(old), conv(new), True
+    return old, new, False
+
+
+# --- exact match -----------------------------------------------------------
+
+def occurrences(text, old):
+    out, i = [], text.find(old)
+    while i != -1:
+        out.append(i)
+        i = text.find(old, i + len(old))
+    return out
+
+
+def line_of(text, offset):
+    return text.count("\n", 0, offset) + 1
+
+
+# --- diagnostic-only tolerant probe (NEVER edits) --------------------------
+
+def _squash(line):
+    return " ".join(line.split())
+
+
+def probe_whitespace(lines, old):
+    """Locate old_string ignoring indentation and internal whitespace runs.
+
+    Line-based, so mapping back to real line numbers is exact. Returns
+    [(first_line, last_line), ...], 1-based, at most PROBE_MAX_HITS.
+    """
+    needle = [_squash(l) for l in old.split("\n")]
+    while needle and not needle[-1]:
+        needle.pop()
+    if not needle:
+        return []
+    hay = [_squash(l) for l in lines]
+    n, hits = len(needle), []
+    for i in range(len(hay) - n + 1):
+        if n == 1:
+            ok = needle[0] in hay[i]
+        else:
+            ok = (hay[i].endswith(needle[0]) or needle[0] in hay[i]) \
+                and all(hay[i + k] == needle[k] for k in range(1, n - 1)) \
+                and (hay[i + n - 1].startswith(needle[-1]) or needle[-1] in hay[i + n - 1])
+        if ok:
+            hits.append((i + 1, i + n))
+            if len(hits) >= PROBE_MAX_HITS:
+                break
+    return hits
+
+
+def probe_anchor(lines, old):
+    """Last resort: the squashed FIRST non-empty line of old_string, matched by
+    containment. Returns up to PROBE_MAX_HITS (lineno, verbatim_line)."""
+    first = next((_squash(l) for l in old.split("\n") if _squash(l)), "")
+    if len(first) < 4:
+        return []
+    hay = [_squash(l) for l in lines]
+    hits = []
+    for i, sq in enumerate(hay):
+        if first in sq or (len(first) > 12 and first[:12] in sq):
+            hits.append((i + 1, lines[i]))
+            if len(hits) >= PROBE_MAX_HITS:
+                break
+    return hits
+
+
+def quote_lines(lines, first, last):
+    """The file's real bytes for lines first..last (1-based), between fences."""
+    body = "\n".join(lines[first - 1:last])
+    if len(body) > CHAR_BUDGET - 400:
+        body = body[:CHAR_BUDGET - 400] + "\n… (cut — read the file for the rest)"
+    return f"---\n{body}\n---"
+
+
+# --- write -----------------------------------------------------------------
+
+def atomic_write(path, data):
+    """Resolve symlinks FIRST: os.replace on a symlink would turn the link into
+    a regular file and orphan its target. The temp file goes in the SAME
+    directory because os.replace is only atomic within one filesystem, and the
+    original's permission bits are carried over — otherwise editing a tool's
+    `run` would drop its +x and make it unrunnable."""
+    real = os.path.realpath(path)
+    mode = os.stat(real).st_mode & 0o7777
+    tmp = f"{real}.{os.getpid()}.tmp"
+    try:
+        with open(tmp, "w", newline="") as f:   # newline='': we own the endings
+            f.write(data)
+        os.chmod(tmp, mode)
+        os.replace(tmp, real)
+    except OSError as e:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        fail(f"cannot write {path}: {e}")
+
+
+# --- report ----------------------------------------------------------------
+
+def render_change(before, after):
+    """First hunk of a unified diff, with real line numbers of the ORIGINAL."""
+    diff = list(difflib.unified_diff(before.splitlines(), after.splitlines(),
+                                     n=DIFF_CONTEXT, lineterm=""))
+    out, lineno, started, cut = [], 0, False, 0
+    for row in diff:
+        if row.startswith("@@"):
+            if started:
+                break
+            try:
+                lineno = int(row.split(" ")[1].split(",")[0].lstrip("-"))
+            except (IndexError, ValueError):
+                lineno = 1
+            started = True
+            continue
+        if not started:
+            continue
+        if len(out) >= DIAG_MAX_LINES:
+            cut += 1
+            continue
+        if row.startswith("+"):
+            out.append(f"+      | {row[1:]}")
+        elif row.startswith("-"):
+            out.append(f"-  {lineno:>4} | {row[1:]}")
+            lineno += 1
+        else:
+            out.append(f"   {lineno:>4} | {row[1:]}")
+            lineno += 1
+    if cut:
+        out.append(f"({cut} more changed lines not shown)")
+    return "\n".join(out)
+
+
+def main():
+    try:
+        args = json.loads(sys.stdin.read() or "{}")
+    except ValueError as e:
+        fail(f"input is not valid JSON: {e}")
+    if not isinstance(args, dict):
+        fail("input must be a JSON object.")
+
+    path = str(args.get("path") or "").strip()
+    old = args.get("old_string")
+    new = args.get("new_string")
+    replace_all = bool(args.get("replace_all"))
+
+    if not path:
+        fail("Provide 'path': the file to edit.")
+    if not isinstance(old, str) or not old:
+        fail("Provide 'old_string': the exact text to replace, copied from the file.")
+    if not isinstance(new, str):
+        fail("Provide 'new_string' (an empty string deletes old_string).")
+
+    text = load(path)
+    # splitlines(), not split("\n"): it drops the phantom empty element a
+    # trailing newline produces, so the line counts we report to the model are
+    # the ones an editor shows, and CRLF lines carry no stray \r.
+    lines = text.splitlines()
+    old, new, converted = align_newlines(text, old, new)
+
+    if old == new:
+        inband("ERROR: nothing was written — old_string and new_string are "
+               "identical, so there is nothing to change.")
+
+    hits = occurrences(text, old)
+
+    if not hits:
+        near = probe_whitespace(lines, old)
+        if len(near) == 1:
+            first, last = near[0]
+            inband(
+                f"ERROR: nothing was written — old_string does not appear in "
+                f"{path} ({len(lines)} lines).\n"
+                f"It DOES match at line{'s' if last > first else ''} "
+                f"{first}{f'-{last}' if last > first else ''} if indentation and "
+                f"spacing are ignored. The file really contains, verbatim:\n"
+                f"{quote_lines(lines, first, last)}\n"
+                f"Copy those lines EXACTLY (indentation included) into old_string "
+                f"and call file_edit again.")
+        if len(near) > 1:
+            where = ", ".join(f"{a}-{b}" if b > a else str(a) for a, b in near)
+            inband(
+                f"ERROR: nothing was written — old_string does not appear in "
+                f"{path} ({len(lines)} lines), but ignoring indentation and "
+                f"spacing it would match in {len(near)} places: lines {where}.\n"
+                f"Read the file with file_read and copy the exact text of the one "
+                f"you mean, with enough lines around it to be unique.")
+        anchors = probe_anchor(lines, old)
+        extra = ""
+        if anchors:
+            shown = ", ".join(f'{n}: "{l.strip()[:70]}"' for n, l in anchors)
+            extra = f"\nLines that start like it — {shown}"
+        inband(
+            f"ERROR: nothing was written — old_string does not appear in {path} "
+            f"({len(lines)} lines), not even ignoring indentation and spacing."
+            f"{extra}\n"
+            f"Read the file with file_read and copy the exact text before retrying.")
+
+    if len(hits) > 1 and not replace_all:
+        where = ", ".join(str(line_of(text, h)) for h in hits[:10])
+        more = "" if len(hits) <= 10 else f" (and {len(hits) - 10} more)"
+        inband(
+            f"ERROR: nothing was written — old_string appears {len(hits)} times "
+            f"in {path}, at lines {where}{more}.\n"
+            f"Make it unique by including the surrounding lines in old_string, or "
+            f"pass replace_all=true to change all {len(hits)} of them.")
+
+    count = len(hits) if replace_all else 1
+    updated = text.replace(old, new) if replace_all else text.replace(old, new, 1)
+    atomic_write(path, updated)
+
+    real = os.path.realpath(path)
+    total = len(updated.splitlines())
+    removed = old.count("\n") + 1
+    added = new.count("\n") + 1 if new else 0
+    if count == 1:
+        head = (f"OK: replaced 1 occurrence in {real} — {removed} line(s) out, "
+                f"{added} in (file now {total} lines)")
+        label = f"what changed, around line {line_of(text, hits[0])}:"
+    else:
+        where = ", ".join(str(line_of(text, h)) for h in hits[:8])
+        head = (f"OK: replaced {count} occurrences in {real} "
+                f"(lines {where}; file now {total} lines)")
+        label = "first change:"
+    if converted:
+        head += "\n(line endings of old_string/new_string converted to CRLF to match the file)"
+
+    body = render_change(text, updated)
+    out = f"{head}\n{label}\n{body}"
+    if count > 1:
+        out += f"\nThe other {count - 1} occurrence(s) were changed the same way."
+    if len(out) > CHAR_BUDGET:
+        out = out[:CHAR_BUDGET] + "\n… (diff cut — the edit itself was applied in full)"
+    print(out)
+
+
+if __name__ == "__main__":
+    main()

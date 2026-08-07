@@ -76,7 +76,9 @@ Related tools can share a **group folder**: a subfolder of the tools dir
 ├── file_management/        # group — no tool.json here
 │   ├── file_read/          #   tool.json + run, as usual
 │   ├── file_write/
-│   ├── file_append/
+│   ├── file_edit/
+│   ├── list_dir/
+│   ├── file_search/
 │   └── make_dir/
 ├── library/                # another group: search the offline library…
 │   ├── local_search/       #   …then read one result at length

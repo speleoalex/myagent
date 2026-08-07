@@ -1,0 +1,42 @@
+{
+  "name": "Search in Files",
+  "description": "Search for text inside files — the grep of this toolbox. Use it to find WHERE something is (a function, a setting, a message) before reading or editing it. It returns locator lines 'path:line: matching text', never whole file contents: open the interesting one with file_read. Searches a folder tree recursively (default: the agent workspace), skipping binaries and machine-generated folders. The search is literal and case-insensitive unless you say otherwise. The result always states how many matches exist in total, so a short list never means 'that is all there is'.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "query": {
+        "type": "string",
+        "description": "Text to look for. Plain text by default — punctuation and symbols are matched literally. A Python regular expression when regex=true"
+      },
+      "path": {
+        "type": "string",
+        "description": "File or folder to search. Relative = inside the workspace. Default '.' = the whole workspace, searched recursively"
+      },
+      "pattern": {
+        "type": "string",
+        "description": "Glob filter on file names, e.g. '*.py' or '*.py,*.md' (comma-separated). Default: every readable text file"
+      },
+      "regex": {
+        "type": "boolean",
+        "description": "Treat 'query' as a Python regular expression (default false)"
+      },
+      "case_sensitive": {
+        "type": "boolean",
+        "description": "Match upper/lower case exactly (default false)"
+      },
+      "limit": {
+        "type": "integer",
+        "description": "Maximum number of matching lines printed (default 30, max 200)"
+      },
+      "context": {
+        "type": "integer",
+        "description": "Lines shown before and after each match, 0 to 3 (default 0 = only the matching line)"
+      }
+    },
+    "required": [
+      "query"
+    ]
+  },
+  "timeout": 30,
+  "max_output": 6000
+}

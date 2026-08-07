@@ -1,0 +1,281 @@
+#!/usr/bin/env python3
+"""Grep-like search over a folder tree. Prints LOCATORS, never file bodies.
+
+Two phases, exactly like library/local_search + local_read: this tool answers
+WHERE, file_read answers WHAT. The reason is measured, not stylistic — tool
+results are re-paid on every iteration of a turn and _truncate_messages never
+touches them, so dumping matched file bodies here would cost the model the same
+tokens over and over.
+
+Every limit is DECLARED in the output. "30 matches" and "30 of 147 matches" are
+opposite messages to a small model, and the registry's own truncation says only
+"... [truncated]".
+
+NOISE_DIRS is duplicated in list_dir/run on purpose: a copy-on-write override
+copies ONE leaf folder, so a module shared by two tools would break the moment
+either is edited (same reason the library/* helpers are duplicated).
+"""
+import fnmatch
+import json
+import os
+import re
+import sys
+import time
+
+# Keep aligned with list_dir/run. Only unmistakably machine-generated names;
+# the rule is DO NOT DESCEND, and passing one as 'path' searches inside it.
+NOISE_DIRS = {".git", ".hg", ".svn", "node_modules", "__pycache__",
+              ".venv", "venv", ".mypy_cache", ".pytest_cache",
+              ".ruff_cache", ".tox"}
+
+# Cheap pre-filter so we never open 400 PNGs; the NUL sniff below is the
+# authority, this is only about speed.
+BINARY_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".bmp", ".tif",
+               ".pdf", ".zip", ".gz", ".bz2", ".xz", ".tar", ".7z", ".rar",
+               ".mp3", ".mp4", ".wav", ".ogg", ".webm", ".mov", ".avi",
+               ".woff", ".woff2", ".ttf", ".otf", ".eot",
+               ".so", ".dylib", ".dll", ".exe", ".bin", ".o", ".a",
+               ".pyc", ".pyo", ".class", ".zim", ".db", ".sqlite", ".sqlite3"}
+
+MAX_FILE_BYTES = 2_000_000
+MAX_FILES = 5_000
+MAX_PER_FILE = 5       # a constant, not a knob: one file with 400 matches must
+                       # not eat the budget and hide the other 30 files
+LINE_CAP = 160
+DEF_LIMIT = 30
+MAX_LIMIT = 200
+MAX_CONTEXT = 3
+DEADLINE_S = 20        # under the tool timeout: partial results beat nothing
+CHAR_BUDGET = 5_000    # under max_output 6000
+
+
+def fail(msg):
+    print(f"ERROR: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def inband(msg):
+    print(msg)
+    sys.exit(0)
+
+
+def human(n):
+    for unit, size in (("G", 1 << 30), ("M", 1 << 20), ("K", 1 << 10)):
+        if n >= size:
+            return f"{n / size:.1f}{unit}"
+    return f"{n}B"
+
+
+def globs(pattern):
+    pats = [p.strip() for p in str(pattern or "").split(",") if p.strip()]
+    return pats or None
+
+
+def matches_name(name, pats):
+    return pats is None or any(fnmatch.fnmatch(name.lower(), p.lower()) for p in pats)
+
+
+def sort_key(name):
+    return (name.casefold(), name)
+
+
+def build_matcher(query, use_regex, case_sensitive):
+    """A small model writes `def load(path)` as a query; with an implicit regex
+    that returns nothing and it cannot see why. Literal by default, and a bad
+    regex teaches the fallback instead of just failing."""
+    pat = query if use_regex else re.escape(query)
+    try:
+        return re.compile(pat, 0 if case_sensitive else re.IGNORECASE).search
+    except re.error as e:
+        inband(f"ERROR: invalid regular expression {query!r}: {e}. "
+               f"Retry with regex=false to search for that text literally.")
+
+
+def iter_files(root, pats, stats):
+    if os.path.isfile(root):
+        yield root
+        return
+    for dirpath, dirnames, filenames in os.walk(root):
+        # Pruning IN PLACE is what stops the descent; the folder itself is
+        # simply not searched, and searching it is one 'path' away.
+        pruned = [d for d in dirnames if d in NOISE_DIRS]
+        if pruned:
+            dirnames[:] = [d for d in dirnames if d not in NOISE_DIRS]
+            for d in pruned:
+                stats["noise"].add(d)
+        dirnames.sort(key=sort_key)
+        for name in sorted(filenames, key=sort_key):
+            if not matches_name(name, pats):
+                continue
+            if stats["files"] >= MAX_FILES:
+                stats["hit_file_cap"] = True
+                return
+            if time.monotonic() > stats["deadline"]:
+                stats["hit_deadline"] = True
+                return
+            yield os.path.join(dirpath, name)
+
+
+def read_text(path, stats):
+    """Returns the decoded text, or None when the file must be skipped."""
+    if os.path.splitext(path)[1].lower() in BINARY_EXTS:
+        stats["binary"] += 1
+        return None
+    try:
+        with open(path, "rb") as f:
+            # Sniff BEFORE the size check: an extensionless binary (a compiled
+            # interpreter, a shared object) would otherwise be reported as
+            # "too large to search", which sends the model looking for text
+            # that was never there.
+            head = f.read(4096)
+            if b"\x00" in head:
+                stats["binary"] += 1
+                return None
+            size = os.path.getsize(path)
+            if size > MAX_FILE_BYTES:
+                stats["too_big"].append((os.path.basename(path), size))
+                return None
+            raw = head + f.read()
+    except OSError:
+        stats["denied"] += 1
+        return None
+    return raw.decode("utf-8", errors="replace")
+
+
+def clip(line):
+    # Leading indentation is PRESERVED: the flow is file_search -> file_edit,
+    # and file_edit needs exact text, so a left-stripped line would teach the
+    # model to build a wrong old_string. The cut is visible (…) precisely to
+    # say "this is not the whole line, do not copy it".
+    line = line.rstrip("\r\n").replace("\t", "    ")
+    return line if len(line) <= LINE_CAP else line[:LINE_CAP] + "…"
+
+
+def render_path(abs_path, cwd):
+    """R4: relative only when it resolves under the workspace — that is where
+    file_read lands a relative path. Absolute everywhere else, or the model
+    hands file_read something that cannot be found."""
+    if abs_path.startswith(cwd + os.sep):
+        return os.path.relpath(abs_path, cwd)
+    return abs_path
+
+
+def main():
+    try:
+        args = json.loads(sys.stdin.read() or "{}")
+    except ValueError as e:
+        fail(f"input is not valid JSON: {e}")
+    if not isinstance(args, dict):
+        fail("input must be a JSON object.")
+
+    query = args.get("query")
+    if not isinstance(query, str) or not query.strip():
+        fail("Provide 'query': the text to search for.")
+    path = os.path.expanduser(str(args.get("path") or ".").strip() or ".")
+    try:
+        limit = max(1, min(int(args.get("limit") or DEF_LIMIT), MAX_LIMIT))
+        context = max(0, min(int(args.get("context") or 0), MAX_CONTEXT))
+    except (TypeError, ValueError):
+        fail("'limit' and 'context' must be whole numbers.")
+    pats = globs(args.get("pattern"))
+    match = build_matcher(query, bool(args.get("regex")), bool(args.get("case_sensitive")))
+
+    if not os.path.exists(path):
+        inband(f"ERROR: no such file or folder: {os.path.abspath(path)}. "
+               f"Check it with list_dir before searching.")
+
+    root = os.path.abspath(path)
+    cwd = os.path.abspath(os.getcwd())
+    stats = {"files": 0, "binary": 0, "denied": 0, "too_big": [], "noise": set(),
+             "hit_file_cap": False, "hit_deadline": False,
+             "deadline": time.monotonic() + DEADLINE_S}
+
+    rows, total = [], 0
+    for fpath in iter_files(root, pats, stats):
+        text = read_text(fpath, stats)
+        if text is None:
+            continue
+        stats["files"] += 1
+        lines = text.splitlines()
+        shown_here = 0
+        for i, line in enumerate(lines):
+            if not match(line):
+                continue
+            total += 1                      # counted past the cap: the file is
+                                            # already read, so it costs nothing
+            if len(rows) >= limit or shown_here >= MAX_PER_FILE:
+                continue
+            rel = render_path(fpath, cwd)
+            block = []
+            for j in range(max(0, i - context), i):
+                block.append(f"{rel}-{j + 1}- {clip(lines[j])}")
+            block.append(f"{rel}:{i + 1}: {clip(line)}")
+            for j in range(i + 1, min(len(lines), i + 1 + context)):
+                block.append(f"{rel}-{j + 1}- {clip(lines[j])}")
+            rows.append((fpath, "\n".join(block)))
+            shown_here += 1
+        if shown_here >= MAX_PER_FILE:
+            extra = sum(1 for line in lines if match(line)) - shown_here
+            if extra > 0:
+                rows.append((fpath, f"  (+{extra} more in {render_path(fpath, cwd)})"))
+
+    where = render_path(root, cwd) if root != cwd else "."
+    searched = (f"{stats['files']} files searched" if not stats["hit_file_cap"]
+                else f"{MAX_FILES} files searched — scan limit reached, "
+                     f"the tree is only partly covered")
+    if stats["binary"]:
+        searched += f", {stats['binary']} skipped as binary"
+
+    notes = []
+    if stats["too_big"]:
+        names = ", ".join(f"{n}" for n, _ in stats["too_big"][:5])
+        notes.append(f"NOTE: {len(stats['too_big'])} file(s) too large to search "
+                     f"(>{human(MAX_FILE_BYTES)}): {names}")
+    if stats["denied"]:
+        notes.append(f"NOTE: {stats['denied']} file(s) could not be read.")
+    if stats["noise"]:
+        notes.append(f"Not searched (machine-generated folders): "
+                     f"{', '.join(sorted(stats['noise'])[:8])} — "
+                     f"pass one as 'path' to search inside.")
+    if stats["hit_deadline"]:
+        notes.append("Time limit reached: give a narrower 'path' or a 'pattern' "
+                     "to cover the rest.")
+
+    if not total:
+        # A bare "no matches" gets reported to the user as "it does not exist".
+        # The retry instruction is what turns that into a second, better call.
+        out = [f'No matches for "{query}" in {where} ({searched}).',
+               "Search again now with fewer or different terms, or with another "
+               "spelling — the text may be split across lines or written in "
+               "another language."]
+        if pats:
+            out.append(f"Your pattern {args.get('pattern')!r} excluded every other file.")
+        print("\n".join(out + notes))
+        return
+
+    approx = "at least " if (stats["hit_deadline"] or stats["hit_file_cap"]) else ""
+    drawn = sum(1 for f, b in rows if not b.startswith("  (+"))
+    head = (f'OK: {total} match(es) for "{query}" in {where} ({searched})'
+            if drawn >= total else
+            f'OK: showing {drawn} of {approx}{total} match(es) for "{query}" '
+            f'in {where} ({searched})')
+
+    out, used, printed = [head], len(head), 0
+    for _, block in rows:
+        if used + len(block) + 1 > CHAR_BUDGET:
+            break
+        out.append(block)
+        used += len(block) + 1
+        if not block.startswith("  (+"):
+            printed += 1
+
+    foot = []
+    if printed < total:
+        foot.append(f"{total - printed} more matches not shown — narrow with "
+                    f'pattern="*.py" or a longer query, or raise limit (max {MAX_LIMIT}).')
+    foot.append("Open one with file_read. Line numbers are 1-based.")
+    print("\n".join(out + foot + notes))
+
+
+if __name__ == "__main__":
+    main()

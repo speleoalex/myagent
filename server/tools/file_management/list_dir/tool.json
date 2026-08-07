@@ -1,0 +1,28 @@
+{
+  "name": "List Directory",
+  "description": "List what a folder contains: sub-folders with their item count, files with size and date. Use it to find out what actually exists before reading, writing or searching — never guess a path. A relative path is inside the agent workspace, and with no arguments at all it lists the workspace itself. Machine-generated folders (.git, node_modules, __pycache__, .venv) are listed but not walked into: pass one of them as 'path' to look inside it.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "path": {
+        "type": "string",
+        "description": "Folder to list. Relative = inside the workspace. Default '.' = the workspace itself"
+      },
+      "depth": {
+        "type": "integer",
+        "description": "How many folder levels to show: 1 = only this folder (default), 2 = also one level of sub-folders, up to 5"
+      },
+      "pattern": {
+        "type": "string",
+        "description": "Glob filter on FILE names, e.g. '*.py' or '*.md,*.txt' (comma-separated for several). Folders are always listed so you can keep navigating"
+      },
+      "limit": {
+        "type": "integer",
+        "description": "Maximum number of entries printed (default 100, max 500). When more exist the result says how many"
+      }
+    },
+    "required": []
+  },
+  "timeout": 20,
+  "max_output": 6000
+}

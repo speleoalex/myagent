@@ -1,0 +1,32 @@
+{
+  "name": "Edit File",
+  "description": "Replace one exact piece of text inside a file that already exists, leaving the rest untouched. Use this instead of file_write whenever you change PART of a file — file_write would make you rewrite the whole thing, and would delete what you never read. 'old_string' must be copied from the file character for character, indentation included (e.g. from file_read), and must appear EXACTLY once: if it appears zero times or several times NOTHING is written and the result tells you what the file really contains. Pass replace_all=true to change every occurrence on purpose; pass an empty new_string to delete the text. The file must exist — create a new one with file_write.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "path": {
+        "type": "string",
+        "description": "File to edit. It must already exist. Relative = inside the workspace"
+      },
+      "old_string": {
+        "type": "string",
+        "description": "The exact text to replace, copied from the file character for character, indentation and line breaks included. If the same text occurs more than once, include the lines around it so it becomes unique"
+      },
+      "new_string": {
+        "type": "string",
+        "description": "The text that replaces it. An empty string deletes the old text"
+      },
+      "replace_all": {
+        "type": "boolean",
+        "description": "Replace every occurrence instead of refusing when old_string is not unique (default false)"
+      }
+    },
+    "required": [
+      "path",
+      "old_string",
+      "new_string"
+    ]
+  },
+  "timeout": 15,
+  "max_output": 3000
+}

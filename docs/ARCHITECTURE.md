@@ -236,8 +236,9 @@ Each tool is a folder with two files:
 **Groups (categories)** — a subfolder of the tools dir *without* its own
 `tool.json` is a group: its subfolders are scanned as ordinary tools, one
 level deep (e.g. the bundled `file_management/` holds `file_read`,
-`file_write`, `file_append`, `make_dir`; `library/` holds `local_search` and
-`local_read`). The group name becomes the tools'
+`file_write`, `file_edit`, `list_dir`, `file_search`, `file_append`,
+`make_dir`, `show_file`; `library/` holds `local_search` and `local_read`).
+The group name becomes the tools'
 `category`; ids stay global (the leaf folder name), so grouping a tool
 changes nothing for the agents that reference it. An agent's `tools` list can
 grant a whole group with the `<group>/*` wildcard (e.g. `file_management/*`)

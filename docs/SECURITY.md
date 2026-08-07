@@ -17,6 +17,16 @@ API can:
 
 So the only real boundary is **who can reach the port**.
 
+Two of the bundled agents hold `shell_exec` and are reachable by delegation —
+**System Administrator** and **Coder** — and Coder is the natural destination
+for an everyday "write me a script" request. That does not add a capability the
+platform did not already have, but it does make shell execution a routine path
+rather than one you pick deliberately. It matters because anything that reaches
+Master can try to steer a delegation: a web page a research agent fetched, a
+message arriving through a connector, a document you handed it. If that is more
+than you want, set `callable: false` on either agent in its **Advanced** tab —
+you can still select it yourself in the chat.
+
 ## API key
 
 By default the API has no authentication. Before exposing it beyond localhost,

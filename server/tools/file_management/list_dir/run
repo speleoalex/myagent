@@ -1,0 +1,245 @@
+#!/usr/bin/env python3
+"""List a folder: sub-folders with their item count, files with size and date.
+
+Every limit this tool hits is DECLARED in the output. The reader is a small
+local model, and a list silently cut at N reads exactly like a folder that
+holds N things — the registry's own truncation appends "... [truncated]" and
+nothing else, which is indistinguishable from "that was everything".
+
+NOISE_DIRS is duplicated in file_search/run on purpose: a copy-on-write
+override copies ONE leaf folder, so a module shared by two tools would break
+the moment either is edited (same reason the library/* helpers are duplicated).
+Keep the behaviour aligned; the two lists are not used to compute ids, so a
+drift is visible rather than silent.
+"""
+import fnmatch
+import json
+import os
+import sys
+import time
+from datetime import datetime
+
+# Only names that are unmistakably machine-generated. 'dist', 'build', 'data'
+# and 'cache' are names a user may genuinely have chosen, so they are never
+# hidden. And the rule is DO NOT DESCEND, not "hide": the folder is always
+# listed as an entry (an `ls` that omits .git lies), it is just not walked
+# into — passing it as 'path' opens it, because the root is always honored.
+NOISE_DIRS = {".git", ".hg", ".svn", "node_modules", "__pycache__",
+              ".venv", "venv", ".mypy_cache", ".pytest_cache",
+              ".ruff_cache", ".tox"}
+
+MAX_DEPTH = 5
+MAX_LIMIT = 500
+DEF_LIMIT = 100
+SCAN_CAP = 20_000      # entries visited before the walk gives up
+DEADLINE_S = 12        # under the tool timeout: a partial answer beats none
+CHAR_BUDGET = 5_000    # under max_output 6000
+PARENT_HINT_MAX = 20
+
+
+def fail(msg):
+    print(f"ERROR: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def inband(msg):
+    """The model guessed a path and can fix it by calling again, so this
+    DECLINED rather than broke (same channel as show_file's bad-path branch)."""
+    print(msg)
+    sys.exit(0)
+
+
+def human(n):
+    for unit, size in (("G", 1 << 30), ("M", 1 << 20), ("K", 1 << 10)):
+        if n >= size:
+            return f"{n / size:.1f}{unit}"
+    return f"{n}B"
+
+
+def globs(pattern):
+    pats = [p.strip() for p in str(pattern or "").split(",") if p.strip()]
+    return pats or None
+
+
+def matches(name, pats):
+    return pats is None or any(fnmatch.fnmatch(name.lower(), p.lower()) for p in pats)
+
+
+def count_items(path):
+    try:
+        return len(os.listdir(path))
+    except OSError:
+        return None
+
+
+def sort_key(name):
+    # casefold with the raw name as tiebreak: stable between README and readme,
+    # and independent of filesystem order — two identical calls must produce
+    # byte-identical text, or the model's prompt cache never gets reused.
+    return (name.casefold(), name)
+
+
+def walk(root, depth, pats, stats):
+    """Depth-first, folders before files at every level. Returns every row as
+    (rel_path, is_dir, size, mtime, items); the caller does the capping so the
+    header can say '100 of 231'."""
+    rows = []
+
+    def visit(abs_dir, rel_dir, level):
+        if stats["scanned"] >= SCAN_CAP:
+            stats["hit_scan_cap"] = True
+            return
+        if time.monotonic() > stats["deadline"]:
+            stats["hit_deadline"] = True
+            return
+        try:
+            entries = list(os.scandir(abs_dir))
+        except OSError:
+            stats["denied"].append(rel_dir or ".")
+            return
+        stats["scanned"] += len(entries)
+        dirs, files = [], []
+        for e in entries:
+            try:
+                (dirs if e.is_dir() else files).append(e)
+            except OSError:
+                files.append(e)
+        dirs.sort(key=lambda e: sort_key(e.name))
+        files.sort(key=lambda e: sort_key(e.name))
+
+        for e in dirs:
+            rel = f"{rel_dir}/{e.name}" if rel_dir else e.name
+            rows.append((rel, True, 0, 0, count_items(e.path)))
+            if e.name in NOISE_DIRS:
+                stats["skipped_noise"].append(rel)
+                continue
+            if level < depth:
+                visit(e.path, rel, level + 1)
+        for e in files:
+            if not matches(e.name, pats):
+                continue
+            rel = f"{rel_dir}/{e.name}" if rel_dir else e.name
+            try:
+                st = e.stat()
+                rows.append((rel, False, st.st_size, st.st_mtime, None))
+            except OSError:
+                rows.append((rel, False, -1, 0, None))
+
+    visit(root, "", 1)
+    return rows
+
+
+def render(rows, limit):
+    shown = rows[:limit]
+    width = min(max((len(r[0]) + (1 if r[1] else 0) for r in shown), default=0), 46)
+    out = []
+    for rel, is_dir, size, mtime, items in shown:
+        name = rel + "/" if is_dir else rel
+        if is_dir:
+            tail = ("(empty)" if items == 0 else
+                    f"({items} item{'s' if items != 1 else ''})" if items is not None
+                    else "(unreadable)")
+        elif size < 0:
+            tail = "(unreadable)"
+        else:
+            tail = f"{human(size):>7}  {datetime.fromtimestamp(mtime):%Y-%m-%d %H:%M}"
+        # Names are NEVER shortened: a truncated name is a path that cannot be
+        # reused. Wide entries just push their own column out.
+        out.append(f"{name.ljust(width)}  {tail}")
+    return out
+
+
+def main():
+    try:
+        args = json.loads(sys.stdin.read() or "{}")
+    except ValueError as e:
+        fail(f"input is not valid JSON: {e}")
+    if not isinstance(args, dict):
+        fail("input must be a JSON object.")
+
+    path = str(args.get("path") or ".").strip() or "."
+    path = os.path.expanduser(path)
+    depth = args.get("depth")
+    # Documented alias: a model that sends recursive=true and gets a flat list
+    # back believes it walked the tree. Silently ignoring the key is the worst
+    # of the three options.
+    if depth in (None, "") and args.get("recursive"):
+        depth = 3
+    try:
+        depth = max(1, min(int(depth or 1), MAX_DEPTH))
+        limit = max(1, min(int(args.get("limit") or DEF_LIMIT), MAX_LIMIT))
+    except (TypeError, ValueError):
+        fail("'depth' and 'limit' must be whole numbers.")
+    pats = globs(args.get("pattern"))
+
+    if not os.path.exists(path):
+        parent = os.path.dirname(os.path.abspath(path)) or "/"
+        hint = ""
+        try:
+            names = sorted(os.listdir(parent), key=sort_key)
+            if names:
+                # The one piece of information that turns "guess again" into
+                # "guess right", and it costs a single listdir.
+                more = "" if len(names) <= PARENT_HINT_MAX else \
+                    f" (+{len(names) - PARENT_HINT_MAX} more)"
+                shown = ", ".join(names[:PARENT_HINT_MAX])
+                hint = f"\nIts parent {parent} contains: {shown}{more}"
+        except OSError:
+            pass
+        inband(f"ERROR: not a folder: {os.path.abspath(path)} "
+               f"(no such file or directory).{hint}")
+    if not os.path.isdir(path):
+        size = human(os.path.getsize(path)) if os.path.isfile(path) else "?"
+        inband(f"ERROR: {os.path.abspath(path)} is a file, not a folder ({size}). "
+               f"Read it with file_read.")
+
+    root = os.path.abspath(path)
+    stats = {"scanned": 0, "denied": [], "skipped_noise": [],
+             "hit_scan_cap": False, "hit_deadline": False,
+             "deadline": time.monotonic() + DEADLINE_S}
+    try:
+        rows = walk(root, depth, pats, stats)
+    except OSError as e:
+        fail(f"cannot list {root}: {e}")
+
+    total = len(rows)
+    if not total:
+        what = f" matching {args.get('pattern')}" if pats else ""
+        inband(f"OK: 0 entries{what} in {root} — the folder exists and is empty."
+               if not pats else
+               f"OK: no files{what} in {root} (depth {depth}). "
+               f"Call again without 'pattern' to see everything that is there.")
+
+    body = render(rows, limit)
+    head = (f"OK: {total} entries in {root} (depth {depth})" if total <= limit
+            else f"OK: showing {limit} of {total} entries in {root} (depth {depth})")
+
+    out, used = [head], len(head)
+    for line in body:
+        if used + len(line) + 1 > CHAR_BUDGET:
+            break
+        out.append(line)
+        used += len(line) + 1
+    drawn = len(out) - 1
+
+    foot = []
+    if drawn < total:
+        foot.append(f"{total - drawn} more entries not shown — narrow with "
+                    f"pattern=\"*.py\", or raise limit (max {MAX_LIMIT}).")
+    if stats["skipped_noise"]:
+        names = ", ".join(stats["skipped_noise"][:8])
+        foot.append(f"Not walked into (machine-generated): {names} — "
+                    f"pass one as 'path' to look inside.")
+    if stats["denied"]:
+        foot.append(f"Permission denied, not listed: {', '.join(stats['denied'][:5])}")
+    if stats["hit_scan_cap"]:
+        foot.append(f"Scan limit of {SCAN_CAP} entries reached: the tree is only "
+                    f"partly covered. Give a deeper 'path' or a lower 'depth'.")
+    if stats["hit_deadline"]:
+        foot.append("Time limit reached: the tree is only partly covered. "
+                    "Give a deeper 'path' or a lower 'depth'.")
+    print("\n".join(out + foot))
+
+
+if __name__ == "__main__":
+    main()

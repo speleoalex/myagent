@@ -5,9 +5,9 @@ An agent is `model + system prompt + tools`, stored as a JSON file under
 
 ![The bundled agents in the web UI](images/agents.png)
 
-## The nine bundled agents
+## The ten bundled agents
 
-First run seeds nine, each running on the model chosen in **Settings**:
+First run seeds ten, each running on the model chosen in **Settings**:
 
 | Agent | Does | Needs internet? |
 |---|---|---|
@@ -16,6 +16,7 @@ First run seeds nine, each running on the model chosen in **Settings**:
 | **HTML Designer** | builds HTML pages, reports and dashboards and delivers them to the chat | no |
 | **Home Automation** | drives IoT devices over their local HTTP APIs — fill in with your own | no |
 | **System Administrator** | shell and file operations on the machine; converts PDFs, images and audio to text | no |
+| **Coder** | writes scripts and programs in the workspace, runs them, and fixes what fails | no |
 | **Conversation** | plain chat, no tools | no |
 | **Tool Manager** | writes new tools for the other agents, and tests them | no |
 | **Agent Manager** | creates and updates the agents themselves | no |
