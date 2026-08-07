@@ -115,10 +115,17 @@ each tool can be ticked individually.
 - **Working directory:** tools run in the agent workspace
   (`~/myagent/workspace/`), so relative paths written or read by a tool land
   there. Absolute paths work as usual.
-- **Environment:** the process inherits the server's environment plus:
+- **Environment:** the process inherits the server's environment plus the
+  paths the server has **already resolved**. Use these instead of deriving
+  anything from `$HOME`: the server may have been pointed elsewhere, and a
+  tool that guesses would read a different library than the one the UI shows.
   - `MYAGENT_APP_DIR` — the app's `server/` directory (lets a launcher find
     the app venv: `$MYAGENT_APP_DIR/.venv/bin/python`)
-  - `MYAGENT_WORKDIR` — the workspace path
+  - `MYAGENT_WORKSPACE` — the workspace path (also the tool's working dir)
+  - `MYAGENT_HOME` — root of the runtime layout
+  - `MYAGENT_LIBRARY` — the offline library folder
+  - `MYAGENT_CACHE` — derived data, safe to delete (the PDF text layers live
+    in `$MYAGENT_CACHE/pdftext`)
 
 ## Returning files to the user (resources)
 

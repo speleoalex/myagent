@@ -17,13 +17,34 @@ from app.models import Settings
 APP_DIR = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = APP_DIR.parent
 
-# User configuration (agents, models, settings) lives under the user's home so
-# it is decoupled from the app install directory and survives redeploys. This is
-# the small, precious directory to back up. Defaults to ~/myagent/config;
-# override with the MYAGENT_CONFIG env var.
-CONFIG_DIR = Path(
-    os.environ.get("MYAGENT_CONFIG") or (Path.home() / "myagent" / "config")
+# --------------------------------------------------------------------------- #
+# Runtime layout — everything the user owns, under ONE root
+#
+# It all lives outside the app install dir, so a redeploy (rsync --delete) can
+# never touch it. MYAGENT_HOME moves the whole tree with a single variable — a
+# container, a second instance, a test run that must not see the real data —
+# and each directory keeps its own override for the cases where just one of
+# them belongs elsewhere (the library is the common one: it grows to tens of
+# gigabytes and usually lives on another disk).
+#
+# This module is the ONLY place these paths are computed. Tools are
+# subprocesses and used to re-derive them from $HOME, which silently made them
+# read a different library than the one the UI was showing; they now receive
+# the resolved values (see tool_env below).
+# --------------------------------------------------------------------------- #
+HOME_DIR = Path(
+    os.environ.get("MYAGENT_HOME") or (Path.home() / "myagent")
 ).expanduser()
+
+
+def _runtime_dir(var: str, name: str) -> Path:
+    """``<MYAGENT_HOME>/<name>``, overridable with its own env var."""
+    return Path(os.environ.get(var) or (HOME_DIR / name)).expanduser()
+
+
+# User configuration (agents, models, settings). This is the small, precious
+# directory to back up.
+CONFIG_DIR = _runtime_dir("MYAGENT_CONFIG", "config")
 SETTINGS_FILE = CONFIG_DIR / "settings.json"
 
 # Defaults shipped inside the app. On first run (when CONFIG_DIR doesn't exist
@@ -63,15 +84,11 @@ def ensure_config_dir() -> Path:
 MCP_DIR = CONFIG_DIR / "mcp"
 MCP_CACHE_DIR = MCP_DIR / "cache"
 
-# Tools the user (or the AI itself) creates or edits live outside the install
-# dir — `deploy.sh`'s rsync --delete would wipe them on every redeploy.
-# Defaults to ~/myagent/tools; override with the MYAGENT_TOOLS env var.
-# This dir is the OVERLAY on the bundled catalog: native tools are served
-# straight from DEFAULT_TOOLS_DIR with no install step, editing one copies it
-# here first (copy-on-write), and deleting the copy restores the original.
-TOOLS_DIR = Path(
-    os.environ.get("MYAGENT_TOOLS") or (Path.home() / "myagent" / "tools")
-).expanduser()
+# Tools the user (or the AI itself) creates or edits. This dir is the OVERLAY
+# on the bundled catalog: native tools are served straight from
+# DEFAULT_TOOLS_DIR with no install step, editing one copies it here first
+# (copy-on-write), and deleting the copy restores the original.
+TOOLS_DIR = _runtime_dir("MYAGENT_TOOLS", "tools")
 
 # Bundled native tool catalog shipped with the app (read-only underlay).
 DEFAULT_TOOLS_DIR = APP_DIR / "tools"
@@ -86,11 +103,8 @@ def ensure_tools_dir() -> Path:
 
 
 # Working directory for the agents' file operations. Relative paths used by
-# file/shell tools resolve here (see ToolRegistry / AgentExecutor). Defaults to
-# ~/myagent/workspace; override with the MYAGENT_WORKSPACE env var.
-WORKSPACE_DIR = Path(
-    os.environ.get("MYAGENT_WORKSPACE") or (Path.home() / "myagent" / "workspace")
-).expanduser()
+# file/shell tools resolve here (see ToolRegistry / AgentExecutor).
+WORKSPACE_DIR = _runtime_dir("MYAGENT_WORKSPACE", "workspace")
 
 
 def ensure_workspace() -> Path:
@@ -99,12 +113,10 @@ def ensure_workspace() -> Path:
     return WORKSPACE_DIR
 
 
-# Chat sessions live on disk under the user's home (decoupled from the browser).
-# One file per chat: the active chat is sessions/current.json; starting a new
-# chat archives it into sessions/history/. Override with MYAGENT_SESSIONS.
-SESSIONS_DIR = Path(
-    os.environ.get("MYAGENT_SESSIONS") or (Path.home() / "myagent" / "sessions")
-).expanduser()
+# Chat sessions live on disk (decoupled from the browser). One file per chat:
+# the active chat is sessions/current.json; starting a new chat archives it
+# into sessions/history/.
+SESSIONS_DIR = _runtime_dir("MYAGENT_SESSIONS", "sessions")
 
 
 def ensure_sessions() -> Path:
@@ -115,11 +127,8 @@ def ensure_sessions() -> Path:
 
 # Per-agent long-term memory (memory.md + Markdown summary chunks). Written
 # by the memory compactor and read by the memory_* tools; strictly one
-# subdirectory per agent id. Defaults to ~/myagent/memory; override with the
-# MYAGENT_MEMORY env var.
-MEMORY_DIR = Path(
-    os.environ.get("MYAGENT_MEMORY") or (Path.home() / "myagent" / "memory")
-).expanduser()
+# subdirectory per agent id.
+MEMORY_DIR = _runtime_dir("MYAGENT_MEMORY", "memory")
 
 
 def ensure_memory() -> Path:
@@ -129,11 +138,8 @@ def ensure_memory() -> Path:
 
 
 # Autonomy runtime state (event queues + per-agent scheduler state), one
-# subdirectory per live agent. Defaults to ~/myagent/autonomy; override with
-# the MYAGENT_AUTONOMY env var.
-AUTONOMY_DIR = Path(
-    os.environ.get("MYAGENT_AUTONOMY") or (Path.home() / "myagent" / "autonomy")
-).expanduser()
+# subdirectory per live agent.
+AUTONOMY_DIR = _runtime_dir("MYAGENT_AUTONOMY", "autonomy")
 
 
 def ensure_autonomy() -> Path:
@@ -143,17 +149,39 @@ def ensure_autonomy() -> Path:
 
 
 # Optional plugins: one directory per plugin, each with a plugin.py exposing
-# register(app) (see docs/PLUGINS.md and app/plugins.py). Defaults to
-# ~/myagent/plugins; override with the MYAGENT_PLUGINS env var.
+# register(app) (see docs/PLUGINS.md and app/plugins.py).
 #
 # There is deliberately NO bundled underlay here, unlike TOOLS_DIR: a plugin
 # shipped inside the app would be code for an optional online service sitting
 # in an install that is meant to work offline. Plugins are installed
 # separately, and an install without this directory is the normal case — the
 # loader treats it as "no plugins", not as an error, so nothing creates it.
-PLUGINS_DIR = Path(
-    os.environ.get("MYAGENT_PLUGINS") or (Path.home() / "myagent" / "plugins")
-).expanduser()
+PLUGINS_DIR = _runtime_dir("MYAGENT_PLUGINS", "plugins")
+
+# Offline knowledge for the library/* tools: ZIM archives plus the user's own
+# documents. Placed by the user and only ever READ by the app, so nothing
+# creates it. This is the directory most often pointed at another disk.
+LIBRARY_DIR = _runtime_dir("MYAGENT_LIBRARY", "library")
+
+# Derived data, safe to delete: currently the PDF text layers the library
+# search extracts. Losing it costs one re-extraction, never information.
+CACHE_DIR = _runtime_dir("MYAGENT_CACHE", "cache")
+
+
+def tool_env() -> dict[str, str]:
+    """Resolved runtime paths exported to every tool subprocess.
+
+    A tool must never re-derive a path from ``$HOME``: the server may have been
+    pointed elsewhere (MYAGENT_HOME, or a per-directory override) and the tool
+    would then read a different library than the one the UI is showing. Passing
+    the RESOLVED values keeps the fallbacks inside the tools for the one case
+    they are meant for — running a tool by hand from a terminal.
+    """
+    return {
+        "MYAGENT_HOME": str(HOME_DIR),
+        "MYAGENT_LIBRARY": str(LIBRARY_DIR),
+        "MYAGENT_CACHE": str(CACHE_DIR),
+    }
 
 
 # A channel (connector) session is one perpetual file — unlike web chats it is
@@ -266,8 +294,7 @@ CORS_ORIGINS = [
 # which is world-readable). Path overridable with MYAGENT_DEBUG_FILE.
 DEBUG = os.environ.get("MYAGENT_DEBUG", "") not in ("", "0", "false")
 DEBUG_LOG_FILE = Path(
-    os.environ.get("MYAGENT_DEBUG_FILE")
-    or (Path.home() / "myagent" / "logs" / "debug.log")
+    os.environ.get("MYAGENT_DEBUG_FILE") or (HOME_DIR / "logs" / "debug.log")
 ).expanduser()
 if DEBUG:
     # Create the log's parent dir up front: the executor's debug writes are
@@ -303,6 +330,24 @@ def save_settings(s: Settings) -> None:
     write_json(SETTINGS_FILE, s.model_dump(), mode=0o600)
 
 
-# Seed the config dir from defaults on first run before loading settings.
-ensure_config_dir()
+def reload_settings() -> Settings:
+    """Re-read settings.json into the module global and return it.
+
+    Callers always read ``config.settings`` as an attribute at call time (never
+    ``from app.config import settings``), so rebinding it here is visible
+    everywhere — the same mechanism routers/system.py uses when the user saves
+    new settings.
+    """
+    global settings
+    settings = load_settings()
+    return settings
+
+
+# Whatever is on disk right now. The config dir is deliberately NOT seeded at
+# import: importing this module must never write to the user's home, or a
+# script that only wants to print a path (or a test that forgot to point
+# MYAGENT_HOME at a temp dir) would create and seed a whole runtime tree as a
+# side effect. The entrypoint does it explicitly — server/main.py calls
+# ensure_config_dir() and then reload_settings(), which is what makes the
+# freshly seeded settings.json take effect on a first run.
 settings = load_settings()

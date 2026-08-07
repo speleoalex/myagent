@@ -14,8 +14,16 @@ from pathlib import Path
 # holds code and is replaced wholesale on reinstall (rsync --delete), while this
 # holds the bot tokens and the address book. It also predates the plugin layout,
 # so leaving it here makes the migration a no-op.
+#
+# Defaults to <MYAGENT_HOME>/connectors, the same root every core directory
+# hangs off (server/app/config.py), so relocating the whole runtime layout
+# stays ONE variable. The plugin resolves it itself rather than importing the
+# core's config: a plugin must keep working if that module moves.
+# MYAGENT_CONNECTORS_DIR keeps the _DIR suffix on purpose — MYAGENT_CONNECTORS
+# would read as the head of the knob family below (MYAGENT_CONNECTORS_*).
 STATE_DIR = Path(
-    os.environ.get("MYAGENT_CONNECTORS_DIR") or (Path.home() / "myagent" / "connectors")
+    os.environ.get("MYAGENT_CONNECTORS_DIR")
+    or (Path(os.environ.get("MYAGENT_HOME") or (Path.home() / "myagent")) / "connectors")
 ).expanduser()
 BINDINGS_DIR = STATE_DIR / "bindings"
 GRANTS_DIR = STATE_DIR / "grants"  # password-mode authorized user ids per binding

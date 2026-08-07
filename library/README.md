@@ -25,7 +25,8 @@ you can re-check the disk years later:
 cd ~/myagent/library && sha256sum -c *.sha256
 ```
 
-`--dest` defaults to `$MYAGENT_LIBRARY`, or `~/myagent/library`. The library is
+`--dest` defaults to `$MYAGENT_LIBRARY`, else `$MYAGENT_HOME/library`, else
+`~/myagent/library`. The library is
 just a folder: copy it to a second disk, move it, split it across drives —
 the tools rescan on every search, subfolders included.
 

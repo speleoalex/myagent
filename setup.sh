@@ -269,11 +269,13 @@ fi
 # as empty here and the command printed below would fill root's home instead.
 LIB_HOME="$HOME"
 CMD_AS=""
-if [ -z "$MYAGENT_LIBRARY" ] && [ -n "$SUDO_USER" ] && [ "$(id -u)" -eq 0 ]; then
+if [ -z "$MYAGENT_LIBRARY" ] && [ -z "$MYAGENT_HOME" ] && [ -n "$SUDO_USER" ] && [ "$(id -u)" -eq 0 ]; then
     SU_HOME=$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6)
     if [ -n "$SU_HOME" ]; then LIB_HOME="$SU_HOME"; CMD_AS="sudo -u $SUDO_USER "; fi
 fi
-LIB_DIR="${MYAGENT_LIBRARY:-$LIB_HOME/myagent/library}"
+# Same precedence as server/app/config.py: the specific override wins over the
+# common root, which wins over the default under the service user's home.
+LIB_DIR="${MYAGENT_LIBRARY:-${MYAGENT_HOME:-$LIB_HOME/myagent}/library}"
 # -L: an assembled library links its big archives in from another disk, exactly
 # as the library tools' own walk does.
 ZIM_COUNT=$(find -L "$LIB_DIR" -maxdepth 2 -name '*.zim' 2>/dev/null | wc -l)

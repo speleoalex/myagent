@@ -111,7 +111,8 @@ class ToolRegistry:
     """
 
     def __init__(self, tools_dir: Path, workdir: Path | None = None,
-                 app_dir: Path | None = None, bundled_dir: Path | None = None):
+                 app_dir: Path | None = None, bundled_dir: Path | None = None,
+                 tool_env: dict[str, str] | None = None):
         self._tools_dir = tools_dir
         # The read-only native catalog underlay. None (or pointing at the same
         # folder as tools_dir) disables the overlay and scans tools_dir alone.
@@ -129,6 +130,11 @@ class ToolRegistry:
         # App install dir, exported to tools as MYAGENT_APP_DIR so launchers can
         # find the app venv (tools live outside the app tree at runtime).
         self._app_dir = app_dir
+        # Resolved runtime paths (config.tool_env(): MYAGENT_HOME, _LIBRARY,
+        # _CACHE) added to every tool subprocess's environment. A tool that
+        # re-derived them from $HOME would read a different library than the
+        # one the server is serving whenever the two disagree.
+        self._tool_env = dict(tool_env or {})
         self._cache: dict[str, dict] = {}
         self._mtimes: dict[str, float] = {}
         # Scan debounce: every query method calls _scan(), and one GET
@@ -569,7 +575,7 @@ class ToolRegistry:
         # launched by absolute path, so cwd doesn't affect finding it; Node
         # tools resolve node_modules via __dirname, not cwd.
         cwd = tool_dir
-        env = {**os.environ}
+        env = {**os.environ, **self._tool_env}
         if self._app_dir is not None:
             env["MYAGENT_APP_DIR"] = str(self._app_dir)
         if self._workdir is not None:
@@ -578,7 +584,7 @@ class ToolRegistry:
                 cwd = self._workdir
             except OSError as e:
                 log.warning("Cannot use workspace %s: %s", self._workdir, e)
-            env["MYAGENT_WORKDIR"] = str(self._workdir)
+            env["MYAGENT_WORKSPACE"] = str(self._workdir)
 
         # A broken shebang / missing interpreter must come back to the model as
         # an in-band tool error, not blow up the whole chat turn with a 500.

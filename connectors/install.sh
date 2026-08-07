@@ -15,7 +15,9 @@
 set -euo pipefail
 
 SOURCE_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
-PLUGINS_DIR="${MYAGENT_PLUGINS:-$HOME/myagent/plugins}"
+# Same precedence as server/app/config.py: specific override, then the common
+# root, then the default under the user's home.
+PLUGINS_DIR="${MYAGENT_PLUGINS:-${MYAGENT_HOME:-$HOME/myagent}/plugins}"
 TARGET_DIR="$PLUGINS_DIR/connectors"
 
 if [ "$(id -u)" = "0" ]; then
@@ -54,7 +56,7 @@ find_install_dir() {
         wd=$(systemctl show -p WorkingDirectory --value myagent 2>/dev/null || true)
         if [ -n "$wd" ] && [ -d "$wd" ]; then echo "$wd"; return; fi
     fi
-    for candidate in /opt/applications/myagent "$(dirname -- "$SOURCE_DIR")"; do
+    for candidate in /opt/myagent /opt/applications/myagent "$(dirname -- "$SOURCE_DIR")"; do
         if [ -x "$candidate/server/.venv/bin/python" ]; then echo "$candidate"; return; fi
     done
     echo ""

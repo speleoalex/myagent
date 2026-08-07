@@ -6,8 +6,9 @@ are required** — the defaults are a working single-user install on localhost.
 
 ## Runtime layout
 
-All runtime state lives under `~/myagent/`, decoupled from the code, so
-upgrading or redeploying never touches your data:
+All runtime state lives under `~/myagent/` (one root, moved with
+`MYAGENT_HOME`), decoupled from the code, so upgrading or redeploying never
+touches your data:
 
 ```text
 ~/myagent/
@@ -49,20 +50,41 @@ with [`library/fetch.py`](../library/README.md).
 
 ### Where things are stored
 
+Everything hangs off **one root**, `MYAGENT_HOME`, so moving the whole runtime
+layout — a container, a second instance, a test run that must not touch your
+real data — is a single variable. Each directory can still be moved on its
+own, and its own variable wins over the root:
+
 | Variable | Default | Meaning |
 |---|---|---|
-| `MYAGENT_CONFIG` | `~/myagent/config` | agents, models, MCP servers, settings |
-| `MYAGENT_TOOLS` | `~/myagent/tools` | tool folders |
-| `MYAGENT_WORKSPACE` | `~/myagent/workspace` | agents' file-operation root |
-| `MYAGENT_SESSIONS` | `~/myagent/sessions` | chat sessions |
-| `MYAGENT_MEMORY` | `~/myagent/memory` | per-agent long-term memory |
-| `MYAGENT_AUTONOMY` | `~/myagent/autonomy` | live agents' state and event queues |
-| `MYAGENT_LIBRARY` | `~/myagent/library` | offline knowledge folder (library tools) |
-| `MYAGENT_CACHE` | `~/myagent/cache` | derived data — currently the PDF text layers the library search reads; deleting it only costs one re-extraction |
-| `MYAGENT_PLUGINS` | `~/myagent/plugins` | installed plugins |
+| `MYAGENT_HOME` | `~/myagent` | **root of everything below** |
+| `MYAGENT_CONFIG` | `$MYAGENT_HOME/config` | agents, models, MCP servers, settings |
+| `MYAGENT_TOOLS` | `$MYAGENT_HOME/tools` | tool folders |
+| `MYAGENT_WORKSPACE` | `$MYAGENT_HOME/workspace` | agents' file-operation root |
+| `MYAGENT_SESSIONS` | `$MYAGENT_HOME/sessions` | chat sessions |
+| `MYAGENT_MEMORY` | `$MYAGENT_HOME/memory` | per-agent long-term memory |
+| `MYAGENT_AUTONOMY` | `$MYAGENT_HOME/autonomy` | live agents' state and event queues |
+| `MYAGENT_LIBRARY` | `$MYAGENT_HOME/library` | offline knowledge folder (library tools) |
+| `MYAGENT_CACHE` | `$MYAGENT_HOME/cache` | derived data — currently the PDF text layers the library search reads; deleting it only costs one re-extraction |
+| `MYAGENT_PLUGINS` | `$MYAGENT_HOME/plugins` | installed plugins |
+| `MYAGENT_CONNECTORS_DIR` | `$MYAGENT_HOME/connectors` | connectors plugin state (bot tokens, address book) |
 
 Pointing `MYAGENT_LIBRARY` at an external disk is the common case — the library
-is the one directory that grows to tens of gigabytes.
+is the one directory that grows to tens of gigabytes — and it is exactly why
+the per-directory overrides exist alongside the single root.
+
+**Naming.** A bare noun (`MYAGENT_LIBRARY`) is a *directory*; a suffix means
+something else — a file (`MYAGENT_DEBUG_FILE`), a limit
+(`MYAGENT_CHANNEL_ROTATE_BYTES`), a behaviour switch. Two directories keep a
+`_DIR` suffix for a reason: `MYAGENT_CONNECTORS_DIR`, because the bare name
+would read as the head of the `MYAGENT_CONNECTORS_*` knob family below, and
+`MYAGENT_INSTALL_DIR`, which is where the *code* is installed rather than
+runtime state.
+
+`MYAGENT_APP_DIR`, `MYAGENT_WORKSPACE`, `MYAGENT_HOME`, `MYAGENT_LIBRARY` and
+`MYAGENT_CACHE` are also **passed to every tool** as already-resolved paths
+(see [TOOLS.md](TOOLS.md)) — a tool reads them, it never re-derives a path from
+`$HOME`.
 
 ### Behaviour and diagnostics
 

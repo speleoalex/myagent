@@ -39,12 +39,18 @@ _AGENT_DEFAULTS = {
 }
 
 
+def myagent_home() -> Path:
+    """Root of the runtime layout. Same precedence as server/app/config.py: the
+    specific override wins over the common root, which wins over the default."""
+    return Path(os.environ.get("MYAGENT_HOME") or (Path.home() / "myagent")).expanduser()
+
+
 def config_dir() -> Path:
-    return Path(os.environ.get("MYAGENT_CONFIG") or (Path.home() / "myagent" / "config")).expanduser()
+    return Path(os.environ.get("MYAGENT_CONFIG") or (myagent_home() / "config")).expanduser()
 
 
 def tools_dir() -> Path:
-    return Path(os.environ.get("MYAGENT_TOOLS") or (Path.home() / "myagent" / "tools")).expanduser()
+    return Path(os.environ.get("MYAGENT_TOOLS") or (myagent_home() / "tools")).expanduser()
 
 
 def agents_dir() -> Path:

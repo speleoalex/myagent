@@ -123,12 +123,19 @@ if [ "$(uname)" = "Darwin" ]; then
         echo "No installed service found — checkout updated only. To install: bash deploy-macos.sh"
     fi
 else
-    INSTALL_DIR="${MYAGENT_INSTALL_DIR:-/opt/applications/myagent}"
-    if [ -d "$INSTALL_DIR" ]; then
+    # WHERE the service runs is systemd's to answer, not ours to guess: a
+    # deploy may have used MYAGENT_INSTALL_DIR, and the default itself has
+    # changed (it was /opt/applications/myagent). Asking keeps an update from
+    # either skipping the redeploy or silently relocating a working install.
+    INSTALL_DIR="${MYAGENT_INSTALL_DIR:-}"
+    if [ -z "$INSTALL_DIR" ]; then
+        INSTALL_DIR="$(systemctl show -p WorkingDirectory --value myagent 2>/dev/null || true)"
+    fi
+    if [ -n "$INSTALL_DIR" ] && [ -d "$INSTALL_DIR" ]; then
         echo ""
         echo "Redeploying to $INSTALL_DIR..."
-        bash deploy.sh
+        MYAGENT_INSTALL_DIR="$INSTALL_DIR" bash deploy.sh
     else
-        echo "No installed copy in $INSTALL_DIR — checkout updated only. To install as a service: sudo bash deploy.sh"
+        echo "No installed service found — checkout updated only. To install as a service: sudo bash deploy.sh"
     fi
 fi

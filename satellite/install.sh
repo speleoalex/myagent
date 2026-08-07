@@ -80,11 +80,15 @@ cfg.update({"name": name, "key": key,
             "binding_id": name.lower()})
 open(f"{d}/config.json", "w").write(json.dumps(cfg, indent=2) + "\n")
 EOF
-    chmod 600 "$DIR/config.json"
-    echo "Generated config.json (key included, kept 0600)."
+    echo "Generated config.json (key included)."
 else
-    echo "config.json already exists: left untouched."
+    echo "config.json already exists: contents left untouched."
 fi
+# Unconditionally, not just for the file we generated: config.json holds the
+# shared key that opens this device AND the inbound endpoint on the server, and
+# the README invites editing it by hand — a copy from another device, or a file
+# written with the default umask, is world-readable.
+chmod 600 "$DIR/config.json"
 
 # ----------------------------------------------------------- systemd unit
 if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then

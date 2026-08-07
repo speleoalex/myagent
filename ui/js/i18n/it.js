@@ -30,7 +30,7 @@ I18n.translations.it = {
     'common.loading': 'Caricamento…',
 
     // Home
-    'home.subtitle': 'Piattaforma di Agenti AI Atomici - Modelli Locali',
+    'home.subtitle': 'Workstation AI privata',
     'home.agents': 'Agenti',
     'home.models': 'Modelli',
     'home.tools': 'Strumenti',
@@ -38,6 +38,14 @@ I18n.translations.it = {
     'home.notReadyModels': 'Configura un modello',
     'home.autoModel': 'Il modello predefinito non è disponibile: le risposte arrivano da {model}.',
     'home.autoModelFix': 'Scegli un predefinito',
+    'home.openChat': 'Apri la Chat',
+    'home.liveCount': '{n} live',
+    'home.nextRun': 'prossimo: {when}',
+    'home.quickChat': 'Chatta con un agente',
+    'home.allAgents': 'Tutti gli agenti',
+    'home.noAgentsEnabled': 'Nessun agente abilitato.',
+    'home.recentChats': 'Conversazioni recenti',
+    'home.noRecent': 'Ancora nessuna conversazione.',
 
     // Agents
     'agents.title': 'Agenti',

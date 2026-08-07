@@ -91,7 +91,7 @@ One capture at a time: if the terminal loop is recording, the button answers
 ## Configuration
 
 `config.json` next to `satellite.py` is the only configuration, and it is a
-plain file you can edit with any editor (`MYAGENT_SAT_CONFIG` moves it). It is
+plain file you can edit with any editor (`MYAGENT_SATELLITE_CONFIG` moves it). It is
 read at startup, so restart after editing by hand.
 
 | key | what it does |

@@ -141,10 +141,19 @@ class _TextExtractor(HTMLParser):
         return "\n".join(lines)
 
 
+def myagent_home():
+    """Root of the runtime layout — duplicated from local_search.
+
+    The server exports the RESOLVED paths (config.tool_env), so this chain only
+    decides what a tool run by hand from a terminal reads."""
+    return os.environ.get("MYAGENT_HOME") or os.path.join(
+        os.path.expanduser("~"), "myagent")
+
+
 def default_library_dir():
     # duplicated from local_search
     return os.environ.get("MYAGENT_LIBRARY") or os.path.join(
-        os.path.expanduser("~"), "myagent", "library")
+        myagent_home(), "library")
 
 
 def _walk(root):
@@ -191,8 +200,7 @@ def list_zims(root):
 # --------------------------------------------------------------------------- #
 def pdf_cache_dir():
     # duplicated from local_search
-    base = os.environ.get("MYAGENT_CACHE") or os.path.join(
-        os.path.expanduser("~"), "myagent", "cache")
+    base = os.environ.get("MYAGENT_CACHE") or os.path.join(myagent_home(), "cache")
     return os.path.join(base, "pdftext")
 
 
@@ -439,7 +447,7 @@ def emit_images(archive, entry_path, images, title):
     """Extract up to MAX_IMAGES article images into <workspace>/_resources/
     and print one resource marker each. Best-effort and silent per image:
     a mini/nopic archive simply has nothing resolvable here."""
-    workdir = os.environ.get("MYAGENT_WORKDIR") or os.getcwd()
+    workdir = os.environ.get("MYAGENT_WORKSPACE") or os.getcwd()
     out_dir = os.path.join(workdir, "_resources")
     base = posixpath.dirname(entry_path)
     seen, done, total = set(), 0, 0
@@ -519,7 +527,7 @@ def write_resource(data, stem, ext):
     """Write content-addressed under <workspace>/_resources/ (same naming
     scheme as emit_images; existing file = re-export is a no-op) and return
     the workspace-relative path for the marker."""
-    workdir = os.environ.get("MYAGENT_WORKDIR") or os.getcwd()
+    workdir = os.environ.get("MYAGENT_WORKSPACE") or os.getcwd()
     out_dir = os.path.join(workdir, "_resources")
     fname = f"{stem}-{hashlib.md5(data).hexdigest()[:8]}{ext}"
     try:

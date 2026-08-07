@@ -41,8 +41,15 @@ _META_DEFAULTS = {
 _MAX_TEST_SECONDS = 45
 
 
+def myagent_home() -> Path:
+    """Root of the runtime layout. Same precedence as server/app/config.py; the
+    server exports the resolved paths, so this only decides what a run by hand
+    from a terminal sees."""
+    return Path(os.environ.get("MYAGENT_HOME") or (Path.home() / "myagent")).expanduser()
+
+
 def tools_dir() -> Path:
-    return Path(os.environ.get("MYAGENT_TOOLS") or (Path.home() / "myagent" / "tools")).expanduser()
+    return Path(os.environ.get("MYAGENT_TOOLS") or (myagent_home() / "tools")).expanduser()
 
 
 def bundled_dir() -> Path | None:
@@ -62,7 +69,7 @@ def bundled_dir() -> Path | None:
 
 def workspace_dir() -> Path:
     return Path(
-        os.environ.get("MYAGENT_WORKSPACE") or (Path.home() / "myagent" / "workspace")
+        os.environ.get("MYAGENT_WORKSPACE") or (myagent_home() / "workspace")
     ).expanduser()
 
 
@@ -363,14 +370,18 @@ def do_test(args: dict) -> None:
     test_args = as_object(test_args, "test_args") if test_args is not None else {}
 
     # Same execution context the registry gives a tool: workspace as cwd, plus
-    # MYAGENT_WORKDIR / MYAGENT_APP_DIR (inherited from the server env when set).
+    # MYAGENT_WORKSPACE / MYAGENT_APP_DIR / MYAGENT_HOME / MYAGENT_LIBRARY /
+    # MYAGENT_CACHE (inherited from the server env, which is where the registry
+    # already put the RESOLVED values). This env must not drift from
+    # ToolRegistry.execute: a tool that passes its test here and then behaves
+    # differently in a real turn is the worst outcome this action can produce.
     ws = workspace_dir()
     env = {**os.environ}
     cwd = path
     try:
         ws.mkdir(parents=True, exist_ok=True)
         cwd = ws
-        env["MYAGENT_WORKDIR"] = str(ws)
+        env["MYAGENT_WORKSPACE"] = str(ws)
     except OSError:
         pass
 

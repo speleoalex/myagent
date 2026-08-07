@@ -30,7 +30,7 @@ I18n.translations.en = {
     'common.loading': 'Loading…',
 
     // Home
-    'home.subtitle': 'Atomic AI Agent Platform - Local Models',
+    'home.subtitle': 'Private AI workstation',
     'home.agents': 'Agents',
     'home.models': 'Models',
     'home.tools': 'Tools',
@@ -38,6 +38,14 @@ I18n.translations.en = {
     'home.notReadyModels': 'Set up a model',
     'home.autoModel': 'Your default model is unavailable, so answers come from {model}.',
     'home.autoModelFix': 'Choose a default',
+    'home.openChat': 'Open Chat',
+    'home.liveCount': '{n} live',
+    'home.nextRun': 'next: {when}',
+    'home.quickChat': 'Chat with an agent',
+    'home.allAgents': 'All agents',
+    'home.noAgentsEnabled': 'No agents enabled.',
+    'home.recentChats': 'Recent conversations',
+    'home.noRecent': 'No conversations yet.',
 
     // Agents
     'agents.title': 'Agents',

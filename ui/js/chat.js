@@ -17,7 +17,12 @@ const ChatPage = {
         // (the server keeps generating and we re-attach below via loadCurrent).
         this._abortClient();
         this.sending = false;
-        this.currentAgentId = params[0] || null;
+        // #/chat/session/<id> (dashboard's recent-chats list) opens an archived
+        // session read-only; #/chat/<agent_id> picks an agent. The two never
+        // collide: "session" is not a valid agent id ("session" the literal
+        // would fall back to the first agent anyway).
+        const openSession = params[0] === 'session' ? params[1] : null;
+        this.currentAgentId = openSession ? null : (params[0] || null);
         this.viewingArchived = false;
 
         let agents = [];
@@ -104,6 +109,9 @@ const ChatPage = {
         this.bindEvents();
         await this.refreshHistory();
         await this.loadCurrent();
+        // A session that no longer exists (deleted, or resumed and reloaded)
+        // fails silently inside viewArchived, leaving the current chat shown.
+        if (openSession) await this.viewArchived(openSession);
     },
 
     // ---- Server-backed sessions (one file per chat on disk) ---------------

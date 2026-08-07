@@ -628,7 +628,12 @@ meant to work offline. Full contract and isolation rules: `docs/PLUGINS.md`.
 
 ## Data storage
 
-Everything is plain JSON under `~/myagent/` (see `server/app/config.py`):
+Everything is plain JSON under `~/myagent/` (see `server/app/config.py`, the
+only place these paths are computed). Every default below hangs off
+`MYAGENT_HOME`, so the whole layout moves with one variable; the per-directory
+override in the second column still wins when set. The resolved
+library/cache/workspace paths are handed to every tool subprocess, so a tool
+never re-derives them from `$HOME`:
 
 | Path | Env override | Contents |
 |---|---|---|

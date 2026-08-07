@@ -18,7 +18,6 @@ from app.config import (
     PROJECT_ROOT,
     CONFIG_DIR,
     DEFAULT_CONFIG_DIR,
-    CONFIG_SEEDED,
     MCP_CACHE_DIR,
     MCP_DIR,
     TOOLS_DIR,
@@ -149,8 +148,14 @@ if config.CORS_ORIGINS:
     )
     log.info("CORS enabled for origins: %s", ", ".join(config.CORS_ORIGINS))
 
-# Initialize stores (config lives under the user's home, see config.CONFIG_DIR)
-if CONFIG_SEEDED:
+# Seed the config dir from the bundled defaults on first run, then re-read the
+# settings the seed just wrote. Done HERE rather than as an import side effect
+# of app.config: importing that module must not write to the user's home.
+# CONFIG_SEEDED is read through the module (not imported by value) because it
+# is only set by the call on the line above.
+config.ensure_config_dir()
+config.reload_settings()
+if config.CONFIG_SEEDED:
     log.info("Initialized config directory %s from defaults (%s)", CONFIG_DIR, DEFAULT_CONFIG_DIR)
 else:
     log.info("Config directory: %s", CONFIG_DIR)
@@ -176,7 +181,8 @@ log.info("Agent working directory: %s", WORKSPACE_DIR)
 ensure_tools_dir()
 log.info("Tools: user dir %s over bundled catalog %s", TOOLS_DIR, DEFAULT_TOOLS_DIR)
 tool_registry = ToolRegistry(TOOLS_DIR, workdir=WORKSPACE_DIR, app_dir=APP_DIR,
-                             bundled_dir=DEFAULT_TOOLS_DIR)
+                             bundled_dir=DEFAULT_TOOLS_DIR,
+                             tool_env=config.tool_env())
 tool_registry.register_internal("call_agent", call_agent_handler)
 tool_registry.register_internal("memory_search", memory_search_handler)
 tool_registry.register_internal("memory_read", memory_read_handler)
@@ -293,8 +299,18 @@ if app.state.plugins:
 # manifest served as text/plain.
 mimetypes.add_type("application/manifest+json", ".webmanifest")
 STATIC_DIR = PROJECT_ROOT / "ui"
-STATIC_DIR.mkdir(exist_ok=True)
-app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
+if STATIC_DIR.is_dir():
+    app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
+else:
+    # Deliberately NOT mkdir'd. An empty directory mounts happily and then
+    # answers 404 for every page, which reads as "the UI is broken" when what
+    # actually happened is that the install is incomplete. The API is fully
+    # usable without it (connectors, satellite, a UI hosted elsewhere), so this
+    # is a loud line in the log rather than a refusal to start.
+    log.error("UI directory not found: %s — the API is up, but this server "
+              "serves no web interface. Re-run the installer, or point a "
+              "browser at a UI hosted elsewhere (Settings → MyAgent server).",
+              STATIC_DIR)
 
 def _tls_files():
     """(certfile, keyfile) for uvicorn, validated — or (None, None) for plain http.

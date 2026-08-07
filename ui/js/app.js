@@ -338,57 +338,125 @@ const App = {
         return '';
     },
 
+    /** Compact timestamp for dashboard rows: time alone if today, otherwise a
+     * short date + time. Not a duration — the reader just needs to place the
+     * row ("this morning" vs "last week") at a glance. */
+    fmtWhen(iso) {
+        const d = iso ? new Date(iso) : null;
+        if (!d || isNaN(d.getTime())) return '';
+        const loc = I18n.getDateLocale();
+        const time = d.toLocaleTimeString(loc, { hour: '2-digit', minute: '2-digit' });
+        if (d.toDateString() === new Date().toDateString()) return time;
+        return `${d.toLocaleDateString(loc, { day: 'numeric', month: 'short' })} ${time}`;
+    },
+
+    /** One dashboard counter. `sub` is an optional already-escaped small line
+     * (live agents, next task run) — only exceptional state gets one. */
+    statCard(href, icon, count, label, sub) {
+        return `
+            <div class="col-6 col-md-3">
+                <a href="${href}" class="text-decoration-none">
+                    <div class="card text-center p-3 h-100 home-stat">
+                        <div class="home-stat-icon"><i class="bi ${icon}"></i></div>
+                        <h3 class="mb-0">${count}</h3>
+                        <div class="text-secondary small">${this.esc(label)}</div>
+                        ${sub ? `<div class="small home-stat-sub">${sub}</div>` : ''}
+                    </div>
+                </a>
+            </div>`;
+    },
+
     async renderHome() {
-        let agentCount = 0, modelCount = 0, toolCount = 0, ready = null;
-        try {
-            const [agents, models, tools, r] = await Promise.all([
-                this.api('GET', '/agents'),
-                this.api('GET', '/models'),
-                this.api('GET', '/tools'),
-                // Whether a message would actually get an answer. The counters
-                // are non-zero even on a completely broken install (everything
-                // is seeded), so they cannot carry this signal themselves.
-                // Caught on its own: this UI can be pointed at an older server
-                // that has no /system/ready, and one 404 must not collapse the
-                // three counters to zero.
-                this.api('GET', '/system/ready').catch(() => null),
-            ]);
-            agentCount = agents.length;
-            modelCount = models.length;
-            toolCount = tools.length;
-            ready = r;
-        } catch (e) { /* ignore: the page below renders exactly as before */ }
+        // Each call caught on its own: the dashboard degrades panel by panel
+        // (an older server without /tasks must not blank the whole page).
+        const [agents, models, tools, tasks, sessions, ready] = await Promise.all([
+            this.api('GET', '/agents').catch(() => []),
+            this.api('GET', '/models').catch(() => []),
+            this.api('GET', '/tools').catch(() => []),
+            this.api('GET', '/tasks').catch(() => []),
+            this.api('GET', '/sessions').catch(() => []),
+            // Whether a message would actually get an answer. The counters
+            // are non-zero even on a completely broken install (everything
+            // is seeded), so they cannot carry this signal themselves.
+            this.api('GET', '/system/ready').catch(() => null),
+        ]);
+
+        const agentById = {};
+        agents.forEach(a => { agentById[a.id] = a; });
+
+        // "N live" under the agents counter, next due run under the tasks one:
+        // the two bits of runtime state worth surfacing on the landing page.
+        const liveCount = agents.filter(a => a.live && a.enabled !== false).length;
+        const nextRun = tasks.filter(t => t.enabled !== false && t.next_at)
+            .map(t => t.next_at).sort()[0];
+        const activeTasks = tasks.filter(t => t.enabled !== false).length;
+
+        // Direct chat entrypoints: the same agents the chat picker offers.
+        const quickAgents = agents.filter(a => a.enabled !== false).slice(0, 6);
+        const recent = sessions.slice(0, 5);
+        const srcIcon = (s) => s.source === 'telegram' ? 'bi-telegram'
+            : s.source === 'autonomous' ? 'bi-robot'
+            : s.channel ? 'bi-broadcast-pin' : 'bi-chat-left-text';
+
+        const agentRows = quickAgents.map(a => `
+            <a href="#/chat/${this.escAttr(a.id)}" class="list-group-item list-group-item-action d-flex align-items-center gap-2">
+                <i class="bi bi-cpu text-secondary"></i>
+                <div class="flex-grow-1 overflow-hidden">
+                    <div class="fw-semibold text-truncate">${this.esc(a.name)}
+                        ${a.live ? `<span class="badge text-bg-success ms-1">${this.esc(i18n('agents.liveBadge'))}</span>` : ''}
+                    </div>
+                    ${a.description ? `<div class="small text-secondary text-truncate">${this.esc(a.description)}</div>` : ''}
+                </div>
+                <i class="bi bi-chat-dots text-secondary"></i>
+            </a>`).join('')
+            || `<div class="list-group-item text-secondary small">${this.esc(i18n('home.noAgentsEnabled'))}</div>`;
+
+        const recentRows = recent.map(s => `
+            <a href="#/chat/session/${this.escAttr(s.id)}" class="list-group-item list-group-item-action d-flex align-items-center gap-2">
+                <i class="bi ${srcIcon(s)} text-secondary"></i>
+                <div class="flex-grow-1 overflow-hidden">
+                    <div class="text-truncate">${this.esc(s.title || i18n('chat.untitled'))}</div>
+                    <div class="small text-secondary text-truncate">${this.esc(agentById[s.agent_id]?.name || s.agent_id || '')}</div>
+                </div>
+                <span class="small text-secondary text-nowrap">${this.esc(this.fmtWhen(s.updated_at))}</span>
+            </a>`).join('')
+            || `<div class="list-group-item text-secondary small">${this.esc(i18n('home.noRecent'))}</div>`;
 
         this.container.innerHTML = `
-            <div class="row mt-4">
-                <div class="col-md-8 mx-auto text-center">
+            <div class="home-wrap mx-auto mt-4">
+                <div class="text-center">
                     <h1><i class="bi bi-robot"></i> MyAgent</h1>
-                    <p class="lead text-secondary">${i18n('home.subtitle')}</p>
+                    <p class="lead text-secondary mb-3">${i18n('home.subtitle')}</p>
+                    <a href="#/chat" class="btn btn-primary btn-lg px-4 home-chat-cta">
+                        <i class="bi bi-chat-dots-fill"></i> ${this.esc(i18n('home.openChat'))}
+                    </a>
                     ${this.readinessBanner(ready)}
-                    <div class="row mt-4 g-3">
-                        <div class="col-md-4">
-                            <a href="#/agents" class="text-decoration-none">
-                                <div class="card text-center p-3">
-                                    <h2>${agentCount}</h2>
-                                    <div class="text-secondary">${i18n('home.agents')}</div>
-                                </div>
-                            </a>
+                </div>
+                <div class="row mt-4 g-3">
+                    ${this.statCard('#/agents', 'bi-cpu', agents.length, i18n('home.agents'),
+                        liveCount ? this.esc(i18n('home.liveCount', { n: liveCount })) : '')}
+                    ${this.statCard('#/models', 'bi-box', models.length, i18n('home.models'), '')}
+                    ${this.statCard('#/tools', 'bi-tools', tools.length, i18n('home.tools'), '')}
+                    ${this.statCard('#/tasks', 'bi-alarm', activeTasks, i18n('nav.tasks'),
+                        nextRun ? this.esc(i18n('home.nextRun', { when: this.fmtWhen(nextRun) })) : '')}
+                </div>
+                <div class="row mt-4 g-3">
+                    <div class="col-lg-6">
+                        <div class="card h-100">
+                            <div class="card-header d-flex justify-content-between align-items-center">
+                                <span><i class="bi bi-chat-dots"></i> ${this.esc(i18n('home.quickChat'))}</span>
+                                <a href="#/agents" class="small">${this.esc(i18n('home.allAgents'))}</a>
+                            </div>
+                            <div class="list-group list-group-flush">${agentRows}</div>
                         </div>
-                        <div class="col-md-4">
-                            <a href="#/models" class="text-decoration-none">
-                                <div class="card text-center p-3">
-                                    <h2>${modelCount}</h2>
-                                    <div class="text-secondary">${i18n('home.models')}</div>
-                                </div>
-                            </a>
-                        </div>
-                        <div class="col-md-4">
-                            <a href="#/tools" class="text-decoration-none">
-                                <div class="card text-center p-3">
-                                    <h2>${toolCount}</h2>
-                                    <div class="text-secondary">${i18n('home.tools')}</div>
-                                </div>
-                            </a>
+                    </div>
+                    <div class="col-lg-6">
+                        <div class="card h-100">
+                            <div class="card-header d-flex justify-content-between align-items-center">
+                                <span><i class="bi bi-clock-history"></i> ${this.esc(i18n('home.recentChats'))}</span>
+                                <a href="#/chat" class="small">${this.esc(i18n('nav.chat'))}</a>
+                            </div>
+                            <div class="list-group list-group-flush">${recentRows}</div>
                         </div>
                     </div>
                 </div>

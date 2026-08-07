@@ -131,10 +131,19 @@ def html_to_text(html):
     return parser.text()
 
 
+def myagent_home():
+    """Root of the runtime layout — duplicated in local_read.
+
+    The server exports the RESOLVED paths (config.tool_env), so this chain only
+    decides what a tool run by hand from a terminal reads."""
+    return os.environ.get("MYAGENT_HOME") or os.path.join(
+        os.path.expanduser("~"), "myagent")
+
+
 def default_library_dir():
     # duplicated in local_read
     return os.environ.get("MYAGENT_LIBRARY") or os.path.join(
-        os.path.expanduser("~"), "myagent", "library")
+        myagent_home(), "library")
 
 
 def _walk(root):
@@ -181,8 +190,7 @@ def list_zims(root):
 # --------------------------------------------------------------------------- #
 def pdf_cache_dir():
     # duplicated in local_read
-    base = os.environ.get("MYAGENT_CACHE") or os.path.join(
-        os.path.expanduser("~"), "myagent", "cache")
+    base = os.environ.get("MYAGENT_CACHE") or os.path.join(myagent_home(), "cache")
     return os.path.join(base, "pdftext")
 
 

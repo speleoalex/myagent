@@ -8,6 +8,37 @@ body {
     min-height: calc(100vh - 70px);
 }
 
+/* ---- Home dashboard ------------------------------------------------------ */
+
+.home-wrap {
+    max-width: 960px;
+}
+
+/* Room to breathe around the primary action: this is the button the page
+   exists for, so it must not sit flush against the subtitle or the stats. */
+.home-chat-cta {
+    margin-top: 0.25rem;
+    margin-bottom: 0.5rem;
+}
+
+.home-stat {
+    transition: transform 0.1s;
+}
+
+.home-stat:hover {
+    transform: translateY(-2px);
+}
+
+.home-stat-icon {
+    font-size: 1.4rem;
+    color: var(--bs-primary);
+    line-height: 1;
+}
+
+.home-stat-sub {
+    color: var(--bs-success-text-emphasis);
+}
+
 /* Chat page wrapper. 100dvh (dynamic viewport) tracks the mobile URL bar and
    virtual keyboard so the input bar stays visible; 100vh is the fallback. The
    safe-area inset is already added to the body as padding-bottom, so subtract

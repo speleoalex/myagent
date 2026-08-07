@@ -73,15 +73,27 @@ setting, and never falls back onto a model with an API key.
 
 ## Run as a service
 
-- **Linux (systemd):** `sudo bash deploy.sh` — installs to
-  `/opt/applications/myagent` (override with `MYAGENT_INSTALL_DIR`) and
-  registers the `myagent` service.
+- **Linux (systemd):** `sudo bash deploy.sh` — installs to `/opt/myagent`
+  (override with `MYAGENT_INSTALL_DIR`) and registers the `myagent` service.
   Logs: `journalctl -u myagent -f`.
 - **macOS (launchd):** `bash deploy-macos.sh` — per-user LaunchAgent, no sudo.
   Logs: `~/Library/Logs/myagent.log`.
 
 Both are safe to re-run: runtime state lives under `~/myagent/`, never inside
 the install directory.
+
+**Configuring the service (Linux):** the unit file is rewritten on every
+deploy (and `./update.sh` redeploys automatically), so never edit
+`/etc/systemd/system/myagent.service` directly — your changes would be lost.
+Put environment overrides (`MYAGENT_HOST`, `MYAGENT_API_KEY`, TLS, debug) in a
+drop-in instead, which deploys leave untouched:
+
+```bash
+sudo systemctl edit myagent     # opens an override file
+# [Service]
+# Environment=MYAGENT_HOST=0.0.0.0
+sudo systemctl restart myagent
+```
 
 Windows is not supported natively — the tool `run` scripts are extensionless
 and rely on shebangs, which Windows does not honor. Use WSL2.

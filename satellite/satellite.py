@@ -107,11 +107,11 @@ UI_FILE = BASE_DIR / "ui.html"
 
 
 def config_path() -> Path:
-    return Path(os.environ.get("MYAGENT_SAT_CONFIG") or BASE_DIR / "config.json")
+    return Path(os.environ.get("MYAGENT_SATELLITE_CONFIG") or BASE_DIR / "config.json")
 
 
 def load_config() -> dict:
-    """config.json next to this file (path override: MYAGENT_SAT_CONFIG),
+    """config.json next to this file (path override: MYAGENT_SATELLITE_CONFIG),
     merged over the defaults so a partial file is fine."""
     path = config_path()
     cfg = json.loads(json.dumps(DEFAULTS))  # deep copy

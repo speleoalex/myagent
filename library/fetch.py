@@ -442,8 +442,10 @@ def main() -> int:
                "second disk or deleted at any time. Nothing indexes them but the\n"
                "agent, and it rescans on every search.")
     ap.add_argument("--dest", metavar="DIR",
-                    default=os.environ.get("MYAGENT_LIBRARY") or str(Path.home() / "myagent" / "library"),
-                    help="destination folder (default: $MYAGENT_LIBRARY or ~/myagent/library)")
+                    default=os.environ.get("MYAGENT_LIBRARY") or str(
+                        Path(os.environ.get("MYAGENT_HOME") or (Path.home() / "myagent")) / "library"),
+                    help="destination folder (default: $MYAGENT_LIBRARY, "
+                         "else $MYAGENT_HOME/library, else ~/myagent/library)")
     ap.add_argument("--preset", metavar="A,B", help="download a named preset (see --list)")
     ap.add_argument("--only", metavar="ID,ID", help="download these catalog ids")
     ap.add_argument("--topic", metavar="T,T", help="filter by topic")
