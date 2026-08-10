@@ -19,7 +19,9 @@ user to type that number into the model form, we ask the server:
                                    gateway bothers to declare them (OpenRouter,
                                    vLLM, LiteLLM; OpenAI itself does not).
     anthropic   GET  /v1/models/{id} -> max_input_tokens: the context window,
-                                   declared by the Anthropic Models API.
+                                   AND max_tokens: the per-request OUTPUT cap
+                                   (a hard limit the Messages API 400s on, and
+                                   the only provider here that states it).
 
 Results are cached per (provider, base_url, model) with a short TTL: they are
 live data — restarting llama.cpp with a different ``-c`` changes them — but a
@@ -45,6 +47,14 @@ PROBE_TIMEOUT = 6.0
 # declares its window.
 FALLBACK_REMOTE = 32768  # remote windows are large — this is just a safety net
 FALLBACK_LOCAL = 4096
+
+# Ceiling applied to a PROBED output cap (see max_output_budget). Current Claude
+# models declare 64K-128K of max output; using all of it as our default
+# max_tokens would let one degenerate loop bill 16x what the old hardcoded 8192
+# could. 32768 leaves ample room for thinking plus a large file in one tool call
+# — the case that was truncating — while keeping the worst case bounded. An
+# explicit `max_tokens` in the model options bypasses this entirely.
+MAX_OUTPUT_CEILING = int(os.environ.get("MYAGENT_MAX_OUTPUT_CEILING") or 32768)
 
 # What Ollama serves when we don't ask for anything (its own default, settable
 # server-side via OLLAMA_CONTEXT_LENGTH — which we cannot read remotely, hence
@@ -85,9 +95,11 @@ def _first_int(*values) -> int | None:
 async def probe(cfg, *, client: httpx.AsyncClient | None = None, force: bool = False) -> dict:
     """Ask the model server what it is serving. Never raises.
 
-    Returns ``{reachable, served_model, capabilities, n_ctx, n_ctx_max}`` where
-    ``n_ctx`` is the window actually being served (when knowable) and
-    ``n_ctx_max`` the model's declared maximum.
+    Returns ``{reachable, served_model, capabilities, n_ctx, n_ctx_max,
+    max_output}`` where ``n_ctx`` is the window actually being served (when
+    knowable), ``n_ctx_max`` the model's declared maximum INPUT window, and
+    ``max_output`` its declared maximum OUTPUT — a separate, much smaller
+    number that only the Anthropic Models API currently states.
     """
     c = _as_dict(cfg)
     key = _cache_key(c)
@@ -132,6 +144,7 @@ async def _probe_now(c: dict, client: httpx.AsyncClient | None) -> dict:
         "capabilities": [],
         "n_ctx": None,
         "n_ctx_max": None,
+        "max_output": None,
     }
     base = (c.get("base_url") or "").rstrip("/")
     if not base:
@@ -205,8 +218,9 @@ async def _probe_ollama(client, base: str, c: dict, out: dict) -> None:
 
 
 async def _probe_anthropic(client, base: str, c: dict, out: dict) -> None:
-    """The Anthropic Models API declares the context window outright:
-    GET /v1/models/{id} carries max_input_tokens (and max_tokens)."""
+    """The Anthropic Models API declares both windows outright:
+    GET /v1/models/{id} carries max_input_tokens (the context window) and
+    max_tokens (the OUTPUT cap the Messages API enforces per request)."""
     if not base.endswith("/v1"):
         base = f"{base}/v1"
     model = (c.get("model") or "").strip()
@@ -218,6 +232,11 @@ async def _probe_anthropic(client, base: str, c: dict, out: dict) -> None:
     out["reachable"] = True
     out["served_model"] = d.get("id") or out["served_model"]
     out["n_ctx_max"] = _first_int(d.get("max_input_tokens"))
+    # Careful: this key means the OUTPUT cap here, while the same name on an
+    # OpenAI-compatible listing (and in ModelConfig.options) means the value WE
+    # request. Never read one as the other — that is how a 1M context window
+    # becomes a 1M max_tokens and a 400.
+    out["max_output"] = _first_int(d.get("max_tokens"))
 
 
 async def _probe_openai_compatible(client, base: str, c: dict, out: dict) -> None:
@@ -326,6 +345,25 @@ def resolve(cfg, info: dict) -> dict:
 
 def _out(n: int, source: str) -> dict:
     return {"context_window": int(n), "source": source}
+
+
+async def max_output_budget(cfg, *, client: httpx.AsyncClient | None = None) -> int | None:
+    """The per-request OUTPUT cap, asked for rather than guessed. Never raises.
+
+    Returns None when nothing declares one, so the caller keeps its own
+    conservative fallback: a value that is too HIGH is a 400 from the Messages
+    API, not a degraded answer, so silence must not become optimism.
+
+    An explicit ``options["max_tokens"]`` always wins and skips the probe — it
+    is the escape hatch for asking a model for its full declared output, above
+    MAX_OUTPUT_CEILING.
+    """
+    c = _as_dict(cfg)
+    explicit = _first_int((c.get("options") or {}).get("max_tokens"))
+    if explicit:
+        return explicit
+    probed = _first_int((await probe(cfg, client=client)).get("max_output"))
+    return min(probed, MAX_OUTPUT_CEILING) if probed else None
 
 
 async def context_budget(cfg, *, client: httpx.AsyncClient | None = None) -> int:

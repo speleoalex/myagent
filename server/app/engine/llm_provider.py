@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import AsyncIterator
 
 import httpx
@@ -29,6 +30,34 @@ DROPPABLE_PARAMS = (
 # (supports_tools=False) instead of re-paying the 400 AND losing their first
 # iteration to a system prompt without the text-protocol instructions.
 _PARAM_FIXES: dict[tuple[str, str], dict[str, str | None]] = {}
+
+# Output caps this endpoint has told us about by REFUSING a request ("max_tokens:
+# 100000 > 64000, which is the maximum ..."). Memoized like _PARAM_FIXES and for
+# the same reason: without it every turn re-pays the 400 that discovers the
+# ceiling. Separate dict because the values are numbers, not replacement names.
+_MAX_TOKENS_CAPS: dict[tuple[str, str], int] = {}
+
+# What we ask for when nothing declares an output cap (unreachable Models API, a
+# gateway that doesn't state one). Deliberately conservative: too HIGH is a 400,
+# and this is the value a provider falls back to when it could not ask.
+FALLBACK_MAX_OUTPUT = 8192
+
+# Anthropic names the model's real ceiling when it refuses: "max_tokens: 100000 >
+# 64000, which is the maximum allowed number of output tokens for <model>".
+_MAX_TOKENS_LIMIT_RE = re.compile(r"max_tokens:\s*(\d+)\s*>\s*(\d+)")
+
+
+def _clamp_from_error(detail: str, current: int) -> int | None:
+    """The ceiling named in a max_tokens refusal, or None if none is stated.
+
+    Only a value strictly BELOW what we asked for counts: anything else would
+    have the retry loop re-send an identical payload and burn an attempt.
+    """
+    m = _MAX_TOKENS_LIMIT_RE.search(detail)
+    if not m:
+        return None
+    cap = int(m.group(2))
+    return cap if 0 < cap < current else None
 
 
 class LLMProvider:
@@ -68,10 +97,13 @@ class LLMProvider:
         # probe is async and cached process-wide, so this costs nothing after
         # the first turn). See model_probe.
         self._ctx_budget: int | None = None
+        # Same for the output cap (Anthropic enforces one per request).
+        self._max_out: int | None = None
         # Payload fields this endpoint has already rejected (see _PARAM_FIXES).
         self._param_fixes = _PARAM_FIXES.setdefault(
             (model_config.base_url, model_config.model), {}
         )
+        self._caps_key = (model_config.base_url, model_config.model)
         # An endpoint that already rejected `tools` won't accept them next run:
         # start in the text protocol so the executor injects its instructions
         # from the first iteration. Only in auto mode — an explicit config
@@ -220,6 +252,24 @@ class LLMProvider:
             log.debug("Context budget for '%s': %d tokens",
                       self.config.id, self._ctx_budget)
         return self._ctx_budget
+
+    async def _max_output(self) -> int:
+        """The per-request output cap, resolved once per provider instance.
+
+        Same shape as _context_budget, one asymmetry: a cap discovered from a
+        400 (_MAX_TOKENS_CAPS) beats everything, INCLUDING an explicit config
+        value. The endpoint has stated its own ceiling; honouring a higher
+        number typed in the form would just fail the turn again.
+        """
+        if self._max_out is None:
+            budget = await model_probe.max_output_budget(
+                self.config, client=self._client
+            ) or FALLBACK_MAX_OUTPUT
+            known = _MAX_TOKENS_CAPS.get(self._caps_key)
+            self._max_out = min(budget, known) if known else budget
+            log.debug("Output cap for '%s': %d tokens",
+                      self.config.id, self._max_out)
+        return self._max_out
 
     def _build_payload(
         self,
@@ -404,6 +454,7 @@ class LLMProvider:
         tools: list[dict] | None,
         temperature: float | None,
         max_ctx: int,
+        max_out: int,
     ) -> dict:
         # Truncate BEFORE translating: the estimator understands the
         # OpenAI-style shapes (strings, image_url parts).
@@ -417,8 +468,9 @@ class LLMProvider:
             "model": self.config.model,
             "messages": self._anthropic_messages(messages),
             "stream": True,
-            # Required by the Messages API (it is a hard output cap).
-            "max_tokens": int(self.config.options.get("max_tokens") or 8192),
+            # Required by the Messages API (it is a hard output cap), and asked
+            # for rather than guessed — see model_probe.max_output_budget.
+            "max_tokens": max_out,
         }
         if system:
             payload["system"] = system
@@ -491,6 +543,22 @@ class LLMProvider:
                 text = "[Request declined by the provider's safety filters"
                 text += f": {note}]" if note else ".]"
                 return [{"choices": [{"delta": {"content": text}}]}]
+            if stop == "max_tokens":
+                # The hard output cap cut the turn off mid-generation. Staying
+                # silent here is the worst outcome: when the cut lands inside a
+                # tool call's input_json_delta, the executor gets unparseable
+                # arguments and the model retries blind, with no idea it hit a
+                # ceiling (observed 2026-08-10, a file_write of a ~10 KB
+                # script). Content and not an `error` event, like the refusal
+                # above: whatever was generated is still worth keeping, and the
+                # note lands in the turn the model reads back.
+                cap = int(self.config.options.get("max_tokens") or 8192)
+                return [{"choices": [{"delta": {"content": (
+                    f"\n\n[Output truncated: this reply hit the max_tokens cap "
+                    f"({cap}). Nothing above is necessarily complete. Raise "
+                    f"max_tokens in the model options, or produce less per call "
+                    f"— write a large file in several smaller pieces.]"
+                )}}]}]
             return []
         if etype == "error":
             message = (event.get("error") or {}).get("message", "unknown error")
@@ -508,7 +576,8 @@ class LLMProvider:
         if anthropic:
             payload = self._build_anthropic_payload(
                 messages, tools, temperature,
-                max_ctx=await self._context_budget())
+                max_ctx=await self._context_budget(),
+                max_out=await self._max_output())
         else:
             payload = self._build_payload(messages, tools, temperature, stream=True,
                                           max_ctx=await self._context_budget())
@@ -573,8 +642,20 @@ class LLMProvider:
                 continue
             if anthropic and key == "max_tokens":
                 # Required by the Messages API: dropping it would only trade
-                # this 400 for another. Surface the original error instead.
-                continue
+                # this 400 for another. But the refusal NAMES the model's real
+                # ceiling, so clamp to it and retry — a value that is too high
+                # (typed into the form, or a probe that never ran) self-corrects
+                # instead of failing the turn. Remembered process-wide so the
+                # next turn starts at the ceiling.
+                cap = _clamp_from_error(detail, payload["max_tokens"])
+                if cap is None:
+                    continue  # unparseable: surface the original error
+                payload["max_tokens"] = cap
+                _MAX_TOKENS_CAPS[self._caps_key] = cap
+                self._max_out = cap
+                log.warning("Model '%s' caps output at %d tokens; clamped",
+                            self.config.id, cap)
+                return True
             # Some models want the same value under a different name.
             replacement = ("max_completion_tokens"
                            if key == "max_tokens" and "max_completion_tokens" in low
