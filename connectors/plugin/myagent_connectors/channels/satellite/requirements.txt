@@ -1,0 +1,13 @@
+# Speech from the device: /listen records, myagent transcribes it through the
+# document_extract tool, which needs this in myagent's virtualenv (plus ffmpeg on
+# the PATH). ~380 MB with ctranslate2/onnxruntime.
+#
+# Duplicated from the telegram channel on purpose — each channel declares what IT
+# needs, so either can be installed alone (see connectors/install.sh). And the
+# stakes differ: a Telegram voice note that cannot be transcribed answers
+# "transcription unavailable" and the text chat carries on, while for a satellite
+# the microphone IS the device — without this, POST /api/connectors/inbound
+# answers 502 and the "Talk" button is broken for every utterance (observed on
+# the kitchen device, 2026-08-10: the channel was installed without telegram, so
+# nothing had ever pulled this in).
+faster-whisper>=1.0.0
