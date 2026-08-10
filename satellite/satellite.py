@@ -282,6 +282,76 @@ def _unpark_hw_playback() -> None:
 
 
 # --------------------------------------------------------------------- TTS
+#
+# An agent reply is written for a SCREEN — the web UI and Telegram render its
+# markdown — but a satellite reads it out loud, and piper pronounces the markup:
+# "**ricetta**" comes out as "asterisco asterisco ricetta". So the mouth strips
+# it. Only here, never on the way back to the caller: /ask and /listen return the
+# reply verbatim and the device's page renders it, so what is SHOWN keeps its
+# formatting and only what is SPOKEN is flattened.
+#
+# Every rule below removes MARKUP and keeps CONTENT, because a spoken answer that
+# quietly drops a sentence is worse than one that reads a stray character. Code
+# blocks included: "python test-clock/clock.py" is exactly what someone who asked
+# how to run it needs to hear.
+
+# The three whole-line rules swallow their own newline: leaving it behind turns
+# a stripped line into a blank one, and a blank line is a PAUSE in the spoken
+# output — the markup would still be audible, just as silence.
+#
+# Fence lines (``` / ~~~, language tag and all) — the fenced text stays.
+_MD_FENCE = re.compile(r"^[ \t]*(?:`{3,}|~{3,})[^\n]*$\n?", re.M)
+# A table's |---|:--:| row: pure markup, unlike the cell rows around it. The `|`
+# separators are deliberately LEFT alone — a shell pipe inside a command is far
+# likelier on a device than a table, and turning it into a comma would corrupt
+# the one case that matters.
+_MD_TABLE_SEP = re.compile(r"^[ \t]*\|?[ \t]*:?-{2,}:?[ \t]*"
+                           r"(?:\|[ \t]*:?-{2,}:?[ \t]*)*\|?[ \t]*$\n?", re.M)
+# Horizontal rule: --- / *** / ___ alone on a line.
+_MD_RULE = re.compile(r"^[ \t]{0,3}(?:[-*_][ \t]*){3,}$\n?", re.M)
+_MD_HEADING = re.compile(r"^[ \t]{0,3}#{1,6}[ \t]+", re.M)
+_MD_QUOTE = re.compile(r"^[ \t]{0,3}>[ \t]?", re.M)
+# List markers. The newline stays, which is what gives piper its pause.
+_MD_BULLET = re.compile(r"^[ \t]*(?:[-*+•]|\d{1,3}[.)])[ \t]+", re.M)
+# [testo](url) and ![alt](url) → the words. A URL read aloud is unusable noise;
+# a BARE url is left as-is (not markup — and mangling it could lose an address
+# someone actually wants to write down).
+_MD_LINK = re.compile(r"!?\[([^\]\n]*)\]\([^)\n]*\)")
+_MD_CODE = re.compile(r"`+([^`\n]+)`+")
+# Emphasis, the one rule that can do damage — hence two patterns instead of one
+# `[*_]{1,3}`, because asterisks and underscores are not equally safe.
+#
+# Asterisks: `*` never appears inside an identifier, so 1–3 of them are all
+# fair game. `(?!\s)` / `(?<!\s)` keep the rule off arithmetic ("3 * 4"), and no
+# DOTALL means a lone asterisk cannot swallow a paragraph looking for a partner.
+_MD_STARS = re.compile(r"(?<!\*)(\*{1,3})(?!\s)([^\n]+?)(?<!\s)\1(?!\*)")
+# Underscores: a SINGLE one only, and never adjacent to another. `__init__` and
+# `__name__` are the same shape as `__bold__`, and nothing in the text can tell
+# them apart — so the double form is left alone on purpose. Reading "linea bassa"
+# for a rare `__bold__` is a blemish; turning `__init__` into `init` is silent
+# corruption of the answer, and models write `**bold**` anyway. Excluding `_`
+# from the content keeps a match from ever spanning an identifier.
+_MD_UNDERSCORE = re.compile(r"(?<![\w_])_(?!\s)([^_\n]+?)(?<!\s)_(?![\w_])")
+_BLANK_RUN = re.compile(r"\n{3,}")
+
+
+def speakable(text: str) -> str:
+    """Flatten markdown into something a TTS engine can read aloud."""
+    out = _MD_FENCE.sub("", text or "")
+    out = _MD_TABLE_SEP.sub("", out)
+    out = _MD_RULE.sub("", out)
+    out = _MD_HEADING.sub("", out)
+    out = _MD_QUOTE.sub("", out)
+    out = _MD_BULLET.sub("", out)
+    out = _MD_LINK.sub(r"\1", out)
+    out = _MD_CODE.sub(r"\1", out)
+    # Twice: **_annidati_** leaves the inner pair behind on the first pass.
+    for _ in range(2):
+        out = _MD_STARS.sub(r"\2", out)
+        out = _MD_UNDERSCORE.sub(r"\1", out)
+    return _BLANK_RUN.sub("\n\n", out).strip()
+
+
 class Speaker:
     """Serialized text-to-speech: one queue, one worker, so a /say arriving
     mid-reply queues up instead of speaking over it."""
@@ -323,7 +393,9 @@ class Speaker:
         """Queue an utterance. `done` is set when it has been spoken (or
         skipped): the page's volume test waits on it, because "sent" and
         "heard" are seconds apart and the button is the only feedback."""
-        text = self._UNSPEAKABLE.sub(" ", text or "").strip()
+        # Here and not in run_turn: /say (a notify_user announcement) carries
+        # markdown too, and this is the single door in front of piper.
+        text = self._UNSPEAKABLE.sub(" ", speakable(text)).strip()
         if not text:
             if done is not None:
                 done.set()
