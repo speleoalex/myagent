@@ -67,8 +67,33 @@ INDEX_CAP = 10
 # Defensive cap on what get_memory_md hands to the prompt builder.
 MD_MAX_CHARS = 4000
 # One index line: "- <id> — <summary>".
-_INDEX_LINE = re.compile(r"^- (\d{12}(?:-\d+)?) — (.*)$")
-_VALID_CHUNK_ID = re.compile(r"^\d{12}(-\d+)?$")
+# Chunk ids are local timestamps. TWO widths are legal, on purpose: ids written
+# before 2026-08-10 are YYMMDDHHMMSS (12 digits), new ones are YYYYMMDDHHMMSS
+# (14) because "260810190008" is unreadable in an index line a human is meant to
+# skim. Both must keep resolving — the old ids are already written into every
+# existing memory.md and into chunk filenames on disk, and nothing rewrites them.
+_INDEX_LINE = re.compile(r"^- ((?:\d{14}|\d{12})(?:-\d+)?) — (.*)$")
+_VALID_CHUNK_ID = re.compile(r"^(?:\d{14}|\d{12})(-\d+)?$")
+
+
+def _chunk_sort_key(stem: str) -> tuple[str, int]:
+    """Recency key for a chunk id, across both id widths.
+
+    Filenames are NOT lexicographically comparable once the widths mix: a new
+    "20260810..." sorts BEFORE a legacy "260810...", which would make every new
+    chunk look like the oldest one in _iter_chunks. Normalize the legacy form to
+    four-digit years (the store was created in the 2020s, so the century is not
+    in doubt) and compare the collision suffix as a NUMBER — otherwise "-10"
+    sorts before "-2".
+    """
+    base, _, suffix = stem.partition("-")
+    if len(base) == 12:
+        base = "20" + base
+    try:
+        n = int(suffix or 0)
+    except ValueError:
+        n = 0
+    return (base, n)
 _HTML_COMMENT = re.compile(r"<!--.*?-->\s*", re.DOTALL)
 _MAX_KEYWORDS = 12
 _LINE_SUMMARY_CHARS = 120
@@ -196,7 +221,9 @@ class MemoryStore:
         chunks_dir = self._chunks_dir(agent_id)
         if not chunks_dir.is_dir():
             return
-        files = sorted(chunks_dir.glob("*.md"), reverse=newest_first)
+        files = sorted(chunks_dir.glob("*.md"),
+                       key=lambda f: _chunk_sort_key(f.stem),
+                       reverse=newest_first)
         for f in files:
             if not _VALID_CHUNK_ID.match(f.stem):
                 continue
@@ -265,11 +292,14 @@ class MemoryStore:
                     session_id: str = "", channel: str = "", source: str = "",
                     keywords: list[str] | None = None, hash_: str = "") -> str:
         """Durably store one chunk file, return its id. Caller must hold
-        lock(agent_id). Ids are local timestamps (sortable, human-readable);
-        a same-second collision gets a -2/-3 suffix."""
+        lock(agent_id). Ids are local timestamps with a FULL year
+        (YYYYMMDDHHMMSS) — they are read by humans in memory.md's index, where
+        the old two-digit form was indistinguishable from a random number; a
+        same-second collision gets a -2/-3 suffix. See _chunk_sort_key for why
+        the legacy 12-digit ids still sort correctly alongside these."""
         chunks_dir = self._chunks_dir(agent_id)
         chunks_dir.mkdir(parents=True, exist_ok=True)
-        base = datetime.now().strftime("%y%m%d%H%M%S")
+        base = datetime.now().strftime("%Y%m%d%H%M%S")
         chunk_id, n = base, 1
         while self._chunk_path(agent_id, chunk_id).exists():
             n += 1
