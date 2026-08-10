@@ -1,8 +1,10 @@
-// Connectors page: messaging bots (Telegram) bound to agents, plus the address
-// book of people you can authorize on them. Served by the connectors plugin —
-// when it isn't installed these endpoints don't exist, so every view starts by
-// checking App.plugin('connectors') and says so explicitly instead of rendering
-// an empty list, which would read as "you have no bots".
+// Connectors page: channels bound to agents — a messaging bot (Telegram) or a
+// device that calls us (the voice satellite) — plus the address book of people
+// you can authorize on them. The wording stays "connector" and never "bot": a
+// kitchen speaker is neither. Served by the connectors plugin — when it isn't
+// installed these endpoints don't exist, so every view starts by checking
+// App.plugin('connectors') and says so explicitly instead of rendering an empty
+// list, which would read as "you have no connectors".
 
 const ConnectorsPage = {
     async render(params) {
@@ -24,7 +26,7 @@ const ConnectorsPage = {
                 <i class="bi ${icon}"></i> ${label}
             </a>`;
         return `<div class="d-flex flex-wrap gap-2 mb-3">
-            ${pill('bots', '#/connectors', i18n('connectors.title'), 'bi-robot')}
+            ${pill('bindings', '#/connectors', i18n('connectors.title'), 'bi-plug')}
             ${pill('contacts', '#/connectors/contacts', i18n('connectors.contactsTitle'), 'bi-person-lines-fill')}
         </div>`;
     },
@@ -46,7 +48,7 @@ const ConnectorsPage = {
             </div></div>`;
     },
 
-    // ------------------------------------------------------------------ bots
+    // -------------------------------------------------------------- bindings
     _loading(tab) {
         App.container.innerHTML = this.tabs(tab) + `
             <div class="text-secondary"><span class="spinner-border spinner-border-sm"></span>
@@ -54,21 +56,21 @@ const ConnectorsPage = {
     },
 
     async renderList() {
-        this._loading('bots');
+        this._loading('bindings');
         let bindings;
         try {
             bindings = await App.api('GET', '/connectors/bindings');
         } catch (err) {
             // An explicit error, NOT an empty list: a server that is down must
-            // never be reported as "no bots configured".
-            App.container.innerHTML = this.tabs('bots') + `
+            // never be reported as "no connectors configured".
+            App.container.innerHTML = this.tabs('bindings') + `
                 <div class="alert alert-danger">${i18n('connectors.loadError', { msg: App.esc(err.message) })}</div>`;
             return;
         }
 
         const header = `
             <div class="d-flex flex-wrap gap-2 justify-content-between align-items-center mb-2">
-                <h3 class="mb-0"><i class="bi bi-robot"></i> ${i18n('connectors.title')}</h3>
+                <h3 class="mb-0"><i class="bi bi-plug"></i> ${i18n('connectors.title')}</h3>
                 <a href="#/connectors/new" class="btn btn-primary"><i class="bi bi-plus-lg"></i> ${i18n('connectors.new')}</a>
             </div>
             <p class="text-secondary">${i18n('connectors.hint')}</p>`;
@@ -88,7 +90,7 @@ const ConnectorsPage = {
                    <tbody>${bindings.map(b => this.row(b)).join('')}</tbody>
                </table></div>`;
 
-        App.container.innerHTML = this.tabs('bots') + header + body;
+        App.container.innerHTML = this.tabs('bindings') + header + body;
         if (bindings.length) {
             App.setPageInterval(() => this.tick(), 5000);
         }
@@ -146,14 +148,14 @@ const ConnectorsPage = {
         }
         for (const b of bindings) {
             const cell = App.container.querySelector(`[data-state="${CSS.escape(b.id)}"]`);
-            if (!cell) return this.renderList();  // the set of bots changed
+            if (!cell) return this.renderList();  // the set of connectors changed
             cell.innerHTML = this.stateBadge(b);
             const msgs = App.container.querySelector(`[data-msgs="${CSS.escape(b.id)}"]`);
             if (msgs) msgs.textContent = b.status?.messages ?? 0;
         }
     },
 
-    // ------------------------------------------------------------- bot form
+    // ------------------------------------------------------- connector form
     async renderForm(bindingId) {
         const isEdit = !!bindingId;
         let b = {
@@ -229,7 +231,8 @@ const ConnectorsPage = {
                 </div>
 
                 <div class="mb-3">
-                    <label class="form-label" for="f-token">${i18n('connectors.token')}</label>
+                    <label class="form-label" for="f-token" id="token-label"
+                           >${i18n(this._label('token', 'connectors.token', b.type))}</label>
                     <div class="input-group">
                         <input type="text" class="form-control font-monospace" id="f-token" value="${App.escAttr(b.token)}">
                         <button type="button" class="btn btn-outline-info" id="btn-test">
@@ -324,7 +327,11 @@ const ConnectorsPage = {
         this._renderChips();
         document.getElementById('f-access').onchange = () => this._syncAccess();
         document.getElementById('f-type').onchange = () => {
-            // Hints and address-book chips are per channel: both follow the type.
+            // Labels, hints and address-book chips are per channel: they follow
+            // the type. A "bot token" and a device's shared key are not the same
+            // credential, and calling both "bot token" mislabels the satellite.
+            const tokLabel = document.getElementById('token-label');
+            if (tokLabel) tokLabel.textContent = i18n(this._label('token', 'connectors.token'));
             const tok = document.getElementById('token-hint');
             if (tok) tok.textContent = i18n(this._hint('token', 'connectors.tokenHint'));
             const allow = document.getElementById('allowed-hint');
@@ -604,6 +611,13 @@ const ConnectorsPage = {
      * channel — which showed the satellite hints on a telegram form. */
     _hint(field, fallback, type) {
         return this._channel(type).hints?.[field] || fallback;
+    },
+
+    /** Same as _hint() for the field LABEL: a channel that calls its credential
+     * something else than a token says so in its manifest, instead of the form
+     * naming channel types it must not know about. */
+    _label(field, fallback, type) {
+        return this._channel(type).labels?.[field] || fallback;
     },
 
     _matches(token, contact) {

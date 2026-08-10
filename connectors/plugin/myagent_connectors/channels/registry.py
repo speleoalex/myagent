@@ -4,8 +4,8 @@ A channel is a directory beside this file holding a ``channel.json`` manifest an
 the module it names:
 
     channels/<type>/
-        channel.json     {"type","label","module","class","hints":{…},"handle":{…},
-                          "url":{…},"device":{…}}
+        channel.json     {"type","label","module","class","hints":{…},"labels":{…},
+                          "handle":{…},"url":{…},"device":{…}}
         channel.py       a BaseConnector subclass
         requirements.txt optional, installed by connectors/install.sh
 
@@ -51,6 +51,10 @@ class Channel:
     type: str
     label: str = ""
     hints: dict = field(default_factory=dict)
+    # Per-field LABEL overrides (i18n keys), for channels whose credential is
+    # not what the generic form calls it: a Telegram "bot token" and a device's
+    # shared key sit in the same field and must not share a name.
+    labels: dict = field(default_factory=dict)
     handle: dict = field(default_factory=dict)
     # Shape of Binding.url for channels where WE call the device (the
     # placeholder `example`). Missing/empty = the UI hides the URL field.
@@ -75,6 +79,7 @@ class Channel:
             "type": self.type,
             "label": self.label or self.type,
             "hints": self.hints,
+            "labels": self.labels,
             "handle": self.handle,
             # None, not {}: the UI gates the URL field on this being truthy,
             # and an empty JS object is truthy.
@@ -105,6 +110,7 @@ def _load_one(directory: Path) -> Channel:
         type=meta.get("type") or directory.name,
         label=meta.get("label", ""),
         hints=meta.get("hints") or {},
+        labels=meta.get("labels") or {},
         handle=meta.get("handle") or {},
         url=meta.get("url") or {},
         device=meta.get("device") or {},

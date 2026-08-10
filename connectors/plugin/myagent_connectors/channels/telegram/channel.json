@@ -3,6 +3,9 @@
   "label": "Telegram",
   "module": "channel.py",
   "class": "TelegramConnector",
+  "labels": {
+    "token": "connectors.telegram.tokenLabel"
+  },
   "hints": {
     "token": "connectors.telegram.tokenHint",
     "allowed": "connectors.telegram.allowedHint"

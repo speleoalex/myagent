@@ -3,6 +3,9 @@
   "label": "Satellite",
   "module": "channel.py",
   "class": "SatelliteConnector",
+  "labels": {
+    "token": "connectors.satellite.tokenLabel"
+  },
   "hints": {
     "token": "connectors.satellite.tokenHint",
     "url": "connectors.satellite.urlHint"
