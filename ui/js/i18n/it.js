@@ -510,6 +510,7 @@ I18n.translations.it = {
     'chat.deleteConfirm': 'Eliminare questa chat archiviata?',
     'chat.deleteArchivedTitle': 'Elimina sessione archiviata',
     'chat.archivedBanner': 'Sessione archiviata (sola lettura).',
+    'chat.liveBanner': 'Conversazione viva su un altro canale (qui in sola lettura). Rispondi dal canale stesso.',
     'chat.backToCurrent': 'Torna alla chat corrente',
     'chat.resume': 'Riprendi questa chat',
     'chat.attachTitle': 'Allega file',

@@ -120,14 +120,21 @@ class NamedSessionStore:
 
     def list_summaries(self, prefix: str = "") -> list[dict]:
         """Summaries of (a subset of) channel sessions, same shape as
-        SessionStore.list_history() — used to surface the autonomous sessions
-        (``autonomous_*``) in the web UI's session list."""
+        SessionStore.list_history() plus ``live: True`` — used to surface the
+        autonomous and connector sessions in the web UI's session list.
+
+        The extra flag is what lets the UI tell these apart from an ARCHIVED
+        channel chat, which carries the same channel/source provenance but is a
+        closed history file. A live one cannot be resumed (the connector keeps
+        writing to it), so the UI must not offer the action."""
         out = []
         for f in self.base.glob(f"{prefix}*.json"):
             s = read_json(f)
             if s is None or not s.get("messages"):
                 continue
-            out.append(session_summary(s, fallback_id=f.stem))
+            summary = session_summary(s, fallback_id=f.stem)
+            summary["live"] = True
+            out.append(summary)
         return out
 
     def delete(self, session_id: str) -> bool:

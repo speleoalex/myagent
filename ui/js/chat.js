@@ -66,8 +66,8 @@ const ChatPage = {
                     </button>
                 </div>
                 <div id="archived-banner" class="alert alert-warning py-1 px-2 mb-2" style="display:none">
-                    <i class="bi bi-archive"></i> ${i18n('chat.archivedBanner')}
-                    <a href="#" id="resume-current">${i18n('chat.resume')}</a> ·
+                    <i class="bi bi-archive"></i> <span id="archived-text">${i18n('chat.archivedBanner')}</span>
+                    <a href="#" id="resume-current">${i18n('chat.resume')}</a><span id="resume-sep"> · </span>
                     <a href="#" id="back-current">${i18n('chat.backToCurrent')}</a>
                 </div>
                 <div id="chat-messages" class="flex-grow-1 overflow-auto border rounded p-3 mb-2"></div>
@@ -251,7 +251,21 @@ const ChatPage = {
         if (!session) return;
         this.viewingArchived = true;
         this._archivedId = id;
+        // A LIVE channel session (Telegram, satellite, an autonomous agent) is
+        // read-only for a different reason than an archived chat: its connector
+        // is still writing to it, so "resume" has nothing to reopen and the
+        // endpoint 404s. Offering the link made it a silent no-op — say why
+        // instead. `live` comes from the history listing (loaded before any
+        // viewArchived call, deep links included).
+        const row = (this._history || []).find(s => s.id === id);
+        const live = this._archivedLive = !!(row && row.live);
         document.getElementById('archived-banner').style.display = '';
+        const banner = document.getElementById('archived-text');
+        if (banner) banner.textContent = i18n(live ? 'chat.liveBanner' : 'chat.archivedBanner');
+        const resume = document.getElementById('resume-current');
+        if (resume) resume.style.display = live ? 'none' : '';
+        const sep = document.getElementById('resume-sep');
+        if (sep) sep.style.display = live ? 'none' : '';
         document.getElementById('btn-del').style.display = '';
         this.setInputEnabled(false);
         this.renderSessionMessages(session);
@@ -266,7 +280,7 @@ const ChatPage = {
     },
 
     async resumeArchived() {
-        if (!this._archivedId) return;
+        if (!this._archivedId || this._archivedLive) return;
         // Makes the archived chat the current one (archiving whatever is active).
         try { await App.api('POST', '/sessions/' + this._archivedId + '/resume'); } catch (e) { /* ignore */ }
         this.attachments = [];

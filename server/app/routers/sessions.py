@@ -3,7 +3,6 @@ import asyncio
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from app.engine.autonomy import AUTONOMOUS_PREFIX, is_autonomous_session
 from app.engine.executor import AgentExecutor
 
 router = APIRouter()
@@ -41,12 +40,15 @@ def _truncate_conversation(conversation: list[dict], keep_turns: int) -> list[di
 
 @router.get("")
 async def list_sessions(request: Request):
-    """List archived chats (newest first), plus the live agents' autonomous
-    sessions — they never pass through "new chat", so they would otherwise be
-    invisible until rotated into the history."""
+    """List archived chats (newest first), plus every LIVE channel session:
+    autonomous wakes AND connector conversations (Telegram, satellite, ...).
+    None of those pass through "new chat", so they only reach the history when
+    reset or rotated — a Telegram chat active minutes ago was invisible while
+    an autonomous one was listed, for no reason beyond the prefix filter this
+    used to pass (reported 2026-08-10). Their `channel`/`source` fields already
+    feed the provenance badge, so no listing shape changes."""
     out = request.app.state.sessions.list_history()
-    out.extend(request.app.state.named_sessions.list_summaries(
-        prefix=AUTONOMOUS_PREFIX))
+    out.extend(request.app.state.named_sessions.list_summaries())
     out.sort(key=lambda x: x.get("updated_at", ""), reverse=True)
     return out
 
@@ -126,7 +128,11 @@ async def resume_session(session_id: str, request: Request):
 @router.get("/{session_id}")
 async def get_session(session_id: str, request: Request):
     s = request.app.state.sessions.get(session_id)
-    if s is None and is_autonomous_session(session_id):
+    if s is None:
+        # Any live channel session, not just the autonomous ones: whatever the
+        # listing offers must be openable, or a row in the history is a dead
+        # link. `exists()` gates it, so `get` (which would otherwise mint an
+        # empty session) can never invent one.
         named = request.app.state.named_sessions
         if named.exists(session_id):
             s = await asyncio.to_thread(named.get, session_id)
@@ -139,13 +145,14 @@ async def get_session(session_id: str, request: Request):
 async def delete_session(session_id: str, request: Request):
     if request.app.state.sessions.delete(session_id):
         return {"ok": True}
-    if is_autonomous_session(session_id):
-        # An autonomous session is a living channel file: deleting it means
-        # archiving the log into the regular history first (same flow as a
-        # connector /reset), serialized on the session lock so it can't race
-        # an in-flight wake.
-        existed, archived = await request.app.state.named_sessions \
-            .archive_and_reset(session_id)
+    named = request.app.state.named_sessions
+    if named.exists(session_id):
+        # A channel session (autonomous wake or connector chat) is a living
+        # file: deleting it means archiving the log into the regular history
+        # first — exactly what a connector /reset does — serialized on the
+        # session lock so it can't race an in-flight turn. It is a full reset,
+        # conversation included: the next inbound message starts fresh.
+        existed, archived = await named.archive_and_reset(session_id)
         if existed:
             return {"ok": True, "archived": archived}
     raise HTTPException(404, "Session not found")
