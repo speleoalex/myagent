@@ -5,7 +5,12 @@ import sys
 from pathlib import Path
 
 args = json.loads(sys.stdin.read())
-path = Path(args["path"])
+# cwd IS the workspace: without this a "~/..." path is taken as relative and
+# creates a directory literally named "~" (see file_write for the full story).
+try:
+    path = Path(args["path"]).expanduser()
+except RuntimeError:
+    path = Path(args["path"])
 
 try:
     path.mkdir(parents=True, exist_ok=True)

@@ -5,7 +5,12 @@ import sys
 from pathlib import Path
 
 args = json.loads(sys.stdin.read())
-path = Path(args["path"])
+# cwd IS the workspace: without this a "~/..." path is taken as relative, so the
+# file the model just wrote reads back as "not found" (see file_write).
+try:
+    path = Path(args["path"]).expanduser()
+except RuntimeError:
+    path = Path(args["path"])
 max_lines = args.get("max_lines") or 200
 
 if not path.exists():

@@ -5,7 +5,15 @@ import sys
 from pathlib import Path
 
 args = json.loads(sys.stdin.read())
-path = Path(args["path"])
+# cwd IS the workspace, so "~/myagent/workspace/x" from the model would be read
+# as a RELATIVE path and mkdir(parents=True) would materialize a directory named
+# literally "~" (observed 2026-08-10: workspace/~/myagent/workspace/itinerario/).
+# An unresolvable "~user" is left as typed: RuntimeError out of a tool is a
+# traceback, not something the model can act on.
+try:
+    path = Path(args["path"]).expanduser()
+except RuntimeError:
+    path = Path(args["path"])
 content = args["content"]
 
 try:
