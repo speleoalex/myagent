@@ -32,6 +32,19 @@ def _record_user(session: dict, req: ChatRequest) -> None:
                      [a.model_dump() for a in req.attachments], req.agent_id)
 
 
+def _remember_model_override(session: dict, req: ChatRequest) -> None:
+    """Keep the chat's model pick on the CURRENT session, for the UI only.
+
+    The override itself travels in every request — this stored copy is what
+    lets the selector survive a page reload without pretending to be a
+    setting: a new chat starts from a fresh session and is back on the
+    default, and nothing outside the web current chat ever reads it."""
+    if req.model_override:
+        session["model_override"] = req.model_override
+    else:
+        session.pop("model_override", None)
+
+
 @router.post("")
 async def chat(req: ChatRequest, request: Request) -> ChatResponse:
     stores: Stores = request.app.state.stores
@@ -40,7 +53,9 @@ async def chat(req: ChatRequest, request: Request) -> ChatResponse:
     live = request.app.state.live
 
     try:
-        executor = await AgentExecutor.create_for_agent(req.agent_id, tool_registry, stores)
+        executor = await AgentExecutor.create_for_agent(
+            req.agent_id, tool_registry, stores,
+            model_override=req.model_override)
     except ValueError as e:
         raise HTTPException(404, str(e))
 
@@ -51,6 +66,7 @@ async def chat(req: ChatRequest, request: Request) -> ChatResponse:
     session = session_store.get_current()
     if live.is_active(session["id"]):
         raise HTTPException(409, "A generation is already running for this chat")
+    _remember_model_override(session, req)
     prior = [ChatMessage(**m) for m in session.get("conversation", [])]
     attachments = [a.model_dump() for a in req.attachments] or None
 
@@ -145,7 +161,9 @@ async def chat_stream(req: ChatRequest, request: Request):
     live = request.app.state.live
 
     try:
-        executor = await AgentExecutor.create_for_agent(req.agent_id, tool_registry, stores)
+        executor = await AgentExecutor.create_for_agent(
+            req.agent_id, tool_registry, stores,
+            model_override=req.model_override)
     except ValueError as e:
         raise HTTPException(404, str(e))
 
@@ -156,6 +174,7 @@ async def chat_stream(req: ChatRequest, request: Request):
     # (defensive: the UI shows Stop, not Send, while a run is active).
     if live.is_active(sid):
         return _sse(live.get(sid).subscribe())
+    _remember_model_override(session, req)
 
     prior = [ChatMessage(**m) for m in session.get("conversation", [])]
     attachments = [a.model_dump() for a in req.attachments] or None

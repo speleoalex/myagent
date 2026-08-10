@@ -150,6 +150,9 @@ class AgentExecutor:
         # instead of the configured default. Emitted once, as an SSE `notice`:
         # a silent substitution is a bug the user discovers months later.
         self.notice: str | None = None
+        # The chat's per-request model pick (ChatRequest.model_override),
+        # carried so call_agent propagates it to "default" sub-agents.
+        self.model_override: str | None = None
 
     # ------------------------------------------------------------------
     # Small helpers
@@ -277,6 +280,7 @@ class AgentExecutor:
         tool_registry: ToolRegistry,
         stores: Stores,
         depth: int = 0,
+        model_override: str | None = None,
     ) -> AgentExecutor:
         agent_data = stores.agents.get(agent_id)
         if agent_data is None:
@@ -287,14 +291,33 @@ class AgentExecutor:
         # "use the default model configured in Settings". Read config.settings
         # live — it's reassigned when settings are updated.
         #
-        # An agent on the default goes through resolve_default, which falls back
-        # to a reachable local model when the configured one is down or gone —
-        # otherwise a fresh install (default: llama.cpp on :8080) fails on the
-        # first message even with Ollama running. It never writes settings, so
-        # the user's choice comes back the moment their backend does.
+        # ``model_override`` is a per-chat substitute for the DEFAULT only (the
+        # web UI's chat selector): an agent pinned to a specific model keeps it
+        # — pinning is the stronger, per-agent choice. The override is loaded
+        # directly, no resolve_default fallback and no notice: it is an explicit
+        # pick, and silently swapping an explicit pick is exactly what the
+        # notice machinery exists to prevent.
+        #
+        # An agent on the default otherwise goes through resolve_default, which
+        # falls back to a reachable local model when the configured one is down
+        # or gone — otherwise a fresh install (default: llama.cpp on :8080)
+        # fails on the first message even with Ollama running. It never writes
+        # settings, so the user's choice comes back the moment their backend
+        # does.
         model_id = agent.model_id
         notice: str | None = None
-        if model_id in ("", "default"):
+        if model_id in ("", "default") and model_override:
+            model_data = stores.models.get(model_override)
+            if model_data is None:
+                known = ", ".join(sorted(
+                    d.get("id", "") for d in stores.models.list_all())) or "none"
+                raise ValueError(
+                    f"Model '{model_override}' (picked for this chat) no longer "
+                    f"exists. Pick another model, or set the chat back to the "
+                    f"default (available: {known})."
+                )
+            model_config = ModelConfig(**model_data)
+        elif model_id in ("", "default"):
             model_config, notice = await resolve_default(
                 stores.models, config.settings.default_model_id)
         else:
@@ -311,6 +334,10 @@ class AgentExecutor:
 
         executor = cls(agent, model_config, tool_registry, stores, depth)
         executor.notice = notice
+        # Carried even when THIS agent is pinned (and the override didn't
+        # apply): call_agent passes it down, so a "default" sub-agent behind a
+        # pinned router still follows the chat's model choice.
+        executor.model_override = model_override
         return executor
 
     # ------------------------------------------------------------------

@@ -511,6 +511,8 @@ I18n.translations.it = {
     'chat.deleteArchivedTitle': 'Elimina sessione archiviata',
     'chat.archivedBanner': 'Sessione archiviata (sola lettura).',
     'chat.liveBanner': 'Conversazione viva su un altro canale (qui in sola lettura). Rispondi dal canale stesso.',
+    'chat.modelDefault': 'Modello predefinito',
+    'chat.modelTitle': 'Modello solo per questa chat — gli agenti con un modello fissato lo mantengono',
     'chat.backToCurrent': 'Torna alla chat corrente',
     'chat.resume': 'Riprendi questa chat',
     'chat.attachTitle': 'Allega file',

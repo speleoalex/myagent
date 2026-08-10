@@ -115,6 +115,9 @@ async def call_agent_handler(
             executor.tool_registry,
             executor.stores,
             depth=depth + 1,
+            # The chat's model pick follows the delegation: a sub-agent on
+            # "default" runs on the same model the user chose for this chat.
+            model_override=executor.model_override,
         )
         forwarded = _resolve_attachments(executor, attachment_indices)
         # The event_sink streams the sub-agent's activity (tokens + tools)

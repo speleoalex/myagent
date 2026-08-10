@@ -339,6 +339,13 @@ class ChatRequest(BaseModel):
     # "please repeat", not a best guess. Per message, like `sender` — the next
     # turn may well be typed.
     transcribed: bool = False
+    # Model id to use FOR THIS CHAT in place of the configured default. Applies
+    # only to agents whose model is the "default" sentinel — an agent pinned to
+    # a specific model keeps it — and rides the executor into call_agent, so a
+    # delegated sub-agent on "default" runs on the same override. Never written
+    # to settings: the choice lives in the request (and on the current session,
+    # for the UI selector to survive a reload).
+    model_override: str | None = None
 
     @field_validator("session_id")
     @classmethod
@@ -350,6 +357,13 @@ class ChatRequest(BaseModel):
     @field_validator("source")
     @classmethod
     def validate_source(cls, v: str | None) -> str | None:
+        return None if not v else _check_id(v)
+
+    @field_validator("model_override")
+    @classmethod
+    def validate_model_override(cls, v: str | None) -> str | None:
+        # Same charset as every entity id; empty = no override, not an error
+        # (the UI sends '' when the selector is back on "default").
         return None if not v else _check_id(v)
 
     @field_validator("sender")

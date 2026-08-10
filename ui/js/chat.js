@@ -28,6 +28,11 @@ const ChatPage = {
         let agents = [];
         try { agents = await App.api('GET', '/agents?selectable=true'); } catch (e) { /* empty */ }
         this.agents = agents;
+        // For the per-chat model selector. A failed fetch degrades to no
+        // selector at all — the chat itself must not depend on this list.
+        let models = [];
+        try { models = await App.api('GET', '/models'); } catch (e) { /* empty */ }
+        this.models = models;
 
         if (agents.length === 0) {
             App.container.innerHTML = `
@@ -55,6 +60,14 @@ const ChatPage = {
                             <option value="${App.escAttr(a.id)}" ${a.id === this.currentAgentId ? 'selected' : ''}>${App.esc(a.name)}</option>
                         `).join('')}
                     </select>
+                    ${models.length ? `
+                    <select id="model-select" class="form-select" style="max-width:200px"
+                            title="${i18n('chat.modelTitle')}">
+                        <option value="">${i18n('chat.modelDefault')}</option>
+                        ${models.map(m => `
+                            <option value="${App.escAttr(m.id)}">${App.esc(m.name || m.id)}</option>
+                        `).join('')}
+                    </select>` : ''}
                     <button class="btn btn-outline-primary" id="btn-new" title="${i18n('chat.newChatTitle')}">
                         <i class="bi bi-plus-lg"></i> ${i18n('chat.newChat')}
                     </button>
@@ -236,6 +249,14 @@ const ChatPage = {
             this.currentAgentId = session.agent_id;
             const as = document.getElementById('agent-select'); if (as) as.value = session.agent_id;
         }
+        // The chat's model pick lives on the session (a new chat has none).
+        // Only restore an id that still exists: a deleted model must degrade
+        // to the default, not 404 every send from a stale selector.
+        const override = session && session.model_override;
+        this.modelOverride = (override && this.models.some(m => m.id === override))
+            ? override : null;
+        const msel = document.getElementById('model-select');
+        if (msel) msel.value = this.modelOverride || '';
         this.renderSessionMessages(session || { messages: [] });
         // If a response is still being generated for this chat, reconnect to
         // its live stream (replay so far + follow the tail).
@@ -383,6 +404,10 @@ const ChatPage = {
             this.renderAttachChips();
             if (this.viewingArchived) this.loadCurrent();
         };
+        // Per-chat model pick: state only — it rides every send request, and
+        // the server keeps it on the current session so a reload restores it.
+        const ms = document.getElementById('model-select');
+        if (ms) ms.onchange = (e) => { this.modelOverride = e.target.value || null; };
     },
 
     readFile(file, as) {
@@ -523,6 +548,7 @@ const ChatPage = {
                     agent_id: this.currentAgentId,
                     message,
                     attachments: attachments.map(a => this._attachForSend(a)),
+                    model_override: this.modelOverride || null,
                 }),
                 signal: this.abortController.signal,
             });
