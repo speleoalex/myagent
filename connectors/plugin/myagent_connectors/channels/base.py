@@ -289,11 +289,16 @@ class BaseConnector:
     async def process_message(self, chat_id, user_id, text: str,
                               username: str | None = None,
                               attachments: list[dict] | None = None,
-                              sender_name: str | None = None) -> None:
+                              sender_name: str | None = None,
+                              transcribed: bool = False) -> None:
         """Full inbound pipeline: access → commands → agent → reply.
 
         ``attachments`` is a list of Attachment dicts (image/text) the transport
         already downloaded and prepared for the agent.
+
+        ``transcribed`` marks ``text`` as a machine transcription of speech (a
+        voice note): passed through to the agent turn, where it buys a system
+        note telling the model to ask for a repeat rather than guess at garble.
 
         ``sender_name`` is the transport's display name for the sender (e.g.
         Telegram first/last name) — a fallback for the provenance line when the
@@ -359,7 +364,8 @@ class BaseConnector:
                 source=self.type,
                 sender_id=user_id,
                 sender_username=username or "",
-                sender_name=sender_name or "")
+                sender_name=sender_name or "",
+                transcribed=transcribed)
         except Exception as e:
             log.exception("agent call failed (%s): %s", self.binding.id, e)
             await self.send(chat_id, "⚠️ Error generating the reply. Please try again later.")

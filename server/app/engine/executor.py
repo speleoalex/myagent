@@ -908,7 +908,8 @@ class AgentExecutor:
         return prompts.SECTION_MEMORY + "\n\n".join(parts)
 
     def _prepare_turn(self, tool_defs: list[dict], attachments: list[dict] | None,
-                      memory_context: list | None = None):
+                      memory_context: list | None = None,
+                      transcribed: bool = False):
         """Return (system_content, tool_defs, openai_tools) for this turn.
 
         When the user attaches files, append a manifest so the model knows what
@@ -933,6 +934,8 @@ class AgentExecutor:
         )
         if has_attachment:
             suffix += self._build_attachments_manifest(attachments)
+        if transcribed:
+            suffix += prompts.SECTION_VOICE
         self._system_suffix = suffix
         system_content = self._system_prompt_with_tools(tool_defs) + suffix
         return system_content, tool_defs, openai_tools
@@ -977,6 +980,7 @@ class AgentExecutor:
         attachments: list[dict] | None = None,
         memory_context: list | None = None,
         event_sink=None,
+        transcribed: bool = False,
     ) -> ChatResponse:
         """Non-streaming entry point: drain run_stream() and return the final
         ChatResponse (single implementation of the loop lives there).
@@ -988,7 +992,7 @@ class AgentExecutor:
         response: ChatResponse | None = None
         error: str | None = None
         async for event in self.run_stream(user_message, conversation, attachments,
-                                           memory_context):
+                                           memory_context, transcribed=transcribed):
             et = event.get("type")
             if et == "done":
                 response = ChatResponse(**event.get("data", {}))
@@ -1015,8 +1019,15 @@ class AgentExecutor:
         conversation: list[ChatMessage] | None = None,
         attachments: list[dict] | None = None,
         memory_context: list | None = None,
+        transcribed: bool = False,
     ):
         """The agent loop, as an async generator of SSE-compatible event dicts.
+
+        ``transcribed`` marks a message that arrived as speech and was
+        machine-transcribed (voice satellite, Telegram voice note): the system
+        prompt gains a turn-scoped note (prompts.SECTION_VOICE) telling the
+        model to ask briefly for a repeat instead of guessing at a garbled
+        transcript.
 
         Event types: token, clear_tokens, tool_start, tool_result, notice,
         error, done, plus agent_event — a delegated sub-agent's live activity,
@@ -1031,7 +1042,8 @@ class AgentExecutor:
             if self.notice and self.depth == 0:
                 yield {"type": "notice", "data": self.notice}
             async for event in self._run_stream_inner(user_message, conversation,
-                                                      attachments, memory_context):
+                                                      attachments, memory_context,
+                                                      transcribed=transcribed):
                 yield event
         finally:
             # Runs on normal completion AND on generator abort (Stop button /
@@ -1044,6 +1056,7 @@ class AgentExecutor:
         conversation: list[ChatMessage] | None,
         attachments: list[dict] | None,
         memory_context: list | None = None,
+        transcribed: bool = False,
     ):
         self._debug_reset(user_message)
         # Write attachments to workspace files (stamping a `path` on each) so the
@@ -1063,7 +1076,7 @@ class AgentExecutor:
         await self.tool_registry.ensure_mcp(self.agent.tools)
         tool_defs = self.tool_registry.get_definitions_for_agent(self.agent.tools)
         system_content, tool_defs, openai_tools = self._prepare_turn(
-            tool_defs, attachments, memory_context)
+            tool_defs, attachments, memory_context, transcribed=transcribed)
 
         # System prompt (tool descriptions injected if model doesn't support native tools)
         messages.append({"role": "system", "content": system_content})

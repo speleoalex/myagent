@@ -54,7 +54,8 @@ async def run_channel_turn(req: ChatRequest, named, executor) -> ChatResponse:
             model_message = f"[{req.sender}]\n{req.message}"
 
         response = await executor.run(model_message, prior, attachments,
-                                      memory_context=memory_context(session))
+                                      memory_context=memory_context(session),
+                                      transcribed=req.transcribed)
 
         conv = [m.model_dump(exclude_none=True) for m in response.conversation]
         record_user_turn(session, req.message,

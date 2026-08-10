@@ -103,6 +103,23 @@ SECTION_AGENTS = "\n\n## Available Agents\n"
 SECTION_ATTACHMENTS = "\n\n## Attachments (this turn)"
 SECTION_MEMORY = "\n\n## Memory\n"
 
+#: Turn-scoped note for a message that arrived as SPEECH (voice satellite,
+#: Telegram voice note) and was machine-transcribed. Whisper does not fail on a
+#: bad capture, it produces plausible wrong words — and a model that answers a
+#: garbled transcript with its best guess turns one mis-hearing into a wrong
+#: action. English like every other system section: the language-flip hazard is
+#: the first line of the USER turn, not the system prompt, and the instruction
+#: itself demands the reply in the user's language. The ask-to-repeat must be
+#: SHORT because on a satellite it is spoken into the room.
+SECTION_VOICE = (
+    "\n\n## Voice input\n"
+    "This message was dictated by voice and transcribed automatically, so it may "
+    "contain recognition errors (wrong, fused or missing words). If the request "
+    "is understandable, answer it normally and do not mention the transcription. "
+    "If it is garbled or makes no sense, do not guess: reply only with a brief "
+    "request, in the user's language, to repeat."
+)
+
 #: Preamble of the text-protocol tool block. Only sent when the provider has no
 #: native tool calling: in native mode the `tools` payload IS the documentation,
 #: and sending both made models emit JSON as prose at ~650 tokens per turn.

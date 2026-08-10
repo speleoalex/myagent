@@ -137,9 +137,14 @@ class SatelliteConnector(BaseConnector):
         return data or {}
 
     # --------------------------------------------------------------- inbound
-    async def ask(self, text: str, sender_name: str = "") -> str:
+    async def ask(self, text: str, sender_name: str = "",
+                  transcribed: bool = False) -> str:
         """One spoken exchange: run the agent turn and RETURN the reply — the
         device is waiting on it in the inbound HTTP response.
+
+        ``transcribed`` distinguishes the device's two inputs — /listen (speech,
+        True) from the page's text box (typed, False): only a transcript may
+        carry recognition errors worth a "please repeat".
 
         chat_id ≡ binding id: the device has exactly one conversation, and an
         address-book contact reaches it with ``handles["satellite"] = binding
@@ -169,7 +174,8 @@ class SatelliteConnector(BaseConnector):
                 self.binding.agent_id, text, sid,
                 source=self.type,
                 sender_id=chat_key,
-                sender_name=sender_name or self.binding.name)
+                sender_name=sender_name or self.binding.name,
+                transcribed=transcribed)
         finally:
             self._busy.discard(chat_key)
         self.status.messages += 1

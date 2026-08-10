@@ -95,7 +95,10 @@ async def inbound(binding_id: str, req: InboundReq, request: Request):
                                  "recognized")
 
     try:
-        reply = await connector.ask(text, sender_name=req.sender_name)
+        # audio_b64 present = `text` is a transcript, and the flag rides along
+        # so the model knows to ask for a repeat rather than guess at garble.
+        reply = await connector.ask(text, sender_name=req.sender_name,
+                                    transcribed=bool(req.audio_b64))
     except Exception as e:
         log.exception("inbound turn failed (%s): %s", binding_id, e)
         raise HTTPException(502, "Error generating the reply. Try again later.")

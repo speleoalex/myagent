@@ -67,7 +67,8 @@ class CoreClient:
                    attachments: list[dict] | None = None,
                    source: str | None = None,
                    sender_id: str = "", sender_username: str = "",
-                   sender_name: str = "") -> tuple[str, list[dict]]:
+                   sender_name: str = "",
+                   transcribed: bool = False) -> tuple[str, list[dict]]:
         """Run one agent turn; return ``(reply text, delivered resources)``.
 
         The resources are the files the turn flagged for the user (the
@@ -80,6 +81,11 @@ class CoreClient:
         @username, display name); it is resolved against the address book here
         — the one place that has both the transport data and the services —
         into the ``ChatRequest.sender`` provenance line the model sees.
+
+        ``transcribed`` says the message arrived as SPEECH and is a machine
+        transcription (satellite /listen, Telegram voice note): the executor
+        adds a turn-scoped system note so a garbled transcript earns a short
+        "please repeat" instead of a best guess.
 
         Raises on failure (a bad agent id, a model that is down, a turn that
         exceeds CHAT_TIMEOUT); the caller turns that into a message to the user.
@@ -102,6 +108,7 @@ class CoreClient:
             attachments=attachments or [],
             source=source,
             sender=sender or None,
+            transcribed=transcribed,
         )
         async with self._turns:
             executor = await AgentExecutor.create_for_agent(

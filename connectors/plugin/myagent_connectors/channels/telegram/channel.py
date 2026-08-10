@@ -439,6 +439,7 @@ class TelegramConnector(BaseConnector):
         self.status.last_update = datetime.now().isoformat(timespec="seconds")
 
         attachments = None
+        transcribed = False
         if has_media:
             # Don't download anything from users who aren't authorized anyway.
             if not self.quick_authorized(user_id, username):
@@ -451,6 +452,7 @@ class TelegramConnector(BaseConnector):
                 if err:
                     await self.send(chat_id, err)
                     return
+                transcribed = True
             else:
                 atts, caption, err = await self._extract_attachments(msg)
                 if err:
@@ -461,7 +463,8 @@ class TelegramConnector(BaseConnector):
                 text = caption
 
         await self.process_message(chat_id, user_id, text or "", username=username,
-                                   attachments=attachments, sender_name=sender_name)
+                                   attachments=attachments, sender_name=sender_name,
+                                   transcribed=transcribed)
 
     async def _transcribe_voice(self, chat_id, msg: dict):
         """Download a voice note and transcribe it locally to text. Returns

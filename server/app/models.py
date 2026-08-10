@@ -333,6 +333,12 @@ class ChatRequest(BaseModel):
     # display message stays exactly what the person typed. Per message, not per
     # session, because in a group chat the sender changes at every turn.
     sender: str | None = None
+    # True when `message` arrived as SPEECH and was machine-transcribed (voice
+    # satellite, Telegram voice note). The executor adds a turn-scoped system
+    # note (prompts.SECTION_VOICE): a garbled transcript should earn a short
+    # "please repeat", not a best guess. Per message, like `sender` — the next
+    # turn may well be typed.
+    transcribed: bool = False
 
     @field_validator("session_id")
     @classmethod
