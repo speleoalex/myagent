@@ -164,6 +164,16 @@ Requires a desktop session (Raspberry Pi OS with desktop, autologin on) and
 `chromium-browser`. Undo the screen tweak with `xset s on +dpms` if you would
 rather the panel blanks.
 
+**Back to the desktop.** Fullscreen with no keyboard in the room also means no
+way out, and the desktop of the machine is where you join a WiFi or read a log.
+The settings screen therefore has **Close the browser**, which appears only when
+a kiosk browser is actually running here. It asks twice (this is the panel's
+only interface), then the device sends its own Chromium a `SIGTERM` — a page
+cannot close a window it did not open, so `POST /kiosk/close` does it. Only the
+browser started with the kiosk profile is closed; a normal Chromium of yours on
+another workspace is left alone. To bring the page back, run `kiosk.sh` again or
+reboot.
+
 ## Check it works
 
 ```bash

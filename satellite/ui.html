@@ -235,6 +235,15 @@
       <div class="grid" id="audio-grid"></div>
     </div>
 
+    <!-- The way back to the machine. Shown only when the device says a kiosk
+         browser is running, because that is the only case where this page IS
+         the whole screen. -->
+    <div class="card" id="c-kiosk" hidden>
+      <h2 id="h-kiosk"></h2>
+      <div class="row"><button id="btn-kiosk"></button></div>
+      <div class="hint" id="kiosk-state"></div>
+    </div>
+
     <div class="hint" id="cfg-file"></div>
     <div class="row" id="save-bar">
       <button class="primary" id="btn-apply"></button>
@@ -273,6 +282,9 @@ const STR = {
     samplerate: 'Sample rate', silence_threshold: 'Silence threshold',
     silence_ms: 'Silence (ms)', max_seconds: 'Max seconds',
     wait_speech_s: 'Wait for speech (s)', max_gain: 'Auto-gain (max ×)',
+    kioskSec: 'Screen', closeBrowser: 'Close the browser', closeAsk: 'Close?',
+    kioskHint: 'Leaves this page and shows the desktop of the device. '
+             + 'To bring it back: run kiosk.sh, or reboot.',
   },
   it: {
     mic: 'microfono', noMic: 'nessun microfono', tts: 'voce', noTts: 'nessuna voce',
@@ -299,6 +311,9 @@ const STR = {
     samplerate: 'Campionamento', silence_threshold: 'Soglia di silenzio',
     silence_ms: 'Silenzio (ms)', max_seconds: 'Durata massima (s)',
     wait_speech_s: 'Attesa del parlato (s)', max_gain: 'Guadagno automatico (× max)',
+    kioskSec: 'Schermo', closeBrowser: 'Chiudi il browser', closeAsk: 'Chiudere?',
+    kioskHint: 'Esce da questa pagina e mostra il desktop del dispositivo. '
+             + 'Per riaprirla: kiosk.sh, oppure riavvia.',
   },
 };
 const pick = code => STR[String(code || '').slice(0, 2).toLowerCase()];
@@ -388,6 +403,7 @@ async function load(screen) {
   $('audio-grid').innerHTML = Object.entries(cfg.audio || {}).map(([k, v]) =>
     '<div><label for="a-' + k + '">' + esc(T[k] || k) + '</label>'
     + '<input type="number" id="a-' + k + '" data-audio="' + esc(k) + '" value="' + esc(v) + '"></div>').join('');
+  $('c-kiosk').hidden = !d.kiosk;
   $('cfg-file').textContent = T.file + (d.config_file || '');
   showInstall(cfg.voice_install || {});
   show(screen || (($('s-cfg').hidden === false) ? 'cfg' : 'main'));
@@ -570,6 +586,28 @@ $('btn-apply').onclick = async (e) => {
     e.target.disabled = false;
   }
 };
+// Asks twice, like Reset and for a stronger reason: this is the panel's only
+// interface, and once the browser is gone it takes a keyboard on the device to
+// bring it back. The page cannot close itself (a window it did not open refuses
+// window.close()), so the device terminates its own kiosk browser.
+let kioskArmed = 0;
+$('btn-kiosk').onclick = async () => {
+  if (!kioskArmed) {
+    kioskArmed = setTimeout(() => { kioskArmed = 0; $('btn-kiosk').textContent = T.closeBrowser; }, 4000);
+    $('btn-kiosk').textContent = T.closeAsk;
+    return;
+  }
+  clearTimeout(kioskArmed); kioskArmed = 0;
+  $('btn-kiosk').textContent = T.closeBrowser;
+  try {
+    await api('POST', '/kiosk/close', {});
+  } catch (err) {
+    // Reached when nothing was closed (409): the window is still here to read
+    // it, which is exactly when the message is worth writing.
+    $('kiosk-state').innerHTML = '<span class="err">' + esc(err.message) + '</span>';
+  }
+};
+
 $('btn-voice').onclick = async (e) => {
   const name = $('f-newvoice').value.trim();
   if (!name) return;
@@ -604,6 +642,9 @@ function applyStrings() {
   $('btn-apply').textContent = T.apply;
   $('l-newvoice').textContent = T.newVoice;
   $('btn-voice').textContent = T.download;
+  $('h-kiosk').textContent = T.kioskSec;
+  $('btn-kiosk').textContent = T.closeBrowser;
+  $('kiosk-state').textContent = T.kioskHint;
 }
 applyStrings();
 if (key) load('main'); else show('key', '');

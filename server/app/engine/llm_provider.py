@@ -31,6 +31,17 @@ DROPPABLE_PARAMS = (
 # iteration to a system prompt without the text-protocol instructions.
 _PARAM_FIXES: dict[tuple[str, str], dict[str, str | None]] = {}
 
+# Parameters an endpoint requires ALONGSIDE `tools` before it accepts them.
+# OpenAI reasoning models refuse function tools on /v1/chat/completions unless
+# reasoning_effort is 'none' — and the refusal names that fix, so taking it
+# keeps native tool calling instead of falling through to the no-tools branch,
+# which would silently downgrade a tool-capable model to the text protocol
+# (observed with gpt-5.6-luna, 2026-08-11). Only applied to payloads that carry
+# tools: the conflict is with the combination, and forcing reasoning off on
+# plain calls would degrade them. Memoized process-wide like _PARAM_FIXES and
+# for the same reason.
+_TOOLS_PARAM_ADDS: dict[tuple[str, str], dict[str, str]] = {}
+
 # Output caps this endpoint has told us about by REFUSING a request ("max_tokens:
 # 100000 > 64000, which is the maximum ..."). Memoized like _PARAM_FIXES and for
 # the same reason: without it every turn re-pays the 400 that discovers the
@@ -101,6 +112,10 @@ class LLMProvider:
         self._max_out: int | None = None
         # Payload fields this endpoint has already rejected (see _PARAM_FIXES).
         self._param_fixes = _PARAM_FIXES.setdefault(
+            (model_config.base_url, model_config.model), {}
+        )
+        # Parameters this endpoint wants alongside `tools` (see _TOOLS_PARAM_ADDS).
+        self._tools_param_adds = _TOOLS_PARAM_ADDS.setdefault(
             (model_config.base_url, model_config.model), {}
         )
         self._caps_key = (model_config.base_url, model_config.model)
@@ -324,6 +339,12 @@ class LLMProvider:
         max_tokens = self.config.options.get("max_tokens", default_max)
         if max_tokens:
             payload["max_tokens"] = max_tokens
+
+        # Re-apply what this endpoint demanded alongside `tools` — BEFORE the
+        # fixes below, so a later "drop this param" verdict still wins.
+        if "tools" in payload:
+            for key, value in self._tools_param_adds.items():
+                payload.setdefault(key, value)
 
         # Re-apply what this endpoint already told us it doesn't accept. The
         # "tools" sentinel is NOT a payload fix: it acts through supports_tools
@@ -584,9 +605,11 @@ class LLMProvider:
 
         # A 400 from an OpenAI-compatible endpoint usually means "this model
         # doesn't accept that field" rather than a real failure: adapt the
-        # payload (drop the rejected param, then fall back to no tools) and
-        # retry until nothing is left to adapt.
-        for _ in range(len(DROPPABLE_PARAMS) + 2):
+        # payload (drop the rejected param — or add one the endpoint demands
+        # next to `tools` — then fall back to no tools) and retry until
+        # nothing is left to adapt. Bound = every droppable param + the
+        # reasoning_effort add + the no-tools fallback, plus the final attempt.
+        for _ in range(len(DROPPABLE_PARAMS) + 3):
             async with self._client.stream("POST", self._endpoint, json=payload) as resp:
                 if resp.status_code >= 400:
                     body = await resp.aread()
@@ -624,7 +647,7 @@ class LLMProvider:
                             yield chunk
                 return
 
-        # Unreachable: every adaptation strictly shrinks the payload.
+        # Unreachable: each adaptation can fire at most once per payload.
         raise RuntimeError(f"Model '{self.config.model}' kept rejecting the request")
 
     def _adapt_payload(self, payload: dict, detail: str) -> bool:
@@ -632,7 +655,8 @@ class LLMProvider:
 
         Returns True when the payload was changed and the call is worth
         retrying. Named fields go first (a rejected `temperature` is not a
-        reason to give up tool calling), then the no-tools fallback.
+        reason to give up tool calling), then params an endpoint demands next
+        to `tools` (reasoning_effort), and the no-tools fallback last.
         """
         low = detail.lower()
         anthropic = self.config.provider == "anthropic"
@@ -664,6 +688,18 @@ class LLMProvider:
             if replacement:
                 payload[replacement] = value
             self._param_fixes[key] = replacement
+            return True
+
+        if ("tools" in payload and "reasoning_effort" in low
+                and payload.get("reasoning_effort") != "none"):
+            # "Function tools with reasoning_effort are not supported ... set
+            # reasoning_effort to 'none'": the refusal names its own fix, and
+            # taking it keeps native tool calling. The != "none" guard stops
+            # this from re-sending an identical payload if the endpoint rejects
+            # the combination anyway — the next 400 then falls through to the
+            # no-tools branch below.
+            payload["reasoning_effort"] = "none"
+            self._tools_param_adds["reasoning_effort"] = "none"
             return True
 
         if "tools" in payload:

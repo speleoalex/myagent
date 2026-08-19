@@ -33,6 +33,7 @@ import os
 import queue
 import re
 import shutil
+import signal
 import struct
 import subprocess
 import sys
@@ -279,6 +280,87 @@ def _unpark_hw_playback() -> None:
                     break
                 except (OSError, subprocess.SubprocessError):
                     continue
+
+
+# ------------------------------------------------------------------- kiosk
+# The panel normally shows this page fullscreen (kiosk.sh), which is the whole
+# point of a device with a screen and no keyboard — but it also means there is
+# no way back to the desktop of the machine, and on a Pi that is where you go to
+# join a WiFi, read a log or plug in a stick. Hence a button on the settings
+# screen, and hence closing the browser has to be done HERE: a page cannot close
+# a window the user opened, `window.close()` is refused, so the only honest
+# implementation is the device asking its own browser to quit.
+#
+# What identifies "our" browser is the dedicated --user-data-dir kiosk.sh gives
+# it: a normal Chromium the same user happens to have open on another workspace
+# must not be closed by this button.
+KIOSK_PROFILE = "myagent-kiosk"
+
+
+def _cmdline_flags(raw: bytes) -> list[str]:
+    """The flags on a process's command line, however it stored them.
+
+    /proc/<pid>/cmdline is NUL-separated — except that Chromium rewrites its own
+    argv into ONE blank-separated blob to set the process title. Measured on the
+    kitchen Pi: the browser process reads back as a single 490-byte string, so a
+    NUL split finds no flags at all and the button never appeared. It is also why
+    `pgrep -f` matches this process where walking argv[] does not. Splitting on
+    whitespace covers both shapes, and the two flags looked at below have no
+    spaces in the values that matter here.
+    """
+    return raw.decode("utf-8", "replace").replace("\0", " ").split()
+
+
+def kiosk_pids() -> list[int]:
+    """PIDs of the kiosk browser, or [] if none is running.
+
+    Read from /proc rather than shelled out to pgrep: no extra dependency, and
+    no process to spawn on a device that polls /config while the microphone is
+    open. Not Linux (no /proc) = no kiosk to close, and the page then hides the
+    button instead of offering one that cannot work.
+    """
+    pids: list[int] = []
+    try:
+        entries = list(Path("/proc").iterdir())
+    except OSError:
+        return pids
+    for entry in entries:
+        if not entry.name.isdigit():
+            continue
+        try:
+            argv = _cmdline_flags((entry / "cmdline").read_bytes())
+        except OSError:
+            continue        # it exited between the listing and the read
+        if not any(a.startswith("--user-data-dir=")
+                   and Path(a.split("=", 1)[1]).name == KIOSK_PROFILE for a in argv):
+            continue
+        # Chromium's renderers and zygotes inherit the same flags; only the
+        # browser process has no --type=, and terminating it takes the rest
+        # with it. Signalling the children instead would kill a tab and leave
+        # the kiosk window on screen showing a crash page.
+        if any(a.startswith("--type=") for a in argv):
+            continue
+        pids.append(int(entry.name))
+    return pids
+
+
+def close_kiosk() -> int:
+    """Ask the kiosk browser to quit. Returns how many processes were signalled.
+
+    SIGTERM, not SIGKILL: Chromium exits cleanly on it, which is what keeps the
+    profile from coming up "crashed" (kiosk.sh already has to paper over that
+    after a power cut — no reason to create the same mess on purpose).
+    """
+    pids = kiosk_pids()
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError as e:
+            log.warning("could not close kiosk pid %s: %s", pid, e)
+    if pids:
+        log.info("closed the kiosk browser (pid %s)",
+                 ", ".join(str(p) for p in pids))
+    return len(pids)
 
 
 # --------------------------------------------------------------------- TTS
@@ -717,7 +799,8 @@ def run_turn(cfg: dict, speaker: Speaker, wav: bytes | None = None,
 # ------------------------------------------------------------ device server
 def make_server(cfg: dict, speaker: Speaker, mic: "Microphone",
                 voices: VoiceInstaller) -> ThreadingHTTPServer:
-    """/say, /health, and the remote-configuration pair GET|PUT /config.
+    """/say, /health, the remote-configuration pair GET|PUT /config, the page's
+    own turns (/ask, /listen) and /kiosk/close.
 
     The config endpoints exist so the tuning that can only be done by trial —
     the silence threshold against this room's noise floor, which voice, which
@@ -756,6 +839,11 @@ def make_server(cfg: dict, speaker: Speaker, mic: "Microphone",
                 "tts": speaker.available,
                 "mic": mic.available,
                 "listening": mic.listening,
+                # Whether THIS answer is being read inside the kiosk browser is
+                # not knowable, but whether one is running here is: the page
+                # draws the "close the browser" button only then, the same rule
+                # as the mixer above.
+                "kiosk": bool(kiosk_pids()),
                 "piper": speaker.piper if Path(speaker.piper).exists() else "",
             },
             "voice_install": voices.state,
@@ -844,7 +932,8 @@ def make_server(cfg: dict, speaker: Speaker, mic: "Microphone",
 
         def do_POST(self):
             route = self._route()
-            if route not in ("/say", "/voices/install", "/ask", "/listen"):
+            if route not in ("/say", "/voices/install", "/ask", "/listen",
+                             "/kiosk/close"):
                 return self._json(404, {"detail": "not found"})
             if not _auth_ok(self):
                 return self._json(401, {"detail": "invalid key"})
@@ -881,6 +970,17 @@ def make_server(cfg: dict, speaker: Speaker, mic: "Microphone",
                 return self._json(200, {"ok": True, "heard": True,
                                         "text": res.get("text") or "",
                                         "reply": res.get("reply") or ""})
+            if route == "/kiosk/close":
+                # The caller is usually the page inside the window being closed,
+                # so this response may never be read — the proof of success is
+                # the desktop appearing. The 409 below is the case that matters
+                # to a reader: nothing was closed, and the page has to say so
+                # instead of leaving someone tapping a button that does nothing.
+                closed = close_kiosk()
+                if not closed:
+                    return self._json(409, {"detail": "no kiosk browser is "
+                                                      "running on this device"})
+                return self._json(200, {"ok": True, "closed": closed})
             if route == "/voices/install":
                 name = str(payload.get("name") or "").strip()
 
