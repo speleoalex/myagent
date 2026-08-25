@@ -56,6 +56,7 @@ const ChatPage = {
             <div class="d-flex flex-column mx-auto w-100 chat-wrap">
                 <div class="d-flex gap-2 mb-2 flex-wrap align-items-center">
                     <select id="agent-select" class="form-select" style="max-width:200px">
+                        <option value="auto" ${this.currentAgentId === 'auto' ? 'selected' : ''}>${i18n('chat.agentAuto')}</option>
                         ${agents.map(a => `
                             <option value="${App.escAttr(a.id)}" ${a.id === this.currentAgentId ? 'selected' : ''}>${App.esc(a.name)}</option>
                         `).join('')}
@@ -245,7 +246,13 @@ const ChatPage = {
         try { session = await App.api('GET', '/sessions/current'); } catch (e) { /* ignore */ }
         const urlPick = this._agentFromUrl;
         this._agentFromUrl = false;
-        if (!urlPick && session && session.agent_id && this.agents.some(a => a.id === session.agent_id)) {
+        // Auto mode has its own session flag: record_user_turn overwrites
+        // session.agent_id with the RESOLVED agent on every turn, so "auto"
+        // can never be read back from there.
+        if (!urlPick && session && session.agent_auto) {
+            this.currentAgentId = 'auto';
+            const as = document.getElementById('agent-select'); if (as) as.value = 'auto';
+        } else if (!urlPick && session && session.agent_id && this.agents.some(a => a.id === session.agent_id)) {
             this.currentAgentId = session.agent_id;
             const as = document.getElementById('agent-select'); if (as) as.value = session.agent_id;
         }
@@ -323,6 +330,9 @@ const ChatPage = {
         const box = document.getElementById('chat-messages');
         if (box) box.innerHTML = '';
         let pendingTools = [];
+        // For the Auto-mode "via <agent>" label: user messages persist the
+        // resolved agent_id of the turn they opened (record_user_turn).
+        let lastAgentId = null;
         const flushAssistant = (text, ts, reasoning) => {
             const msgDiv = this.createMessageDiv('assistant');
             msgDiv._md = text || '';  // raw markdown, for the copy / source view
@@ -347,11 +357,17 @@ const ChatPage = {
             // as trace steps, so a reloaded session shows the same strip.
             this.renderResources(msgDiv, this.collectResources(pendingTools));
             msgDiv.appendChild(this._timeEl(ts));
+            // Known cosmetic limit: a chat where Auto was toggled midway labels
+            // every turn — each label still names the agent that really answered.
+            if (session.agent_auto && lastAgentId) {
+                msgDiv.appendChild(this._agentTag(lastAgentId));
+            }
             pendingTools = [];
         };
         for (const m of (session.messages || [])) {
             if (m.role === 'user') {
                 pendingTools = [];
+                if (m.agent_id) lastAgentId = m.agent_id;
                 this.appendUserMessage(m.text || '', m.attachments || [], m.ts);
             } else if (m.role === 'tool') {
                 pendingTools.push(m);
@@ -795,6 +811,14 @@ const ChatPage = {
                             this.renderResources(msgDiv, msgDiv._resources);
                         }
                         msgDiv.appendChild(this._timeEl());
+                        // Auto mode: name the agent that actually answered.
+                        // The trace carries the RESOLVED agent_id (the server
+                        // routed "auto" before the executor was built), and a
+                        // re-attach replays the same done event, so this works
+                        // there too.
+                        if (this.currentAgentId === 'auto' && trace && trace.agent_id) {
+                            msgDiv.appendChild(this._agentTag(trace.agent_id));
+                        }
                         break;
                     }
                     case 'stopped':
@@ -907,6 +931,16 @@ const ChatPage = {
         el.className = 'msg-time';
         el.textContent = this.fmtTime(ts);
         if (ts) el.title = String(ts).replace('T', ' ');
+        return el;
+    },
+
+    /** "via <agent>" label under an answer, shown only in Auto mode: it makes
+     * the router's per-message pick visible and verifiable. Same discreet
+     * styling as the timestamp. */
+    _agentTag(agentId) {
+        const el = document.createElement('div');
+        el.className = 'msg-time';
+        el.textContent = i18n('chat.viaAgent', { name: this.agentName(agentId) });
         return el;
     },
 

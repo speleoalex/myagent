@@ -27,6 +27,12 @@ route to them: Tool Manager and Agent Manager, which write code and agents — y
 select those on purpose — and Master itself, which is the entry point rather
 than a target.
 
+**Master keeps what its agents told it.** A delegated agent's reply is the only
+record of what it found, so the last few are kept in front of Master on every
+following turn, and it can pull up the full text of any of them with the
+`recall_delegation` tool. Ask "what did you find so far?" a few turns later and
+you get the facts, not "I have no information".
+
 **HTML Designer** writes the page as a file in the workspace (`file_write`),
 then delivers it with `show_file`: the page appears in the chat as a card that
 opens in a sandboxed viewer, and the HTML itself never travels through the
@@ -37,6 +43,16 @@ or to update a page it made earlier.
 
 If your install predates an agent listed above, it shows in **Agents** as a
 dimmed card — one click on *Import* adds it.
+
+**Don't want to pick an agent yourself?** The chat's agent selector has an
+**Auto** entry: every message is first classified (one short LLM call over the
+agent directory) and routed to the agent best suited to answer it — a small
+"via *agent*" label under each answer says who that was. Follow-ups stick: a
+message like "try again" or "more detail" goes back to the agent that just
+answered. When the classifier can't decide, the chat's last-used agent answers
+instead, and a notice above the answer says so. Auto respects the same opt-out as delegation: agents with
+*callable* off (Tool Manager, Agent Manager) are never auto-picked — except
+Master, which stays the natural target for general questions.
 
 ## Editing never loses anything
 

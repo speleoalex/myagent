@@ -6,6 +6,7 @@ from pydantic import BaseModel
 from app import config
 from app.ids import is_valid_id
 from app.models import Agent
+from app.engine.agent_router import AUTO as RESERVED_AGENT_ID
 from app.routers.crud import get_or_404, require_absent, require_exists
 from app.storage.sessions import read_json
 
@@ -151,6 +152,10 @@ async def get_agent(agent_id: str, request: Request):
 @router.post("", status_code=201)
 async def create_agent(agent: Agent, request: Request):
     store = _store(request)
+    if agent.id == RESERVED_AGENT_ID:
+        # The chat's routing sentinel: a real agent with this id would switch
+        # Auto off silently (literal beats sentinel in agent_router).
+        raise HTTPException(400, f"'{RESERVED_AGENT_ID}' is reserved for automatic agent selection")
     require_absent(store, agent.id, "Agent")
     store.save(agent.id, agent.model_dump())
     return agent.model_dump()

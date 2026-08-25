@@ -49,6 +49,11 @@ _NOTIFY_TARGETS_MAX = 20
 # prose can never disagree.
 _SCHEDULING_TOOLS = ("manage_tasks", "autonomy_control")
 
+# Cap (chars) on the quoted transcript of history turns another agent answered
+# (see _split_history). Generous on purpose: the user's rule is that the agent
+# sees the whole conversation, and this is the channel those turns travel on.
+_FOREIGN_CONTEXT_MAX = 6000
+
 # Every injected string lives in app.engine.prompts — see its docstring for why
 # the scaffolding markers in particular must have exactly one definition.
 _FORCE_ANSWER_PROMPT = prompts.FORCE_ANSWER
@@ -98,6 +103,32 @@ def _tool_call_key(tc: dict) -> tuple[str, str]:
         return (name, str(raw))
 
 
+def directory_entry(a: dict, tool_registry: ToolRegistry) -> str:
+    """One ``- {id}: {desc} [tools: ...]`` line for a raw agent dict — shared
+    by the delegation directory (_build_agents_directory) and the auto-route
+    classifier (engine.agent_router), so the two never describe the same agent
+    differently. Tool resolution goes through ``get_definitions_for_agent()``,
+    the same call the agent's own turn uses: disabled or uninstalled tools drop
+    out, and MCP wildcards are expanded — a tool the agent cannot actually run
+    is not a capability."""
+    desc = a.get("description") or a.get("name", "")
+    declared = a.get("tools") or []
+    defs = tool_registry.get_definitions_for_agent(declared)
+    if defs:
+        # Capped: one MCP wildcard can expand to dozens of tools.
+        # The reader only needs enough to choose an agent.
+        shown = [d["id"] for d in defs[:_DIRECTORY_TOOLS_PER_AGENT]]
+        extra = len(defs) - len(shown)
+        can = ", ".join(shown) + (f", +{extra} more" if extra > 0 else "")
+    elif declared:
+        # Declared but unresolvable: an MCP server that is down, or a
+        # deleted tool folder. Say so instead of claiming it has none.
+        can = "none reachable right now"
+    else:
+        can = "no tools — answers from its own model"
+    return f"- {a['id']}: {desc} [tools: {can}]"
+
+
 @dataclass
 class Stores:
     agents: JsonStore
@@ -143,8 +174,15 @@ class AgentExecutor:
         # them to a sub-agent by index (see call_agent_handler). The tool-call
         # JSON only carries small indices — never the base64 blobs themselves.
         self._turn_attachments: list[dict] = []
-        # Turn-scoped system-prompt suffix (memory digest + attachments
-        # manifest), re-appended when the no-tools fallback rebuilds the prompt.
+        # What sub-agents reported in the PREVIOUS turns of this chat
+        # (storage.sessions.delegation_history), handed in per run by whoever
+        # owns the session — the executor stays session-agnostic, exactly like
+        # it does for memory_context. Quoted verbatim in the system prompt and
+        # readable in full through recall_delegation.
+        self._delegations: list[dict] = []
+        # Turn-scoped system-prompt suffix (memory digest + findings +
+        # attachments manifest), re-appended when the no-tools fallback
+        # rebuilds the prompt.
         self._system_suffix: str = ""
         # Set by create_for_agent when the turn is running on a fallback model
         # instead of the configured default. Emitted once, as an SSE `notice`:
@@ -446,6 +484,11 @@ class AgentExecutor:
         """The current user turn's attachments (what call_agent may forward)."""
         return self._turn_attachments
 
+    @property
+    def delegations(self) -> list[dict]:
+        """Past turns' sub-agent replies (what recall_delegation serves)."""
+        return self._delegations
+
     def can_call(self, target: dict) -> bool:
         """Whether THIS agent may delegate to ``target`` (a raw agent dict)."""
         return self._agent_can_call(self.agent, target)
@@ -510,30 +553,12 @@ class AgentExecutor:
         agent — description + tool ids, nothing else. An agent can only act
         through the tools it holds, so that list is the part of "what it can
         do" the caller can rely on (a description is hand-written and may be
-        vague, stale or empty). Resolution goes through
-        ``get_definitions_for_agent()``, the same call the sub-agent's own turn
-        uses: disabled or uninstalled tools drop out, and MCP entries (including
-        ``mcp:<server>/*`` wildcards) are expanded — a tool the sub-agent cannot
-        actually run is not a capability. This block lands in the router's
-        prompt on every turn, so it stays as small as it can be."""
-        entries: list[str] = []
-        for a in self._delegation_targets():
-            desc = a.get("description") or a.get("name", "")
-            declared = a.get("tools") or []
-            defs = self.tool_registry.get_definitions_for_agent(declared)
-            if defs:
-                # Capped: one MCP wildcard can expand to dozens of tools.
-                # The caller only needs enough to choose an agent.
-                shown = [d["id"] for d in defs[:_DIRECTORY_TOOLS_PER_AGENT]]
-                extra = len(defs) - len(shown)
-                can = ", ".join(shown) + (f", +{extra} more" if extra > 0 else "")
-            elif declared:
-                # Declared but unresolvable: an MCP server that is down, or a
-                # deleted tool folder. Say so instead of claiming it has none.
-                can = "none reachable right now"
-            else:
-                can = "no tools — answers from its own model"
-            entries.append(f"- {a['id']}: {desc} [tools: {can}]")
+        vague, stale or empty). Line formatting (including tool resolution)
+        lives in the module-level ``directory_entry``, shared with the
+        auto-route classifier. This block lands in the router's prompt on
+        every turn, so it stays as small as it can be."""
+        entries = [directory_entry(a, self.tool_registry)
+                   for a in self._delegation_targets()]
         if not entries:
             return ""
         return "\n".join([
@@ -833,6 +858,31 @@ class AgentExecutor:
                                        + prompts.LEGACY_ASSISTANT_PREFIXES))
         return role == "tool"
 
+    @staticmethod
+    def _split_history(history: list[dict]) -> tuple[list[dict], str | None]:
+        """Divide the cleaned history into (messages to send, foreign transcript).
+
+        Entries flagged ``foreign`` (ChatMessage.foreign, set by the chat
+        router in Auto mode on turns another agent answered) leave the
+        message list and come back as a ``role: content`` transcript for
+        prompts.SECTION_FOREIGN_HISTORY. The flag is POPPED from every entry
+        here — it must reach neither the LLM payload nor the stored
+        conversation. Transcript capped at _FOREIGN_CONTEXT_MAX chars, tail
+        kept (a follow-up refers to the latest thing said), cut declared."""
+        own: list[dict] = []
+        quoted: list[str] = []
+        for m in history:
+            if m.pop("foreign", None):
+                quoted.append(f"{m.get('role')}: {m.get('content') or ''}")
+            else:
+                own.append(m)
+        if not quoted:
+            return own, None
+        transcript = "\n".join(quoted)
+        if len(transcript) > _FOREIGN_CONTEXT_MAX:
+            transcript = "[oldest turns omitted]\n" + transcript[-_FOREIGN_CONTEXT_MAX:]
+        return own, transcript
+
     @classmethod
     def _clean_conversation(cls, conversation: list[ChatMessage], max_messages: int = 10) -> list[dict]:
         """Remove internal tool-call artifacts from conversation history.
@@ -934,9 +984,70 @@ class AgentExecutor:
             parts.append("Details are retrievable with the memory_search / memory_read tools.")
         return prompts.SECTION_MEMORY + "\n\n".join(parts)
 
+    # How many of the past turns' delegations are quoted in the prompt, and
+    # how much of each. VERBATIM and not summarized on purpose: a sub-agent
+    # reply is ALREADY a summary written for this agent, and
+    # summaries-of-summaries lose the facts (the reason the memory tree was
+    # removed in 2026-07). Deterministic, so the model never has to decide to
+    # go looking for what it was just told — that decision is where the bug
+    # lived: a router that had the data answered "I have no data" the turn
+    # after, because a `tool` message never survives into conversation[].
+    _FINDINGS_WINDOW = 3
+    # Recency-weighted budget (~1200 chars ≈ 300 tokens, whatever the window
+    # holds): the question is almost always about the LAST thing an agent
+    # reported, so that one gets room to arrive whole — a real sub-agent reply
+    # measured 1080-1250 chars. Cut to 300 the model answered with the visible
+    # half and called the rest "not detailed" instead of fetching it, twice on
+    # Qwen3-VL-4B. The older ones stay one-liners: they are reminders that the
+    # fact EXISTS, and recall_delegation serves them in full.
+    _FINDINGS_CHARS = 800
+    _FINDINGS_CHARS_OLDER = 200
+
+    def _build_findings_section(self) -> str:
+        """The '## Agent findings' block: what sub-agents reported in the
+        PREVIOUS turns of this chat, quoted verbatim with any truncation
+        declared (a silent cut reads as "that is all there was").
+
+        NOT gated on memory_enabled: this is session state, not long-term
+        memory — an agent that delegates needs it whether or not it keeps a
+        memory. Like ## Memory it rides on the SYSTEM prompt and never enters
+        conversation[], so is_scaffolding_message and the rewind endpoint are
+        untouched.
+        """
+        window = self._delegations[-self._FINDINGS_WINDOW:]
+        can_recall = "recall_delegation" in self._granted_tools()
+        lines = []
+        for pos, d in enumerate(reversed(window)):  # newest first, as ## Recent
+            reply = " ".join((d.get("reply") or "").split())
+            if not reply:
+                continue
+            budget = self._FINDINGS_CHARS if pos == 0 else self._FINDINGS_CHARS_OLDER
+            if len(reply) > budget:
+                # The way out goes AT the cut, not only in the note below: cut
+                # short, the model reported the rest as "not detailed" instead
+                # of fetching it (measured on Qwen3-VL-4B).
+                more = (f" — recall_delegation id={d.get('id')} for the rest"
+                        if can_recall else "")
+                reply = (reply[:budget].rstrip()
+                         + f"… [cut at {budget} of {len(reply)} chars{more}]")
+            lines.append(f"- [{d.get('id')}] {d.get('agent_id') or 'agent'}: {reply}")
+        if not lines:
+            return ""
+        hidden = len(self._delegations) - len(window)
+        if hidden > 0:
+            lines.append(
+                f"({hidden} earlier delegation(s) not shown"
+                + (" — recall_delegation lists them all)" if can_recall else ")")
+            )
+        notes = [prompts.FINDINGS_NOTE]
+        if can_recall:
+            notes.append(prompts.FINDINGS_RECALL_NOTE)
+        return prompts.SECTION_FINDINGS + "\n".join(lines) + "\n" + " ".join(notes)
+
     def _prepare_turn(self, tool_defs: list[dict], attachments: list[dict] | None,
                       memory_context: list | None = None,
-                      transcribed: bool = False):
+                      transcribed: bool = False,
+                      foreign_context: str | None = None):
         """Return (system_content, tool_defs, openai_tools) for this turn.
 
         When the user attaches files, append a manifest so the model knows what
@@ -956,6 +1067,7 @@ class AgentExecutor:
         # prompt mid-loop from _system_prompt_with_tools alone and would
         # otherwise silently drop them (llama.cpp starts in that mode).
         suffix = self._build_memory_section(memory_context)
+        suffix += self._build_findings_section()
         has_attachment = bool(attachments) and any(
             (a or {}).get("data") or (a or {}).get("path") for a in attachments
         )
@@ -963,6 +1075,9 @@ class AgentExecutor:
             suffix += self._build_attachments_manifest(attachments)
         if transcribed:
             suffix += prompts.SECTION_VOICE
+        if foreign_context:
+            suffix += prompts.SECTION_FOREIGN_HISTORY.format(
+                transcript=foreign_context)
         self._system_suffix = suffix
         system_content = self._system_prompt_with_tools(tool_defs) + suffix
         return system_content, tool_defs, openai_tools
@@ -1008,6 +1123,7 @@ class AgentExecutor:
         memory_context: list | None = None,
         event_sink=None,
         transcribed: bool = False,
+        delegations: list[dict] | None = None,
     ) -> ChatResponse:
         """Non-streaming entry point: drain run_stream() and return the final
         ChatResponse (single implementation of the loop lives there).
@@ -1019,7 +1135,8 @@ class AgentExecutor:
         response: ChatResponse | None = None
         error: str | None = None
         async for event in self.run_stream(user_message, conversation, attachments,
-                                           memory_context, transcribed=transcribed):
+                                           memory_context, transcribed=transcribed,
+                                           delegations=delegations):
             et = event.get("type")
             if et == "done":
                 response = ChatResponse(**event.get("data", {}))
@@ -1047,6 +1164,7 @@ class AgentExecutor:
         attachments: list[dict] | None = None,
         memory_context: list | None = None,
         transcribed: bool = False,
+        delegations: list[dict] | None = None,
     ):
         """The agent loop, as an async generator of SSE-compatible event dicts.
 
@@ -1055,6 +1173,16 @@ class AgentExecutor:
         prompt gains a turn-scoped note (prompts.SECTION_VOICE) telling the
         model to ask briefly for a repeat instead of guessing at a garbled
         transcript.
+
+        History entries marked ``ChatMessage.foreign`` (turns answered by
+        OTHER agents — the chat's Auto selector routes per message) are kept
+        out of the message list and quoted in the system prompt instead
+        (prompts.SECTION_FOREIGN_HISTORY): as assistant-role messages they
+        read as direct answers (the history strips tool scaffolding) and a
+        small model imitates them instead of using its tools — measured 0/3
+        tool calls with them inline vs 3/3 without, and a warning note alone
+        changed nothing. They ARE still returned in ``conversation`` (in
+        place, flag stripped), so the caller's stored history stays whole.
 
         Event types: token, clear_tokens, tool_start, tool_result, notice,
         error, done, plus agent_event — a delegated sub-agent's live activity,
@@ -1070,7 +1198,8 @@ class AgentExecutor:
                 yield {"type": "notice", "data": self.notice}
             async for event in self._run_stream_inner(user_message, conversation,
                                                       attachments, memory_context,
-                                                      transcribed=transcribed):
+                                                      transcribed=transcribed,
+                                                      delegations=delegations):
                 yield event
         finally:
             # Runs on normal completion AND on generator abort (Stop button /
@@ -1084,8 +1213,14 @@ class AgentExecutor:
         attachments: list[dict] | None,
         memory_context: list | None = None,
         transcribed: bool = False,
+        delegations: list[dict] | None = None,
     ):
         self._debug_reset(user_message)
+        # What sub-agents reported in the PREVIOUS turns (this turn's own
+        # delegations are still in `messages` below, so they need no recall).
+        # Sub-agents get nothing: call_agent_handler runs them without this
+        # argument — between agents only message/reply travel.
+        self._delegations = list(delegations or [])
         # Write attachments to workspace files (stamping a `path` on each) so the
         # model can reach any file via a tool, independently of what it can read
         # inline. Done once here; forwarded sub-agent attachments carry the path.
@@ -1102,20 +1237,31 @@ class AgentExecutor:
         # which run their own _run_stream_inner), and it never raises.
         await self.tool_registry.ensure_mcp(self.agent.tools)
         tool_defs = self.tool_registry.get_definitions_for_agent(self.agent.tools)
-        system_content, tool_defs, openai_tools = self._prepare_turn(
-            tool_defs, attachments, memory_context, transcribed=transcribed)
-
-        # System prompt (tool descriptions injected if model doesn't support native tools)
-        messages.append({"role": "system", "content": system_content})
 
         # Prior conversation (cleaned of tool-call artifacts). Memory-enabled
         # agents get a wide safety net: their real limit is the token-based
         # compactor (and _truncate_messages remains the last defense).
+        # `history` is the whole window and is what goes back to the caller;
+        # only the turns this agent may see as messages are sent (see
+        # _split_history for the foreign ones, quoted in the system prompt).
+        history: list[dict] = []
         if conversation:
-            messages.extend(self._clean_conversation(
+            history = self._clean_conversation(
                 conversation,
                 max_messages=200 if self.agent.memory_enabled else 10,
-            ))
+            )
+        own_history, foreign_context = self._split_history(history)
+
+        system_content, tool_defs, openai_tools = self._prepare_turn(
+            tool_defs, attachments, memory_context, transcribed=transcribed,
+            foreign_context=foreign_context)
+
+        # System prompt (tool descriptions injected if model doesn't support native tools)
+        messages.append({"role": "system", "content": system_content})
+        messages.extend(own_history)
+        # Where the injected history ends: everything from here on is THIS
+        # turn (user message included) — the slice the caller gets back.
+        history_end = len(messages)
 
         # New user message (with attachments folded in / images as content parts)
         messages.append({"role": "user", "content": self._build_user_content(user_message, attachments)})
@@ -1451,6 +1597,11 @@ class AgentExecutor:
                 log.warning("Forced answer stream failed: %s", e)
             if forced.strip():
                 final_text = forced.strip()
+                # Into `messages` too: the conversation handed back is built
+                # from it, and without this the turn's only real answer never
+                # reached the stored history — the next turn saw the question
+                # and no reply.
+                messages.append({"role": "assistant", "content": final_text})
                 self._debug_log("  Forced final answer synthesized")
 
         # No usable reply produced this turn: surface the LLM error (rather than
@@ -1461,8 +1612,12 @@ class AgentExecutor:
         elif not final_text and iterations >= self.agent.max_iterations:
             final_text = prompts.NO_FINAL_RESPONSE
 
+        # Whole window back to the caller: system, EVERY history entry (the
+        # foreign ones too — they were only kept out of the prompt), then what
+        # this turn produced. Persisting `messages` alone would drop the
+        # foreign turns from the stored conversation for good.
         clean_messages = []
-        for m in messages:
+        for m in messages[:1] + history + messages[history_end:]:
             clean_messages.append(ChatMessage(
                 role=m.get("role", "assistant"),
                 content=self._flatten_content(m.get("content")),

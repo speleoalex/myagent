@@ -145,6 +145,87 @@ async def call_agent_handler(
         return f"ERROR: Failed to call agent '{agent_id}': {e}"
 
 
+# ------------------------------------------------------------------ recall
+# The other half of delegation. A sub-agent's reply is the only record of what
+# it found, and it never survives into conversation[] (the scaffolding
+# predicate drops every `tool` message, or the model would mimic the protocol
+# next turn) — so the newest few are quoted verbatim in the system prompt
+# (executor._build_findings_section) and the full text is served here on
+# demand. Same split as the memory: memory.md injected whole, chunks read
+# through memory_read.
+#
+# Budget lives HERE, under the registry's max_output: that cut appends only
+# "... [truncated]", which a small model cannot tell from "that is all".
+_RECALL_MAX_ENTRIES = 8
+_RECALL_SNIPPET = 160
+_RECALL_MAX_CHARS = 6000
+
+# Every refusal opens with this and asks for a retry in the SAME turn: the
+# lesson of manage_tasks' _NOT_SCHEDULED — given a bare "ERROR: ...", the
+# model abandoned the call and told the user the thing was unavailable.
+_NOT_RECALLED = "NOTHING RECALLED — "
+
+
+def _recall_line(d: dict) -> str:
+    """One index line: id | time | agent | question -> snippet."""
+    reply = " ".join((d.get("reply") or "").split())
+    if len(reply) > _RECALL_SNIPPET:
+        reply = reply[:_RECALL_SNIPPET].rstrip() + "…"
+    question = " ".join((d.get("message") or "").split())
+    if len(question) > 60:
+        question = question[:60].rstrip() + "…"
+    ts = (d.get("ts") or "")[11:16]
+    return f"{d.get('id')} | {ts} | {d.get('agent_id') or '?'} | {question} -> {reply}"
+
+
+async def recall_delegation_handler(id: str = "", agent_id: str = "",
+                                    executor=None, **kwargs) -> str:
+    """List, or read in full, what agents reported earlier in this chat.
+
+    No ``id`` -> index (newest first, capped and the cap declared). With
+    ``id`` -> that delegation's full reply. The data comes from the session
+    the turn was started with (executor.delegations): the CURRENT turn's own
+    delegations are still in the model's own message list, so they are
+    deliberately not here."""
+    if executor is None:
+        return "ERROR: No executor context available for recall"
+    entries = list(executor.delegations or [])
+    if not entries:
+        return (_NOT_RECALLED + "no agent has been called earlier in this chat. "
+                "The information was never obtained, so delegate it NOW with "
+                "call_agent instead of telling the user it is unavailable.")
+
+    id = (id or "").strip()
+    if id:
+        match = next((d for d in entries if d.get("id") == id), None)
+        if match is None:
+            return (_NOT_RECALLED + f"no delegation with id '{id}' in this chat. "
+                    "Call recall_delegation with no arguments to see which ids "
+                    "exist (they look like d1, d2, …).")
+        reply = match.get("reply") or "(the agent returned an empty reply)"
+        if len(reply) > _RECALL_MAX_CHARS:
+            reply = (reply[:_RECALL_MAX_CHARS].rstrip()
+                     + f"\n[cut here — {len(match['reply'])} chars in full]")
+        return (f"{match.get('id')} | {(match.get('ts') or '')[:16].replace('T', ' ')} | "
+                f"agent '{match.get('agent_id') or '?'}'\n"
+                f"You asked: {match.get('message') or '(no message)'}\n\n{reply}")
+
+    wanted = (agent_id or "").strip()
+    if wanted:
+        entries = [d for d in entries if d.get("agent_id") == wanted]
+        if not entries:
+            return (_NOT_RECALLED + f"agent '{wanted}' was not called earlier in "
+                    "this chat. Call recall_delegation with no arguments to see "
+                    "who was, or delegate to it NOW with call_agent.")
+    shown = entries[-_RECALL_MAX_ENTRIES:]
+    # A reached cap is DECLARED: "8" and "8 of 23" are opposite messages.
+    head = (f"Replies from agents earlier in this chat ({len(shown)} of "
+            f"{len(entries)}, newest first):")
+    lines = [_recall_line(d) for d in reversed(shown)]
+    return "\n".join([head] + lines
+                     + ["Call recall_delegation with id=<id> for the full reply."])
+
+
 # Values a model types when the schema says "omit this to use the default" — it
 # helpfully writes the word instead of leaving the argument out. Observed live:
 # a wake passed binding_id="default", which is truthy, so it beat the agent's

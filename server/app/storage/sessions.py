@@ -132,6 +132,46 @@ def steps_from(trace, tool_events: list[dict] | None) -> list[dict]:
     ]
 
 
+# The tool whose result is the ONLY record of what a sub-agent found. That
+# result is deliberately absent from ``conversation`` (the scaffolding
+# predicate drops every ``tool`` message, or the model would mimic the
+# protocol in later turns), so it is read back from ``messages``, where
+# tool_message_from_step keeps it whole. Nothing extra is persisted for this:
+# every session file — web, channel and autonomous alike — already has it.
+DELEGATION_TOOL = "call_agent"
+
+
+def delegation_history(session: dict, limit: int | None = None) -> list[dict]:
+    """The sub-agent replies recorded in this session, oldest first.
+
+    Ids are ``d<N>`` numbered from the OLDEST: they must stay stable as the
+    chat appends new delegations, because the model quotes them back to us
+    (recall_delegation). Numbering from the newest would renumber every entry
+    at every turn.
+
+    ``limit`` keeps the newest N entries — with their original ids, so a
+    trimmed window still resolves.
+    """
+    out: list[dict] = []
+    for m in session.get("messages") or []:
+        if m.get("role") != "tool" or m.get("tool") != DELEGATION_TOOL:
+            continue
+        args = m.get("arguments") if isinstance(m.get("arguments"), dict) else {}
+        sub = m.get("sub_trace") if isinstance(m.get("sub_trace"), dict) else {}
+        out.append({
+            "id": f"d{len(out) + 1}",
+            "agent_id": args.get("agent_id") or sub.get("agent_id") or "",
+            "message": args.get("message") or "",
+            # A failed delegation is kept (its reply reads "ERROR: ..."): "we
+            # tried and it did not work" is information, not noise.
+            "reply": m.get("result") or sub.get("reply") or m.get("result_preview") or "",
+            "ts": m.get("ts") or "",
+        })
+    if limit and len(out) > limit:
+        return out[-limit:]
+    return out
+
+
 def record_turn(session: dict, steps: list[dict], reply: str, conversation,
                 reasoning: str = "") -> None:
     """Append the tool calls (recursive trace) and assistant reply, and update

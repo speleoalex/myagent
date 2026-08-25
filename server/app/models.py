@@ -303,6 +303,13 @@ class ChatMessage(BaseModel):
     tool_calls: list[dict] | None = None
     tool_call_id: str | None = None
     name: str | None = None
+    # Prompt-time marker (the executor pops it before the LLM payload and the
+    # returned conversation; a stored null is inert): this history entry was
+    # answered by ANOTHER agent (the chat's Auto selector routes per message).
+    # The executor keeps such turns out of the message list — quoted in the
+    # system prompt instead — while still returning them in the conversation
+    # it hands back, so the stored history stays whole.
+    foreign: bool | None = None
 
 
 class Attachment(BaseModel):
@@ -346,6 +353,12 @@ class ChatRequest(BaseModel):
     # to settings: the choice lives in the request (and on the current session,
     # for the UI selector to survive a reload).
     model_override: str | None = None
+    # Set by the server when `agent_id` arrived as the "auto" sentinel and was
+    # resolved to a concrete agent (routers/chat.py, the connectors plugin): it
+    # tells the channel turn that this session's history may hold other
+    # agents' turns (agent_router.mark_foreign). Never meaningful from a
+    # client; a fixed agent leaves it False and keeps its verbatim history.
+    agent_auto: bool = False
 
     @field_validator("session_id")
     @classmethod

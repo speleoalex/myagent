@@ -102,6 +102,20 @@ SECTION_TOOLS = "\n\n## Available Tools\n"
 SECTION_AGENTS = "\n\n## Available Agents\n"
 SECTION_ATTACHMENTS = "\n\n## Attachments (this turn)"
 SECTION_MEMORY = "\n\n## Memory\n"
+SECTION_FINDINGS = "\n\n## Agent findings (earlier in this chat)\n"
+
+#: Closing lines of the findings section. The first is the load-bearing half:
+#: without it a small model reads the block as background and still answers "I
+#: have no data" (the bug this section exists for). The second is only added
+#: when recall_delegation is granted — the same rule the memory section
+#: follows for memory_search/memory_read.
+FINDINGS_NOTE = (
+    "These are facts YOU already obtained in this chat: answer from them when they "
+    "cover the question, instead of saying you have no information."
+)
+FINDINGS_RECALL_NOTE = (
+    "For the full text of one, call recall_delegation with its id."
+)
 
 #: Turn-scoped note for a message that arrived as SPEECH (voice satellite,
 #: Telegram voice note) and was machine-transcribed. Whisper does not fail on a
@@ -135,3 +149,51 @@ TOOLS_PROTOCOL = (
 
 AGENTS_PREAMBLE = ("Delegate with call_agent; an agent can only act through the "
                    "tools listed for it.")
+
+#: Turn-scoped section for a turn routed by the chat's Auto agent selector
+#: when the conversation contains turns answered by OTHER agents. Those turns
+#: are MOVED here (quoted transcript in the system prompt) instead of riding
+#: the message list: the recorded history strips tool scaffolding, so as
+#: assistant-role messages they read as "the assistant answers directly from
+#: its own knowledge" and a small model imitates the transcript over its
+#: instructions. Measured (Qwen3-VL-4B via llama.cpp, 2026-08-25):
+#: librarian-l300 answered its canned "not found" with ZERO tool calls behind
+#: a chit-chat + weather history, searched correctly with a clean one, and a
+#: warning note alone did NOT fix it — only removing the foreign turns from
+#: the few-shot channel does. Quoting them here (instead of dropping them)
+#: keeps cross-agent references ("the pump we talked about") answerable.
+#: English like every other system section (the language-flip hazard is the
+#: first line of the USER turn, see SECTION_VOICE).
+SECTION_FOREIGN_HISTORY = (
+    "\n\n## Conversation context\n"
+    "Earlier turns of this conversation were answered by OTHER assistants with "
+    "different instructions and tools. They are quoted below for reference "
+    "only — do not imitate how they answered; handle the user's message by "
+    "following your own instructions and using your own tools.\n{transcript}"
+)
+
+#: System prompt of the auto-route classifier (engine.agent_router): one bare
+#: LLM call that maps a user message to the id of the agent best suited to
+#: answer it. The directory lines come from executor.directory_entry — the same
+#: format the delegation directory uses. The contract is deliberately rigid
+#: ("EXACTLY one agent id ... nothing else"); the parser stays forgiving anyway
+#: (parse_pick scans prose for known ids), because small local models decorate.
+AUTO_ROUTE_INSTRUCTION = (
+    "You dispatch a user's message to the agent best suited to answer it.\n"
+    "Agents (id: description [tools]):\n{directory}\n{last_agent}\n"
+    "Reply with EXACTLY one agent id from the list above and nothing else — "
+    "no punctuation, no explanation. If no agent clearly fits, reply exactly: "
+    "unknown"
+)
+
+#: Extra line for AUTO_ROUTE_INSTRUCTION's {last_agent} slot when the chat has
+#: a previous turn. A follow-up ("riprova", "e la coppia di serraggio?", "più
+#: dettagli") names no topic at all, so without this hint the classifier can
+#: only guess — and the sticky default is exactly what the user means by a
+#: retry. When the slot is empty, {last_agent} is replaced by "" and the blank
+#: line collapses.
+AUTO_ROUTE_LAST_AGENT = (
+    "\nThe previous message in this conversation was answered by: {agent_id}. "
+    "If this message is a follow-up, a retry or a correction that continues "
+    "the same request, pick that same agent.\n"
+)

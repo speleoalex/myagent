@@ -188,13 +188,58 @@ def _transcript(cleaned: list[dict]) -> str:
 # only a weak reference, so an unanchored fire-and-forget task can be garbage
 # collected mid-run and silently vanish.
 _BG_TASKS: set[asyncio.Task] = set()
+# The same tasks, addressable — what makes cancel_background possible.
+_BG_BY_KEY: dict[str, asyncio.Task] = {}
 
 
-def schedule_background(coro) -> None:
-    """Fire-and-forget an engine coroutine WITHOUT losing it to the GC."""
+def schedule_background(coro, key: str | None = None) -> None:
+    """Fire-and-forget an engine coroutine WITHOUT losing it to the GC.
+
+    With a ``key`` the task stays addressable, so a later turn can cancel it
+    (see cancel_background)."""
     task = asyncio.create_task(coro)
     _BG_TASKS.add(task)
     task.add_done_callback(_BG_TASKS.discard)
+    if key:
+        _BG_BY_KEY[key] = task
+        # Only clear the slot if it still holds THIS task: a re-schedule under
+        # the same key must not be erased by its predecessor finishing.
+        task.add_done_callback(
+            lambda t, k=key: _BG_BY_KEY.pop(k, None) if _BG_BY_KEY.get(k) is t else None
+        )
+
+
+def cancel_background(key: str) -> bool:
+    """Cancel the background task registered under ``key``, if any is still
+    running. Returns whether something was actually cancelled.
+
+    Not awaited on purpose: the caller is a request path. The task raises
+    CancelledError at its next await — inside the LLM stream — and
+    ``summarize``'s ``finally`` closes the httpx client there, which is what
+    releases the model slot.
+    """
+    task = _BG_BY_KEY.pop(key, None)
+    if task is None or task.done():
+        return False
+    task.cancel()
+    return True
+
+
+def _compaction_key(session_id: str) -> str:
+    return f"compact:{session_id}"
+
+
+def cancel_compaction(session_id: str) -> bool:
+    """Call at the START of a turn for this session.
+
+    A compaction racing a new turn was already doomed — phase C aborts on
+    ``live.is_active`` — but only AFTER paying for the summarization, and on a
+    single-slot local server that generation competes with the answer the user
+    is waiting for. Cancelling is free: the pipeline is crash-safe by design
+    (content-hash dedup + idempotent add_to_index), so the next turn's
+    compaction picks the work up again, reusing any chunk already written.
+    """
+    return cancel_background(_compaction_key(session_id))
 
 
 def schedule_compaction(executor, session_id: str, *, session_store=None,
@@ -208,7 +253,7 @@ def schedule_compaction(executor, session_id: str, *, session_store=None,
     schedule_background(compact_session(
         executor.agent, executor.model_config, executor.stores.memory,
         session_id, session_store=session_store, named=named, live=live,
-    ))
+    ), key=_compaction_key(session_id))
 
 
 async def compact_session(agent: Agent, model_config: ModelConfig,
@@ -219,7 +264,9 @@ async def compact_session(agent: Agent, model_config: ModelConfig,
     Exactly one of ``session_store`` (web session, guarded by ``live``) or
     ``named`` (channel session, guarded by its per-id lock) must be given.
     Never raises: any problem is logged and the compaction retried on a later
-    turn.
+    turn. ``except Exception`` deliberately does NOT cover
+    ``asyncio.CancelledError`` (a BaseException since 3.8): swallowing it here
+    would make cancel_compaction cooperative in name only.
     """
     if memory is None or not agent.memory_enabled:
         return

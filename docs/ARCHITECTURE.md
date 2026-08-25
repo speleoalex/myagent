@@ -121,6 +121,23 @@ serves them.
   `call_agent` step — exactly where the UI nests them in a collapsible
   sub-agent block — and the forwarded `tool_result` events are the real
   `_step_summary` projections, so live and persisted views cannot drift.
+- **What a sub-agent reported survives the turn** — its reply is the only
+  record of what it found, and no `tool` message ever enters `conversation[]`
+  (the scaffolding predicate drops them, or the model would mimic the protocol
+  next turn). So the caller gets it back two ways, and neither invents a new
+  storage format — the full result already sits in every session file:
+  the newest few delegations are quoted **verbatim** in the system prompt
+  (`## Agent findings`, built by `_build_findings_section` from
+  `storage.sessions.delegation_history(session)`, which the four turn paths
+  hand to `run`/`run_stream` next to `memory_context`), and the full text of
+  any of them is read on demand with the internal **`recall_delegation`**
+  tool. Verbatim and not summarized on purpose: a sub-agent reply is already a
+  summary written for the caller, and summaries of summaries lose the facts.
+  The section is *not* gated on `memory_enabled` — it is session state, not
+  long-term memory — and, like `## Memory`, it rides on the system prompt and
+  never enters `conversation[]`. Ids (`d1`, `d2`, …) are numbered from the
+  oldest so they stay stable as the chat appends new ones. Sub-agents receive
+  none of this: between agents only `message`/`reply` travel.
 - **Thinking is a separate channel** (`server/app/engine/reasoning.py`) — a
   reasoning model's chain-of-thought arrives either in a dedicated delta field
   (`reasoning_content`, `reasoning`) or inline as `<think>…</think>` inside the
@@ -193,6 +210,45 @@ reachable llama.cpp instance. Four properties are deliberate:
 `GET /api/system/ready` reports the same decision (and warms its cache) for the
 home page, which shows a banner only when nothing can answer.
 
+## Automatic agent selection ("Auto")
+
+The chat's agent selector — and a connector binding — can be set to **Auto**
+instead of a specific agent. The client sends the sentinel `agent_id: "auto"`;
+`server/app/engine/agent_router.py` resolves it to a real agent **before** the
+executor is built, so everything downstream (executor, session recording, trace)
+sees only the resolved id. One resolver, three entry points: the web chat
+router, `POST /api/chat` with a `session_id`, and the connectors plugin.
+
+- **One bare LLM call per message** (no executor, no tools, temperature 0,
+  25 s timeout): a compact agent directory (the same per-agent line the
+  delegation directory uses) plus the message, answered with a single id or
+  `unknown`. The parse is forgiving (ids are matched inside prose, reasoning is
+  stripped) but never invents an id outside the candidates.
+- **Candidates** are the agents `enabled` **and** `callable` — machine
+  selection honors the same opt-out as delegation (Tool Manager and Agent
+  Manager stay a deliberate human pick) — plus `master`, the natural entrypoint
+  for general questions even though its seed is not delegatable.
+- **Follow-ups stick**: the agent that answered the previous turn is named in
+  the prompt as the preferred pick for retries and continuations ("try again",
+  "more detail" name no topic at all).
+- **Every failure is a fallback, declared**: unknown, timeout, no reachable
+  model → the chat's last-used agent (then `master`, then the first enabled
+  agent), with a notice above the answer. The id `auto` is reserved: neither
+  the agents API nor `manage_agents` will create an agent with it.
+- **Other agents' turns are quoted, not imitated.** The stored conversation
+  strips tool scaffolding, so another agent's direct answers read — as
+  assistant messages — like an assistant that never uses tools, and a small
+  model copies that (measured: 0/3 tool calls with them inline, 3/3 without).
+  In Auto mode the history entries another agent answered are flagged
+  (`ChatMessage.foreign`, prompt-time only), kept out of the message list and
+  quoted verbatim in a system section instead, so references to them still
+  work. The executor hands back the **whole** history, flag stripped, so the
+  stored session loses nothing. A manual agent switch keeps its verbatim
+  history: the flagging only happens when the selector is on Auto.
+- The UI restores Auto across reloads from a session flag (the per-turn
+  `agent_id` always holds the resolved agent) and labels each answer with the
+  agent that produced it.
+
 ## Tool system
 
 Tools are an **overlay of two layers**, with no install step:
@@ -247,7 +303,8 @@ registry, so nothing downstream ever sees a wildcard. The UI shows a group
 as one block: a master checkbox for the wildcard, or per-tool checkboxes.
 
 Internal tools (`"internal": true`) are async Python handlers registered via
-`registry.register_internal()`: `call_agent`, the memory tools
+`registry.register_internal()`: `call_agent`, `recall_delegation` (the other
+half of delegation: what an agent reported in an earlier turn), the memory tools
 (`memory_search`/`memory_read`/`memory_note`), `notify_user`, `manage_tasks`
 (the agent lists, schedules, edits and cancels its OWN tasks)
 and `autonomy_control` (an agent switches its OWN autonomous mode on/off from
@@ -392,7 +449,13 @@ chats. The store is plain Markdown, readable and hand-editable:
   with no keyword match still lists the most recent entries (vague queries
   like "what do you remember?" would otherwise read as an empty memory);
   `memory_read` on a conversation chunk names the session holding the full
-  transcript.
+  transcript. A compaction still running when the NEXT turn starts is
+  **cancelled** (`cancel_compaction(session_id)`, called by all four turn
+  paths): its result would have been discarded anyway (phase C aborts on
+  `live.is_active`), and on a single-slot local server that generation competes
+  with the answer the user is waiting for. Cancelling is safe precisely because
+  the pipeline is crash-safe — the next turn's compaction reuses any chunk
+  already written, matched by content hash.
 
 Crash safety: chunk file → `memory.md` index → session splice, in that order,
 with a content-hash dedup making the retry idempotent (`add_to_index` is a
@@ -786,6 +849,7 @@ one the navbar shows) rendered white on a blue gradient.
 | LLM communication | `server/app/engine/llm_provider.py` |
 | Context window / capability probe | `server/app/engine/model_probe.py` |
 | Default-model fallback (never persisted) | `server/app/engine/default_model.py` |
+| Automatic agent selection (classifier, foreign-history flag) | `server/app/engine/agent_router.py` |
 | Live (client-decoupled) runs | `server/app/engine/live.py` |
 | Long-term memory store (memory.md + chunks) | `server/app/storage/memory.py` |
 | Memory compaction pipeline | `server/app/engine/memory_compactor.py` |

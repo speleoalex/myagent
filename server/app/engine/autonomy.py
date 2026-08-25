@@ -52,10 +52,10 @@ from pathlib import Path
 
 from app.engine import prompts
 from app.engine.executor import AgentExecutor
-from app.engine.memory_compactor import schedule_compaction
+from app.engine.memory_compactor import cancel_compaction, schedule_compaction
 from app.models import Agent, AutonomousConfig, ChatMessage
-from app.storage.sessions import (memory_context, now_iso, read_json,
-                                  record_turn, steps_from, write_json)
+from app.storage.sessions import (delegation_history, memory_context, now_iso,
+                                  read_json, record_turn, steps_from, write_json)
 
 log = logging.getLogger(__name__)
 
@@ -516,8 +516,10 @@ class AutonomyService:
                 reasoning_text = ""
                 recorded = False
                 try:
-                    async for event in executor.run_stream(prompt, prior, None,
-                                                           memory_context(session)):
+                    cancel_compaction(sid)  # do not race this wake for the model
+                    async for event in executor.run_stream(
+                            prompt, prior, None, memory_context(session),
+                            delegations=delegation_history(session)):
                         et = event.get("type")
                         if et == "tool_result":
                             tool_events.append(event.get("data", {}))

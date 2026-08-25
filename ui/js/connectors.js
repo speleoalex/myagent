@@ -220,10 +220,11 @@ const ConnectorsPage = {
                         <label class="form-label" for="f-agent">${i18n('connectors.agent')}</label>
                         <select class="form-select" id="f-agent">
                             <option value="">${i18n('connectors.agentNone')}</option>
+                            <option value="auto" ${b.agent_id === 'auto' ? 'selected' : ''}>${i18n('chat.agentAuto')}</option>
                             ${agents.map(a =>
                                 `<option value="${App.escAttr(a.id)}" ${a.id === b.agent_id ? 'selected' : ''}>${App.esc(a.name || a.id)}</option>`
                             ).join('')}
-                            ${b.agent_id && !agents.some(a => a.id === b.agent_id)
+                            ${b.agent_id && b.agent_id !== 'auto' && !agents.some(a => a.id === b.agent_id)
                                 ? `<option value="${App.escAttr(b.agent_id)}" selected>${App.esc(b.agent_id)} — ${i18n('agents.bindingMissing')}</option>`
                                 : ''}
                         </select>

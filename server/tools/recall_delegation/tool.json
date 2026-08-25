@@ -1,0 +1,19 @@
+{
+  "name": "Recall Delegation",
+  "description": "Look up what another agent reported to you EARLIER in this chat. Without arguments it lists the past delegations (id, agent, question, snippet); pass the id of one to read its full reply. Use it instead of saying you do not have the information.",
+  "internal": true,
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "id": {
+        "type": "string",
+        "description": "Id of one past delegation (looks like 'd3'), to read its full reply. Omit to list them."
+      },
+      "agent_id": {
+        "type": "string",
+        "description": "Only list delegations to this agent. Omit to list all of them."
+      }
+    },
+    "required": []
+  }
+}

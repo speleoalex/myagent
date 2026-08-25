@@ -253,6 +253,10 @@ def read_agent(path: Path) -> dict | None:
 def do_save(args: dict) -> None:
     name = (args.get("name") or "").strip()
     agent_id = (args.get("id") or "").strip() or slugify(name)
+    if agent_id == "auto":
+        # Reserved: the chat's automatic-agent-selection sentinel (the agents
+        # API refuses it too). A real "auto" would switch that feature off.
+        fail("The id 'auto' is reserved for automatic agent selection; choose another id.")
     if not agent_id:
         fail("Provide a 'name' (or an explicit 'id') to save an agent.")
     if not _VALID_ID.match(agent_id) or ".." in agent_id:

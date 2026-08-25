@@ -2,15 +2,19 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 import asyncio
 import json
+import logging
 
 from app.engine import prompts
+from app.engine.agent_router import AUTO, mark_foreign, resolve_auto
 from app.engine.channel_turn import run_channel_turn
 from app.engine.executor import AgentExecutor, Stores
-from app.engine.memory_compactor import schedule_compaction
+from app.engine.memory_compactor import cancel_compaction, schedule_compaction
 from app.ids import is_valid_id
 from app.models import ChatRequest, ChatResponse, ChatMessage
-from app.storage.sessions import (memory_context, now_iso, record_turn,
-                                  record_user_turn, steps_from)
+from app.storage.sessions import (delegation_history, memory_context, now_iso,
+                                  record_turn, record_user_turn, steps_from)
+
+log = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -45,6 +49,48 @@ def _remember_model_override(session: dict, req: ChatRequest) -> None:
         session.pop("model_override", None)
 
 
+def _remember_agent_auto(session: dict, on: bool) -> None:
+    """Keep the chat's Auto mode on the CURRENT session, for the UI only —
+    the exact mirror of _remember_model_override. It needs its own key because
+    record_user_turn overwrites session["agent_id"] with the RESOLVED agent on
+    every turn (which is also what makes the last-used fallback work), so the
+    combo could never read "auto" back from there."""
+    if on:
+        session["agent_auto"] = True
+    else:
+        session.pop("agent_auto", None)
+
+
+async def _route_auto(req: ChatRequest, request: Request, session: dict,
+                      named: bool = False) -> str | None:
+    """Resolve agent_id "auto" → a concrete id, IN PLACE on ``req``; returns
+    the fallback note (or None). The resolution itself is agent_router.
+    resolve_auto, shared with the connectors plugin — this wrapper owns the
+    web session's Auto flag (web only: a channel session has no selector to
+    restore), ``req.agent_auto`` and the HTTP error shape."""
+    stores: Stores = request.app.state.stores
+    was_auto = req.agent_id == AUTO and stores.agents.get(AUTO) is None
+    if not named:
+        _remember_agent_auto(session, was_auto)
+    try:
+        req.agent_id, note = await resolve_auto(
+            req.agent_id, req.message, session, stores,
+            request.app.state.tool_registry, model_override=req.model_override)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    req.agent_auto = was_auto
+    return note
+
+
+def _mark_foreign(prior: list[ChatMessage], session: dict, agent_id: str) -> None:
+    """Auto mode only: flag the history turns another agent answered (see
+    agent_router.mark_foreign). Outside Auto mode nothing is flagged — a
+    manual agent switch mid-chat keeps its long-standing verbatim context
+    ("traduci quello sopra" needs it)."""
+    if session.get("agent_auto"):
+        mark_foreign(prior, session, agent_id)
+
+
 @router.post("")
 async def chat(req: ChatRequest, request: Request) -> ChatResponse:
     stores: Stores = request.app.state.stores
@@ -52,29 +98,55 @@ async def chat(req: ChatRequest, request: Request) -> ChatResponse:
     session_store = request.app.state.sessions
     live = request.app.state.live
 
+    # Auto-routing: the web chat owns the Auto flag on its current session; a
+    # channel session (an external connector on this endpoint) resolves the
+    # same way against its own history, no flag. The live check moves up so a
+    # busy chat never pays a classification call.
+    session = None
+    routed_note = None
+    if not req.session_id:
+        session = session_store.get_current()
+        if live.is_active(session["id"]):
+            raise HTTPException(409, "A generation is already running for this chat")
+        routed_note = await _route_auto(req, request, session)
+        if live.is_active(session["id"]):  # the classification took time
+            raise HTTPException(409, "A generation is already running for this chat")
+    elif req.agent_id == AUTO:
+        named_session = await asyncio.to_thread(
+            request.app.state.named_sessions.get, req.session_id, req.agent_id)
+        note = await _route_auto(req, request, named_session, named=True)
+        if note:
+            # run() drains no notice event; the log is where this path declares.
+            log.info("%s: %s", req.session_id, note)
+
     try:
         executor = await AgentExecutor.create_for_agent(
             req.agent_id, tool_registry, stores,
             model_override=req.model_override)
     except ValueError as e:
         raise HTTPException(404, str(e))
+    if routed_note:
+        executor.notice = (f"{executor.notice} {routed_note}"
+                           if executor.notice else routed_note)
 
     # External connectors address their own persistent, per-channel session.
     if req.session_id:
         return await run_channel_turn(req, request.app.state.named_sessions, executor)
 
-    session = session_store.get_current()
-    if live.is_active(session["id"]):
-        raise HTTPException(409, "A generation is already running for this chat")
+    # A compaction still running for this chat would compete with THIS turn for
+    # the model, and phase C would discard its result anyway.
+    cancel_compaction(session["id"])
     _remember_model_override(session, req)
     prior = [ChatMessage(**m) for m in session.get("conversation", [])]
+    _mark_foreign(prior, session, req.agent_id)
     attachments = [a.model_dump() for a in req.attachments] or None
 
     _record_user(session, req)
     await asyncio.to_thread(session_store.save_current, session)
 
     response = await executor.run(req.message, prior, attachments,
-                                  memory_context=memory_context(session))
+                                  memory_context=memory_context(session),
+                                  delegations=delegation_history(session))
 
     conv = [m.model_dump(exclude_none=True) for m in response.conversation]
     steps = steps_from(response.trace, response.tool_results)
@@ -97,8 +169,9 @@ def _make_drive(executor, message, prior, attachments, session, session_store, l
         reasoning_text = ""
         recorded = False  # the completed turn has been recorded to `session`
         try:
-            async for event in executor.run_stream(message, prior, attachments,
-                                                   memory_context(session)):
+            async for event in executor.run_stream(
+                    message, prior, attachments, memory_context(session),
+                    delegations=delegation_history(session)):
                 et = event.get("type")
                 # agent_event (a sub-agent's live tokens/tools) is deliberately
                 # pass-through: it must reach SSE via run.emit below but never
@@ -160,23 +233,38 @@ async def chat_stream(req: ChatRequest, request: Request):
     session_store = request.app.state.sessions
     live = request.app.state.live
 
+    session = session_store.get_current()
+    sid = session["id"]
+
+    # If a generation is already running for this chat, just attach to it
+    # (defensive: the UI shows Stop, not Send, while a run is active).
+    # Checked BEFORE auto-routing, so a re-attach never pays an LLM call.
+    if live.is_active(sid):
+        return _sse(live.get(sid).subscribe())
+
+    routed_note = await _route_auto(req, request, session)
+    # Re-checked: the classification above can take seconds, and live.start()
+    # overwrites silently — a second Send in that window must attach, not
+    # start a twin run on the same session.
+    if live.is_active(sid):
+        return _sse(live.get(sid).subscribe())
     try:
         executor = await AgentExecutor.create_for_agent(
             req.agent_id, tool_registry, stores,
             model_override=req.model_override)
     except ValueError as e:
         raise HTTPException(404, str(e))
+    if routed_note:
+        # Rides the existing notice machinery: emitted once at depth 0,
+        # recorded in the session by _make_drive, drawn above the bubble.
+        executor.notice = (f"{executor.notice} {routed_note}"
+                           if executor.notice else routed_note)
 
-    session = session_store.get_current()
-    sid = session["id"]
-
-    # If a generation is already running for this chat, just attach to it
-    # (defensive: the UI shows Stop, not Send, while a run is active).
-    if live.is_active(sid):
-        return _sse(live.get(sid).subscribe())
+    cancel_compaction(sid)  # same reason as in chat() above
     _remember_model_override(session, req)
 
     prior = [ChatMessage(**m) for m in session.get("conversation", [])]
+    _mark_foreign(prior, session, req.agent_id)
     attachments = [a.model_dump() for a in req.attachments] or None
 
     _record_user(session, req)

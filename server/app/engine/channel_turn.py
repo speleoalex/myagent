@@ -11,9 +11,10 @@ from __future__ import annotations
 import asyncio
 
 from app.models import ChatRequest, ChatResponse, ChatMessage
-from app.engine.memory_compactor import schedule_compaction
-from app.storage.sessions import (memory_context, record_turn, record_user_turn,
-                                  steps_from, title_from)
+from app.engine.agent_router import mark_foreign
+from app.engine.memory_compactor import cancel_compaction, schedule_compaction
+from app.storage.sessions import (delegation_history, memory_context, record_turn,
+                                  record_user_turn, steps_from, title_from)
 
 
 async def run_channel_turn(req: ChatRequest, named, executor) -> ChatResponse:
@@ -27,6 +28,9 @@ async def run_channel_turn(req: ChatRequest, named, executor) -> ChatResponse:
     sid = req.session_id
     async with named.lock(sid):
         session = await asyncio.to_thread(named.get, sid, req.agent_id)
+        # A compaction still running for this session would compete with THIS
+        # turn for the model, and would be discarded anyway.
+        cancel_compaction(sid)
         # Provenance: upgrade sessions created before these fields existed.
         session.setdefault("channel", sid)
         if req.source:
@@ -40,6 +44,13 @@ async def run_channel_turn(req: ChatRequest, named, executor) -> ChatResponse:
             if first:
                 session["title"] = title_from(first)
         prior = [ChatMessage(**m) for m in session.get("conversation", [])]
+        # A binding on "auto" routes per message, so this session's history
+        # may hold other agents' turns: quoted, not imitated. Gated on the
+        # request flag like the web chat's Auto mode — an admin who re-points
+        # a binding to a fixed agent keeps the verbatim history.
+        if req.agent_auto:
+            session["agent_auto"] = True  # the web UI's "via <agent>" labels
+            mark_foreign(prior, session, req.agent_id)
         attachments = [a.model_dump() for a in req.attachments] or None
 
         # Provenance the MODEL sees: who wrote this, on which channel. Prefixed
@@ -55,7 +66,8 @@ async def run_channel_turn(req: ChatRequest, named, executor) -> ChatResponse:
 
         response = await executor.run(model_message, prior, attachments,
                                       memory_context=memory_context(session),
-                                      transcribed=req.transcribed)
+                                      transcribed=req.transcribed,
+                                      delegations=delegation_history(session))
 
         conv = [m.model_dump(exclude_none=True) for m in response.conversation]
         record_user_turn(session, req.message,

@@ -49,6 +49,7 @@ from app.tools.internal import (
     notify_agent_owner,
     notify_targets,
     notify_user_handler,
+    recall_delegation_handler,
 )
 from app.tools.memory_tools import (
     memory_search_handler,
@@ -184,6 +185,10 @@ tool_registry = ToolRegistry(TOOLS_DIR, workdir=WORKSPACE_DIR, app_dir=APP_DIR,
                              bundled_dir=DEFAULT_TOOLS_DIR,
                              tool_env=config.tool_env())
 tool_registry.register_internal("call_agent", call_agent_handler)
+# The other half of delegation: what a sub-agent reported in a PAST turn is
+# nowhere in conversation[] (a `tool` message never survives the scaffolding
+# filter), so it is read back from the session on demand.
+tool_registry.register_internal("recall_delegation", recall_delegation_handler)
 tool_registry.register_internal("memory_search", memory_search_handler)
 tool_registry.register_internal("memory_read", memory_read_handler)
 tool_registry.register_internal("memory_note", memory_note_handler)

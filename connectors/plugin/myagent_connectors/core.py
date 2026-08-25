@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from app.engine.agent_router import AUTO, resolve_auto
 from app.engine.channel_turn import run_channel_turn
 from app.engine.executor import AgentExecutor
 from app.models import ChatRequest
@@ -111,6 +112,19 @@ class CoreClient:
             transcribed=transcribed,
         )
         async with self._turns:
+            if agent_id == AUTO:
+                # A binding on "auto": pick the agent per message, with the
+                # channel session's last-used agent as hint and fallback. Read
+                # outside the session lock — only agent_id is consulted, and
+                # run_channel_turn re-reads under the lock anyway.
+                session = await asyncio.to_thread(
+                    state.named_sessions.get, session_id, agent_id)
+                agent_id, note = await resolve_auto(
+                    agent_id, message, session, state.stores, state.tool_registry)
+                req.agent_id = agent_id
+                req.agent_auto = True
+                if note:
+                    log.info("%s: %s", session_id, note)
             executor = await AgentExecutor.create_for_agent(
                 agent_id, state.tool_registry, state.stores
             )

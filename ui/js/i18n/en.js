@@ -513,6 +513,8 @@ I18n.translations.en = {
     'chat.liveBanner': 'Live conversation on another channel (read-only here). Reply from the channel itself.',
     'chat.modelDefault': 'Default model',
     'chat.modelTitle': 'Model for this chat only — agents pinned to a specific model keep it',
+    'chat.agentAuto': 'Auto (pick per message)',
+    'chat.viaAgent': 'via {name}',
     'chat.backToCurrent': 'Back to current chat',
     'chat.resume': 'Resume this chat',
     'chat.attachTitle': 'Attach files',

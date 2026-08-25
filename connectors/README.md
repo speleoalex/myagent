@@ -19,7 +19,10 @@ Installed, it runs **inside** myagent's process — one service, one port, one U
 ```
 
 Each **binding** links one bot ↔ one agent: *"messages on THIS bot are answered
-by THIS agent, for THESE users only."* Configure them at
+by THIS agent, for THESE users only."* The agent can also be **Auto**: every
+message is then classified and routed to the best-suited agent, with follow-ups
+("try again", "more detail") staying with whoever just answered — the same
+option the web chat's agent selector offers. Configure them at
 `http://127.0.0.1:8888/#/connectors`.
 
 ## What it does
