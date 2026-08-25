@@ -86,6 +86,15 @@ const SettingsPage = {
 
                     <hr class="my-4">
 
+                    <!-- Server identity: which account the process runs as
+                         and which directories it really uses. Read-only. -->
+                    <h5>${i18n('settings.server')}</h5>
+                    <div id="server-info" class="mb-3">
+                        <div class="spinner-border spinner-border-sm"></div> ${i18n('settings.checking')}
+                    </div>
+
+                    <hr class="my-4">
+
                     <h5>${i18n('settings.systemStatus')}</h5>
                     <div id="status-checks" class="mb-3">
                         <div class="spinner-border spinner-border-sm"></div> ${i18n('settings.checking')}
@@ -136,6 +145,8 @@ const SettingsPage = {
         // installing/resetting changes what the box should say — re-render on
         // every PWA state change instead of snapshotting it once.
         PWA.onchange = () => this.renderInstall();
+
+        this.loadServerInfo();
 
         this.checkStatus();
     },
@@ -296,6 +307,29 @@ const SettingsPage = {
         if (install) install.onclick = () => PWA.install();
         const reset = document.getElementById('btn-pwa-reset');
         if (reset) reset.onclick = () => PWA.reset();
+    },
+
+    async loadServerInfo() {
+        const box = document.getElementById('server-info');
+        let info;
+        try {
+            info = await App.api('GET', '/system/info');
+        } catch (e) {
+            box.innerHTML = `<div class="text-secondary"><i class="bi bi-dash-circle"></i> ${i18n('settings.serverUnavailable')}</div>`;
+            return;
+        }
+        const row = (label, value, extra = '') =>
+            `<tr><th class="text-nowrap fw-normal text-secondary pe-3">${label}</th><td><code>${App.esc(String(value ?? '?'))}</code>${extra}</td></tr>`;
+        const rootWarn = info.is_root
+            ? ` <span class="badge text-bg-warning ms-1">${i18n('settings.serverRoot')}</span>` : '';
+        box.innerHTML = `
+            <table class="table table-sm table-borderless mb-0 w-auto">
+                ${row(i18n('settings.serverUser'), info.uid != null ? `${info.user} (uid ${info.uid})` : info.user, rootWarn)}
+                ${row(i18n('settings.serverHost'), info.hostname)}
+                ${row(i18n('settings.serverHome'), info.home_dir)}
+                ${row(i18n('settings.serverCode'), info.app_dir)}
+                ${row(i18n('settings.serverProcess'), `pid ${info.pid} · Python ${info.python} · ${info.platform}`)}
+            </table>`;
     },
 
     async checkStatus() {

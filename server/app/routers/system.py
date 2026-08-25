@@ -1,4 +1,9 @@
+import getpass
+import os
+import platform
 import secrets as secrets_mod
+import socket
+import sys
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
@@ -25,6 +30,32 @@ class ApiKeyUpdate(BaseModel):
 @router.get("/health")
 async def health():
     return {"status": "ok", "workspace": str(WORKSPACE_DIR)}
+
+
+@router.get("/info")
+async def info():
+    """Who and where this server process is: the account it runs as, the host,
+    and the directories it actually uses. Read-only; meant for the Settings
+    page so a misconfigured unit (wrong User=, state tree under /root, ...)
+    is visible at a glance instead of being guessed from missing agents."""
+    try:
+        user = getpass.getuser()
+    except Exception:
+        user = str(os.getuid()) if hasattr(os, "getuid") else "?"
+    return {
+        "user": user,
+        "uid": os.getuid() if hasattr(os, "getuid") else None,
+        "is_root": (os.getuid() == 0) if hasattr(os, "getuid") else False,
+        "hostname": socket.gethostname(),
+        "platform": platform.platform(terse=True),
+        "python": sys.version.split()[0],
+        "pid": os.getpid(),
+        "home_dir": str(config.HOME_DIR),
+        "config_dir": str(config.CONFIG_DIR),
+        "sessions_dir": str(config.SESSIONS_DIR),
+        "workspace_dir": str(config.WORKSPACE_DIR),
+        "app_dir": str(config.APP_DIR),
+    }
 
 
 @router.get("/ready")
