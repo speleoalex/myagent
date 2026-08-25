@@ -135,6 +135,11 @@ else
     if [ -z "$INSTALL_DIR" ]; then
         INSTALL_DIR="$(systemctl --user show -p WorkingDirectory --value myagent 2>/dev/null || true)"
     fi
+    # User-mode install that fell back to a system unit (no user session):
+    # myagent-<user>. install.sh takes sudo itself for the unit, so run it as us.
+    if [ -z "$INSTALL_DIR" ] && [ -e "/etc/systemd/system/myagent-$(id -un).service" ]; then
+        INSTALL_DIR="$(systemctl show -p WorkingDirectory --value "myagent-$(id -un)" 2>/dev/null || true)"
+    fi
     if [ -z "$INSTALL_DIR" ] && [ -e /etc/systemd/system/myagent.service ]; then
         INSTALL_DIR="$(systemctl show -p WorkingDirectory --value myagent 2>/dev/null || true)"
         SUDO="sudo"
