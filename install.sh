@@ -465,7 +465,8 @@ WorkingDirectory=$INSTALL_DIR
 ExecStart=$INSTALL_DIR/server/.venv/bin/python $INSTALL_DIR/server/main.py
 Restart=on-failure
 RestartSec=5
-Environment=PYTHONUNBUFFERED=1$extra
+Environment=PYTHONUNBUFFERED=1
+$extra
 # The API has no authentication by default and ships shell-executing tools: keep
 # it on localhost unless you know what you are doing (or front it with an
 # authenticating reverse proxy). Override in a drop-in (see header), not here.
