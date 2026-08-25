@@ -218,7 +218,7 @@ if [ -z "$IN_PLACE" ]; then
         # dir it can only mislead (install.sh would install the install onto
         # itself — the guard above —, update.sh needs a .git that is not there,
         # tests/ is for developing this repo). Anchored: top level only.
-        printf '%s\n' '/install.sh' '/update.sh' '/.gitignore' '/tests'
+        printf '%s\n' '/install.sh' '/uninstall.sh' '/update.sh' '/.gitignore' '/tests'
         # What DOES stay: library/ (fetch.py is what the report below tells the
         # user to run), docs/, README*.md and LICENSE.
         printf '%s\n' '.venv' '__pycache__' '*.pyc' 'node_modules' '.env' \
@@ -238,7 +238,7 @@ if [ -z "$IN_PLACE" ]; then
     # Safe: the guard above guarantees INSTALL_DIR is not the checkout.
     rm -rf "$INSTALL_DIR/.venv" "$INSTALL_DIR/.playwright-mcp" "$INSTALL_DIR/.ruff_cache" \
            "$INSTALL_DIR/docs_local" "$INSTALL_DIR/.claude" "$INSTALL_DIR/tests" \
-           "$INSTALL_DIR/install.sh" "$INSTALL_DIR/update.sh" "$INSTALL_DIR/.gitignore" \
+           "$INSTALL_DIR/install.sh" "$INSTALL_DIR/uninstall.sh" "$INSTALL_DIR/update.sh" "$INSTALL_DIR/.gitignore" \
            "$INSTALL_DIR/setup.sh" "$INSTALL_DIR/deploy.sh" "$INSTALL_DIR/deploy-macos.sh"
 else
     echo "[1/5] In place: $INSTALL_DIR"

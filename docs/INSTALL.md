@@ -149,6 +149,23 @@ uncommitted edits to tracked files, **nothing is overwritten** — the script
 explains why and exits with code 2. `--check` reports what would happen
 without changing anything; `--no-deploy` updates the checkout only.
 
+## Uninstalling
+
+`./uninstall.sh` (from the git checkout) removes the **service and the code,
+never your data**. Run it the way you installed: as yourself for a per-user or
+macOS install, `sudo ./uninstall.sh` for the service-account or root install.
+`--dry-run` prints the plan and changes nothing; `--yes` skips the confirmation.
+
+It reads the installed unit (or LaunchAgent) to find what to remove — the unit
+itself with its drop-ins, and the code directory the unit points at (venv,
+`node_modules`, copied sources) — and refuses to delete any directory that holds
+runtime data (`config/`, `sessions/`, …), whatever the unit says. What stays:
+`~/myagent` of the service user (agents, models, API key, sessions, memory,
+library, workspace, connector state, plugins), the `myagent` service account and
+the LLM backend's models. The script prints the exact commands for the two
+things it deliberately leaves to you (`rm -rf` of the data, `userdel -r
+myagent`). Reinstalling later with `./install.sh` picks everything up as it was.
+
 ## Install it as an app
 
 Open *Settings → Install app* and MyAgent installs like a native application:
