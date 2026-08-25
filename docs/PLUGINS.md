@@ -158,10 +158,12 @@ which prefixes to shim would mean naming a specific plugin.
 There is no install command in the core. A plugin ships its own script; see
 `connectors/install.sh`, which:
 
-1. refuses to run as root (it installs under `$HOME`);
+1. refuses to run as root (it installs under `$HOME` — the *service* user's,
+   so for a service-account install it is run as `sudo -u myagent …`);
 2. `rsync`s its code into `~/myagent/plugins/<id>/`;
 3. installs its `requirements.txt` into the **running** install's `server/.venv`
-   (found via `MYAGENT_INSTALL_DIR`, else systemd's `WorkingDirectory`), never
+   (found via `MYAGENT_INSTALL_DIR`, else the `WorkingDirectory` of the user or
+   system unit), never
    with `--upgrade`, so core dependencies do not move underneath a working setup;
 4. verifies the core still imports before restarting the service;
 5. restarts myagent (systemd or launchd).

@@ -15,7 +15,11 @@ API can:
 - read your conversations, your library and your address book;
 - reconfigure agents, including granting them more tools.
 
-So the only real boundary is **who can reach the port**.
+So the only real boundary is **who can reach the port** — and, on a shared
+machine, **which OS user the service runs as**: that user's permissions are the
+agents' permissions. `install.sh` without sudo runs it as you (your files, and
+only yours); with sudo it offers a dedicated `myagent` account whose home is
+all the agents can touch. See [INSTALL.md](INSTALL.md#install-modes).
 
 Two of the bundled agents hold `shell_exec` and are reachable by delegation —
 **System Administrator** and **Coder** — and Coder is the natural destination
@@ -67,7 +71,7 @@ click through is not enough for the browser).
 ## Exposing it on the network
 
 If you set `MYAGENT_HOST=0.0.0.0`, set an API key in the same change. The two
-belong together; the systemd unit written by `deploy.sh` says so in a comment
+belong together; the systemd unit written by `install.sh` says so in a comment
 right above the line.
 
 ## MCP servers

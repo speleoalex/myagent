@@ -12,6 +12,7 @@ touches your data:
 
 ```text
 ~/myagent/
+├── bin/         # the CODE of a per-user or service-account install — replaced by every install.sh run, nothing of yours in here
 ├── config/      # agents, models (API keys, 0600), MCP servers, settings — small & precious: back this up
 ├── connectors/  # channel bindings (bot tokens and device keys, 0600), grants, address book
 ├── plugins/     # installed plugins — code, replaceable (see PLUGINS.md)
@@ -79,7 +80,8 @@ something else — a file (`MYAGENT_DEBUG_FILE`), a limit
 `_DIR` suffix for a reason: `MYAGENT_CONNECTORS_DIR`, because the bare name
 would read as the head of the `MYAGENT_CONNECTORS_*` knob family below, and
 `MYAGENT_INSTALL_DIR`, which is where the *code* is installed rather than
-runtime state.
+runtime state (read by `install.sh`; default `$MYAGENT_HOME/bin`, or
+`/opt/myagent` for a root install — see [INSTALL.md](INSTALL.md#install-modes)).
 
 `MYAGENT_APP_DIR`, `MYAGENT_WORKSPACE`, `MYAGENT_HOME`, `MYAGENT_LIBRARY` and
 `MYAGENT_CACHE` are also **passed to every tool** as already-resolved paths

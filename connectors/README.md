@@ -60,34 +60,39 @@ option the web chat's agent selector offers. Configure them at
 
 ## Requirements
 
-- An installed myagent (`./deploy.sh`, or `./setup.sh` for a dev checkout).
+- An installed myagent (`./install.sh`, or `./install.sh --dev` for a dev checkout).
 - A Telegram bot token from [@BotFather](https://t.me/BotFather).
 - Optional, for voice notes: `ffmpeg` on the PATH.
 
 ## Install
 
 ```bash
-bash connectors/install.sh          # from the git checkout
+bash connectors/install.sh                    # from the git checkout, as the user the service runs as
+sudo -u myagent bash connectors/install.sh    # install made with sudo as the `myagent` service account
 ```
 
-It copies the plugin to `~/myagent/plugins/connectors/`, installs its one extra
-Python dependency into myagent's virtualenv, and restarts the service. If the old
+It copies the plugin to that user's `~/myagent/plugins/connectors/`, installs
+its one extra Python dependency into myagent's virtualenv, and restarts the
+service (a system-wide one needs `sudo systemctl restart myagent`, which it
+tells you when it cannot run it itself). If the old
 standalone `myagent-connectors` service is still running it refuses to proceed —
 two pollers on one bot token means Telegram delivers each message to only one of
 them, at random, with no error on either side.
 
-Then, at `http://127.0.0.1:8888/#/connectors`: **New bot** → paste the token →
+Then, in the UI under `#/connectors` (`http://127.0.0.1:8888/#/connectors` on
+the default port): **New bot** → paste the token →
 **Test token** → pick the agent → list the authorized user ids → Save. The bot
 starts polling immediately, no restart needed. To find your numeric id, message
 [@userinfobot](https://t.me/userinfobot).
 
-Logs: `journalctl -u myagent -f | grep connectors`
+Logs: `journalctl --user -u myagent -f | grep connectors` (per-user install) or
+`journalctl -u myagent -f | grep connectors` (system-wide).
 
 ## Uninstall
 
 ```bash
 rm -rf ~/myagent/plugins/connectors
-sudo systemctl restart myagent
+systemctl --user restart myagent      # or: sudo systemctl restart myagent
 ```
 
 **Your bots and tokens stay** in `~/myagent/connectors/` — reinstalling brings

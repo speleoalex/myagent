@@ -121,20 +121,22 @@ ollama pull qwen3          # va bene qualsiasi modello capace di usare i tool
 
 git clone https://github.com/speleoalex/myagent.git
 cd myagent
-./setup.sh
-server/.venv/bin/python server/main.py
+./install.sh
 ```
 
-Apri **<http://127.0.0.1:8888>**, scegli un agente e scrivi. `setup.sh` ti dice
-quale backend ha trovato e ti offre di installare le parti opzionali che
+Apri l'indirizzo che stampa (**<http://127.0.0.1:8888>** se la porta era
+libera), scegli un agente e scrivi. Niente sudo: `install.sh` registra MyAgent
+come servizio che gira *con il tuo utente*, parte al login e resta nella tua
+home — più utenti sulla stessa macchina hanno ciascuno la propria istanza. Ti
+dice quale backend ha trovato e ti offre di installare le parti opzionali che
 mancano, e MyAgent risponde con il modello locale che risulta raggiungibile —
 quindi il primo messaggio funziona prima ancora che tu abbia configurato
-qualcosa.
+qualcosa. Installazione per tutta la macchina, utente di servizio dedicato e
+avvio a mano (`./install.sh --dev`) sono in [INSTALL.md](docs/INSTALL.md).
 
 Poi riempi la biblioteca, che è ciò che lo rende utile offline:
 
 ```bash
-server/.venv/bin/pip install libzim       # serve per gli archivi .zim
 library/fetch.py --list                   # il catalogo, con le dimensioni attuali
 library/fetch.py --lang it --preset base  # set iniziale, ~1,7 GB con l'italiano
 ```

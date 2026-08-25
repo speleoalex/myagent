@@ -38,7 +38,8 @@ git rev-parse --is-inside-work-tree >/dev/null 2>&1 \
     || fail "$(pwd) is not a git checkout — updates need a clone of the repo (git clone https://github.com/speleoalex/myagent.git)"
 
 # Running git as root inside another user's checkout leaves root-owned files
-# in .git and trips git's ownership check. deploy.sh asks for sudo on its own.
+# in .git and trips git's ownership check. sudo is used only for the reinstall
+# step, and only when the installed service is a system-wide one.
 OWNER="$(stat -c %U . 2>/dev/null || stat -f %Su .)"
 if [ "${EUID:-$(id -u)}" = "0" ] && [ "$OWNER" != "root" ]; then
     fail "run this as '$OWNER' (the checkout's owner); the deploy step will use sudo by itself"
@@ -118,24 +119,40 @@ fi
 if [ "$(uname)" = "Darwin" ]; then
     if [ -f "$HOME/Library/LaunchAgents/com.myagent.agent.plist" ]; then
         echo ""
-        bash deploy-macos.sh
+        bash install.sh
     else
-        echo "No installed service found — checkout updated only. To install: bash deploy-macos.sh"
+        echo "No installed service found — checkout updated only. To install: ./install.sh"
     fi
 else
-    # WHERE the service runs is systemd's to answer, not ours to guess: a
-    # deploy may have used MYAGENT_INSTALL_DIR, and the default itself has
-    # changed (it was /opt/applications/myagent). Asking keeps an update from
-    # either skipping the redeploy or silently relocating a working install.
+    # WHERE the service runs is systemd's to answer, not ours to guess: an
+    # install may have used MYAGENT_INSTALL_DIR, and there are two places to
+    # look — a system unit (installed with sudo: service account or root) and
+    # this user's own unit. Asking keeps an update from either skipping the
+    # reinstall or silently relocating a working install. A system unit needs
+    # sudo to rewrite; install.sh never takes it on its own.
     INSTALL_DIR="${MYAGENT_INSTALL_DIR:-}"
+    SUDO=""
     if [ -z "$INSTALL_DIR" ]; then
+        INSTALL_DIR="$(systemctl --user show -p WorkingDirectory --value myagent 2>/dev/null || true)"
+    fi
+    if [ -z "$INSTALL_DIR" ] && [ -e /etc/systemd/system/myagent.service ]; then
         INSTALL_DIR="$(systemctl show -p WorkingDirectory --value myagent 2>/dev/null || true)"
+        SUDO="sudo"
+        # install.sh as root asks "service account or root?": answer from the
+        # unit that is already there instead of asking again.
+        UNIT_USER="$(systemctl show -p User --value myagent 2>/dev/null || true)"
+        if [ -z "$UNIT_USER" ] || [ "$UNIT_USER" = root ]; then
+            REINSTALL_MODE="--as-root"
+        else
+            REINSTALL_MODE="--service-user $UNIT_USER"
+        fi
     fi
     if [ -n "$INSTALL_DIR" ] && [ -d "$INSTALL_DIR" ]; then
         echo ""
-        echo "Redeploying to $INSTALL_DIR..."
-        MYAGENT_INSTALL_DIR="$INSTALL_DIR" bash deploy.sh
+        echo "Reinstalling to $INSTALL_DIR..."
+        # shellcheck disable=SC2086  # REINSTALL_MODE is two words on purpose
+        $SUDO env MYAGENT_INSTALL_DIR="$INSTALL_DIR" bash install.sh ${REINSTALL_MODE:-}
     else
-        echo "No installed service found — checkout updated only. To install as a service: sudo bash deploy.sh"
+        echo "No installed service found — checkout updated only. To install as a service: ./install.sh"
     fi
 fi

@@ -1,13 +1,14 @@
 # Installing MyAgent
 
 The short version is in the [README](../README.md#quickstart): clone, run
-`./setup.sh`, start the server. This page covers everything around it —
-requirements, optional dependencies, running it as a service, installing the UI
-as an app, and hosting that UI somewhere else.
+`./install.sh`, open the URL it prints. This page covers everything around it —
+requirements, optional dependencies, the install modes (per-user, service
+account, root, macOS, development), installing the UI as an app, and hosting
+that UI somewhere else.
 
 ## Requirements
 
-- **Python 3.10+** (3.12 recommended). `./setup.sh` refuses anything older
+- **Python 3.10+** (3.12 recommended). `./install.sh` refuses anything older
   before it installs a thing — on 3.9 the failure would otherwise arrive much
   later, as a pydantic traceback.
 - **At least one LLM backend.** For a fully offline setup, a local one:
@@ -16,19 +17,19 @@ as an app, and hosting that UI somewhere else.
   - any remote OpenAI-compatible API with a key — OpenAI, OpenRouter, Groq,
     Mistral, a vLLM box on the LAN … *(needs internet)*, or
   - the Anthropic API (Claude), spoken natively *(needs internet)*
-- **`libzim`** — to search offline Wikipedia archives. Installed by `setup.sh`
+- **`libzim`** — to search offline Wikipedia archives. Installed by `install.sh`
   into its own virtualenv, so there is nothing to do.
 - **Node.js + Chrome/Chromium** *(optional)* — only for the online web tools.
 
-`setup.sh` offers to install the missing system packages, then reports what it
-found, backend included:
+`install.sh` offers to install the missing system packages, then reports what
+it found, backend included:
 
 ```text
-[3/4] Optional system dependencies...
-  Missing: PDF text extraction, OCR
-  Command: sudo apt-get install -y poppler-utils tesseract-ocr
-  Install them now? [y/N] y
-[4/4] LLM backend and optional features:
+  Optional system dependencies:
+    Missing: PDF text extraction, OCR
+    Command: sudo apt-get install -y poppler-utils tesseract-ocr
+    Install them now? [y/N] y
+[5/5] LLM backend and optional features:
   [ok] LLM backend          (Ollama, 4 model(s))
   [ok] web browsing/search  (Node + Chrome/Chromium)
   [ok] offline library      (7 archive(s) in /home/you/myagent/library)
@@ -39,7 +40,7 @@ it later by hand. With no terminal to answer on — a container build, a scripte
 deploy — nothing is asked and nothing is installed. `--yes` accepts everything
 (also `MYAGENT_ASSUME_YES=1`), `--no-optional` never asks.
 
-Two things `setup.sh` deliberately leaves alone: **Chrome/Chromium**, because on
+Two things `install.sh` deliberately leaves alone: **Chrome/Chromium**, because on
 Ubuntu the apt package is a snap shim that fails inside containers and a
 headless server often wants no browser at all, and the **library archives**,
 which are gigabytes onto a disk only you can pick (see below).
@@ -53,11 +54,11 @@ dependencies are present:
 |---|---|---|
 | Web search & browsing | `web_search`, `browse_web`, `web_research` | Node.js + Chrome/Chromium (`PUPPETEER_EXECUTABLE_PATH` honored) |
 | Document extraction (PDF, images) | `document_extract` | `poppler-utils`, `tesseract`, `pandoc` (each optional) |
-| Offline Wikipedia archives | `local_search`, `local_read` | `libzim`, installed by `setup.sh` (`.zim` files only — Markdown/text notes need nothing). To repair it by hand: `server/.venv/bin/pip install libzim` |
+| Offline Wikipedia archives | `local_search`, `local_read` | `libzim`, installed by `install.sh` (`.zim` files only — Markdown/text notes need nothing). To repair it by hand: `server/.venv/bin/pip install libzim` |
 | Speech to text (audio files, Telegram voice notes, voice satellites) | `document_extract` | `ffmpeg` + `faster-whisper` (installed with the connectors plugin) |
 
 Missing dependencies never block startup: the tool simply fails when called,
-and `./setup.sh` tells you which ones are dark.
+and `./install.sh` tells you which ones are dark.
 
 ## First run
 
@@ -71,35 +72,69 @@ reachable and says so above the answer — so the first message works even
 before you have matched the default to your setup. It never rewrites the
 setting, and never falls back onto a model with an API key.
 
-## Run as a service
+## Install modes
 
-- **Linux (systemd):** `sudo bash deploy.sh` — installs to `/opt/myagent`
-  (override with `MYAGENT_INSTALL_DIR`) and registers the `myagent` service.
-  Logs: `journalctl -u myagent -f`.
-- **macOS (launchd):** `bash deploy-macos.sh` — per-user LaunchAgent, no sudo.
-  Logs: `~/Library/Logs/myagent.log`.
+`./install.sh` is the one installer: Python venv, tool dependencies, service
+registration. *What* it installs follows who runs it — it never takes sudo on
+its own:
 
-Both are safe to re-run: runtime state lives under `~/myagent/`, never inside
-the install directory.
+| How you run it | Code | State (`MYAGENT_HOME`) | Service | Runs as |
+|---|---|---|---|---|
+| `./install.sh` (Linux, no sudo) | `~/myagent/bin` | `~/myagent` | systemd **user** unit | you |
+| `sudo ./install.sh` → **[1]** service account *(default)* | `/home/myagent/myagent/bin` | `/home/myagent/myagent` | system unit, `User=myagent` | `myagent` |
+| `sudo ./install.sh` → **[2]**, or `--as-root` | `/opt/myagent` | `/root/myagent` | system unit, `User=root` | root |
+| `./install.sh` (macOS) | the checkout | `~/myagent` | LaunchAgent | you |
+| `./install.sh --dev` | the checkout | `~/myagent` | none — `server/.venv/bin/python server/main.py` | you, by hand |
 
-**Configuring the service (Linux):** the unit file is rewritten on every
-deploy (and `./update.sh` redeploys automatically), so never edit
-`/etc/systemd/system/myagent.service` directly — your changes would be lost.
-Put environment overrides (`MYAGENT_HOST`, `MYAGENT_API_KEY`, TLS, debug) in a
-drop-in instead, which deploys leave untouched:
+`MYAGENT_INSTALL_DIR` overrides the code location in the first three modes;
+`--port N` (or `MYAGENT_PORT`) picks the port, otherwise the first free one
+from 8888 up is used and kept on later runs. Every mode is safe to re-run:
+runtime state lives under the service user's `~/myagent`, never inside the code.
+
+**Per-user (no sudo).** The service runs as you, so it can do exactly what you
+can — and nothing more: several users on one machine each get their own
+instance, on their own port, and ordinary file permissions keep one user's
+agents out of another's home. A user unit stops at logout; to keep it running
+across logouts and reboots: `loginctl enable-linger $USER` (may need sudo —
+`install.sh` says whether it is already on). Commands: `systemctl --user status
+myagent`, `journalctl --user -u myagent -f`.
+
+**Service account (sudo, default).** `install.sh` creates a system account
+`myagent` (no login shell) and runs the service as it. This is the OS-level
+boundary for a shared machine: the agents' shell and file tools cannot reach
+any real user's files. The admin who ran the install is added to group
+`myagent`, and the state tree is group-writable (with `UMask=0002` in the
+unit), so `/home/myagent/myagent` can be read and edited without sudo after the
+next login — secrets stay `0600`, as they should. Anything that must run *as
+the service user* (plugins, `library/fetch.py`) goes through
+`sudo -u myagent …`; the installer prints the exact commands.
+
+**Root (sudo, `--as-root`).** For a box that is MyAgent's alone. The service
+has every power on the machine, and so does every agent holding `shell_exec`
+or a file tool: keep `MYAGENT_HOST=127.0.0.1`.
+
+**Configuring the service.** The unit file is rewritten on every install (and
+`./update.sh` reinstalls automatically), so never edit it directly — your
+changes would be lost. Put environment overrides (`MYAGENT_HOST`,
+`MYAGENT_API_KEY`, TLS, debug) in a drop-in, which installs leave untouched:
 
 ```bash
-sudo systemctl edit myagent     # opens an override file
+systemctl --user edit myagent        # per-user install
+sudo systemctl edit myagent          # service account or root
 # [Service]
 # Environment=MYAGENT_HOST=0.0.0.0
-sudo systemctl restart myagent
+systemctl --user restart myagent     # or: sudo systemctl restart myagent
 ```
+
+On macOS the LaunchAgent is `~/Library/LaunchAgents/com.myagent.agent.plist`
+(logs in `~/Library/Logs/myagent.log`); it too is rewritten on every install,
+so set overrides by re-running `install.sh` with the environment you want.
 
 Windows is not supported natively — the tool `run` scripts are extensionless
 and rely on shebangs, which Windows does not honor. Use WSL2.
 
 The connectors plugin and the voice satellite have their own installers and are
-deliberately not shipped by `deploy.sh`: see
+deliberately not shipped by `install.sh`: see
 [connectors/README.md](../connectors/README.md) and
 [satellite/README.md](../satellite/README.md).
 
@@ -107,8 +142,9 @@ deliberately not shipped by `deploy.sh`: see
 
 From the git checkout, `./update.sh` fetches GitHub and compares by git
 ancestry, never by date: only when GitHub is strictly ahead does it
-fast-forward the checkout and re-run the deploy script (when an installed
-service is found). If the checkout has commits GitHub does not have, or
+fast-forward the checkout and re-run `install.sh` against the installed
+service it finds (your user unit, or the system-wide one — with sudo, in the
+same mode it was installed). If the checkout has commits GitHub does not have, or
 uncommitted edits to tracked files, **nothing is overwritten** — the script
 explains why and exits with code 2. `--check` reports what would happen
 without changing anything; `--no-deploy` updates the checkout only.

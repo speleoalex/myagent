@@ -11,7 +11,7 @@ Three rules hold the design together:
 - **Nothing is ever written.** ``settings.json`` keeps the user's choice, so the
   moment their backend comes back the fallback stops happening on its own. The
   alternative (rewrite the setting on first boot) races the backend at boot —
-  ``deploy.sh`` has no ``After=ollama.service`` — and can never self-correct.
+  ``install.sh`` writes no ``After=ollama.service`` — and can never self-correct.
 - **A remote default is never second-guessed.** ``model_probe`` reports an
   OpenAI-compatible gateway that doesn't serve ``/v1/models`` as unreachable, so
   probing a working remote model would silently divert the turn to a local one.

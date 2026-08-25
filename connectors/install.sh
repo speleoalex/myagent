@@ -6,11 +6,17 @@
 # never touched by this script — installing, reinstalling and uninstalling all
 # leave your bots configured.
 #
-# Run it from the git checkout (deploy.sh deliberately does not ship connectors/
+# Run it from the git checkout (install.sh deliberately does not ship connectors/
 # with the core: myagent standalone must not carry the code of an online
 # service).
 #
 #   bash connectors/install.sh
+#
+# Run it AS THE USER THE SERVICE RUNS AS: the plugin goes under that user's
+# ~/myagent. For a per-user install that is you; for an install made with sudo
+# as the `myagent` service account:
+#
+#   sudo -u myagent bash connectors/install.sh
 #
 set -euo pipefail
 
@@ -21,7 +27,8 @@ PLUGINS_DIR="${MYAGENT_PLUGINS:-${MYAGENT_HOME:-$HOME/myagent}/plugins}"
 TARGET_DIR="$PLUGINS_DIR/connectors"
 
 if [ "$(id -u)" = "0" ]; then
-    echo "Do not run this as root: the plugin installs under your own home." >&2
+    echo "Do not run this as root: the plugin installs under the SERVICE user's home." >&2
+    echo "For a service account:  sudo -u myagent bash $0" >&2
     echo "(Only the final service restart needs sudo, and it is asked for.)" >&2
     exit 1
 fi
@@ -46,17 +53,21 @@ EOM
 fi
 
 # Which venv? The one the RUNNING service uses, not necessarily this checkout:
-# on Linux the service runs from the install dir, on macOS in place.
+# on Linux the service runs from the install dir (this user's own unit, or the
+# system-wide one), on macOS in place. The service manager knows; the path
+# candidates are the fallback for an install with no service registered.
 find_install_dir() {
     if [ -n "${MYAGENT_INSTALL_DIR:-}" ]; then
         echo "$MYAGENT_INSTALL_DIR"; return
     fi
     if command -v systemctl >/dev/null 2>&1; then
         local wd
+        wd=$(systemctl --user show -p WorkingDirectory --value myagent 2>/dev/null || true)
+        if [ -n "$wd" ] && [ -d "$wd" ]; then echo "$wd"; return; fi
         wd=$(systemctl show -p WorkingDirectory --value myagent 2>/dev/null || true)
         if [ -n "$wd" ] && [ -d "$wd" ]; then echo "$wd"; return; fi
     fi
-    for candidate in /opt/myagent /opt/applications/myagent "$(dirname -- "$SOURCE_DIR")"; do
+    for candidate in "${MYAGENT_HOME:-$HOME/myagent}/bin" /opt/myagent "$(dirname -- "$SOURCE_DIR")"; do
         if [ -x "$candidate/server/.venv/bin/python" ]; then echo "$candidate"; return; fi
     done
     echo ""
@@ -66,7 +77,7 @@ INSTALL_DIR="$(find_install_dir)"
 VENV_PY="$INSTALL_DIR/server/.venv/bin/python"
 if [ -z "$INSTALL_DIR" ] || [ ! -x "$VENV_PY" ]; then
     echo "Could not find myagent's virtualenv." >&2
-    echo "Install myagent first (./deploy.sh, or ./setup.sh for a dev checkout)," >&2
+    echo "Install myagent first (./install.sh, or ./install.sh --dev for a dev checkout)," >&2
     echo "or set MYAGENT_INSTALL_DIR to its directory." >&2
     exit 1
 fi
@@ -99,7 +110,7 @@ done
 # that cannot start.
 if ! "$VENV_PY" -c "import fastapi, httpx, pydantic" 2>/dev/null; then
     echo "ERROR: myagent's virtualenv is broken after the install. Do NOT restart" >&2
-    echo "       the service; reinstall with ./setup.sh." >&2
+    echo "       the service; reinstall with ./install.sh." >&2
     exit 1
 fi
 
@@ -110,19 +121,31 @@ fi
 
 echo
 echo "Restarting myagent so it picks the plugin up…"
-if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files myagent.service >/dev/null 2>&1; then
-    sudo systemctl restart myagent
+RESTART="restart myagent yourself"
+LOGS="the server log"
+if command -v systemctl >/dev/null 2>&1 && \
+   [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/myagent.service" ]; then
+    systemctl --user restart myagent
+    RESTART="systemctl --user restart myagent"; LOGS="journalctl --user -u myagent -f"
+elif command -v systemctl >/dev/null 2>&1 && [ -e /etc/systemd/system/myagent.service ]; then
+    # Under `sudo -u myagent` the service account has no sudo of its own: say
+    # what to run instead of failing on a password prompt that cannot be met.
+    sudo -n systemctl restart myagent 2>/dev/null \
+        || echo "Could not restart the system service from here — run: sudo systemctl restart myagent"
+    RESTART="sudo systemctl restart myagent"; LOGS="journalctl -u myagent -f"
 elif command -v launchctl >/dev/null 2>&1 && \
      launchctl print "gui/$(id -u)/com.myagent.agent" >/dev/null 2>&1; then
     launchctl kickstart -k "gui/$(id -u)/com.myagent.agent"
+    RESTART="launchctl kickstart -k gui/$(id -u)/com.myagent.agent"; LOGS="tail -f ~/Library/Logs/myagent.log"
 else
     echo "No managed service found — restart myagent yourself."
 fi
 
 cat <<EOM
 
-Done. Configure your bots at http://127.0.0.1:8888/#/connectors
-Logs:  journalctl -u myagent -f | grep connectors
+Done. Configure your bots in the UI under #/connectors (the port is the one
+install.sh printed; 8888 by default).
+Logs:  $LOGS | grep connectors
 
 The first voice note downloads a Whisper model (~464 MB) into
 ~/.cache/huggingface. To use a much smaller one, set in the service
@@ -130,5 +153,5 @@ environment: MYAGENT_WHISPER_MODEL=base
 
 To uninstall (your bots and tokens stay in ~/myagent/connectors/):
     rm -rf $TARGET_DIR
-    sudo systemctl restart myagent
+    $RESTART
 EOM
