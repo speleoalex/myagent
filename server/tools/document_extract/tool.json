@@ -1,12 +1,12 @@
 {
   "name": "Extract Document to Markdown",
-  "description": "Read a document as Markdown: PDF, HTML, image (OCR) or audio (returns the speech transcription). Use this instead of file_read for anything that is not plain text — file_read returns garbage on binary files. Extracted images are saved as files and linked inline.",
+  "description": "Read a document as Markdown: PDF, HTML, image (OCR), audio (returns the speech transcription), or a plain-text file (.md, .txt, .csv, .json, code — returned as is). Use this instead of file_read for anything that is not plain text — file_read returns garbage on binary files. Extracted images are saved as files and linked inline.",
   "parameters": {
     "type": "object",
     "properties": {
       "path": {
         "type": "string",
-        "description": "Path to the document (.pdf, .html, an image, or an audio file)"
+        "description": "Path to the document (.pdf, .html, an image, an audio file, or a text file such as .md/.txt)"
       },
       "language": {
         "type": "string",

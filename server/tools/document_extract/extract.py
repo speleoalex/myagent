@@ -77,7 +77,41 @@ def detect_kind(path: Path) -> str:
         return "image"
     if mime.startswith("audio/"):
         return "audio"
+    if mime.startswith("text/") or mime in ("application/json", "application/xml",
+                                            "application/x-yaml", "application/toml"):
+        return "text"
     return "unknown"
+
+
+def extract_text(path: Path, from_page: int = 1) -> str:
+    """A plain-text file (Markdown, .txt, .csv, .json, code) returned as is.
+
+    Not a conversion — but an agent granted document_extract and NOT file_read
+    (librarian-style agents) could otherwise read PDFs and never the .md next
+    to them ("Unsupported file type", observed). Same window contract as the
+    PDF path: MAX_CHARS per call, cut declared, `from_page` continues (here a
+    "page" is one MAX_CHARS window — the parameter already exists and the
+    model already knows the footer)."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as e:
+        err(f"Cannot read '{path.name}': {e}")
+    total = len(text)
+    pages = max(1, -(-total // MAX_CHARS))
+    page = max(1, from_page)
+    if page > pages:
+        err(f"'{path.name}' has {pages} window(s) of {MAX_CHARS} chars: "
+            f"from_page={page} is past the end.")
+    start = (page - 1) * MAX_CHARS
+    chunk = text[start:start + MAX_CHARS]
+    header = f"# {path.name}\n\n_[{path.suffix.lstrip('.') or 'text'}, {total} chars"
+    if pages > 1:
+        header += f", window {page} of {pages}"
+    header += "]_\n\n"
+    footer = ""
+    if page < pages:
+        footer = f"\n\n_[continua con document_extract from_page={page + 1}]_"
+    return header + chunk + footer + "\n"
 
 
 def default_image_dir(path: Path) -> Path:
@@ -433,8 +467,11 @@ def main():
         md = extract_image(path, out_dir, bool(ocr))
     elif kind == "audio":
         md = extract_audio(path, out_dir, args.get("language"))
+    elif kind == "text":
+        md = extract_text(path, from_page)
     else:
-        err(f"Unsupported file type for '{path.name}'. Supported: PDF, HTML, images, audio.")
+        err(f"Unsupported file type for '{path.name}'. Supported: PDF, HTML, images, "
+            f"audio, plain text (.md, .txt, .csv, .json, code).")
 
     print(md, end="")
 
