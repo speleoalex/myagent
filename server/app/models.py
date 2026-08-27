@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 from datetime import datetime
 
@@ -253,6 +254,38 @@ class AutonomousConfig(BaseModel):
         return data
 
 
+class FolderConfig(BaseModel):
+    """The folder an agent works on: the default root of the search tools.
+
+    A block rather than a bare string because the next fields (language,
+    exclude globs, depth) belong with it — the same reason AutonomousConfig is
+    a block. ``path`` empty means the block is inert.
+
+    Scope is deliberately narrow: this changes what ``local_search`` /
+    ``local_read`` search when the call passes no ``path``, and nothing else.
+    It is NOT a second root for relative paths — ``file_read``/``file_write``
+    and the tool subprocess cwd all stay on the workspace, or reading
+    "dati.txt" from here and writing "dati.txt" back would silently create a
+    NEW file in the workspace while the model believes it edited the original.
+    """
+
+    path: str = ""
+    # Stage 2 (semantic index): OCR scanned PDFs / images while indexing.
+    index_ocr: bool = False
+
+    @field_validator("path")
+    @classmethod
+    def expand_path(cls, v: str) -> str:
+        v = (v or "").strip()
+        # Expanded once, here, so every reader sees the same absolute path.
+        # Existence is NOT checked: an external disk may be unmounted at save
+        # time. A missing folder must fail loudly at SEARCH time instead —
+        # local_search already errors on a missing root, and it must never
+        # fall back to the shared library, or an agent pointed at a detached
+        # drive would quietly answer from Wikipedia.
+        return os.path.expanduser(v) if v else ""
+
+
 class Agent(BaseModel):
     id: str
     name: str
@@ -260,6 +293,10 @@ class Agent(BaseModel):
     model_id: str = ""
     system_prompt: str = ""
     tools: list[str] = []
+    # The folder this agent works on: default root for local_search/local_read
+    # when the call passes no `path`. None = the shared library, i.e. today's
+    # behaviour. See FolderConfig for why the scope stops there.
+    folder: FolderConfig | None = None
     max_iterations: int = 10
     max_tool_calls: int = 5  # hard cap on total tool executions per turn
     temperature: float | None = None
@@ -409,8 +446,22 @@ class ChatResponse(BaseModel):
 
 class Settings(BaseModel):
     default_model_id: str | None = None
+    # Which registered model provides embeddings for the semantic index.
+    # None = no semantic search: local_search does exactly what it always did.
+    #
+    # It must name a LOCAL model, and that is enforced where the value is USED
+    # (AgentExecutor.tool_env_overrides) as well as on save. Indexing sends the
+    # CONTENT of every document to the endpoint — not the query, the corpus —
+    # so a remote embedder would ship the user's whole library off the machine
+    # on an app whose whole point is working offline.
+    embedding_model_id: str | None = None
     ollama_base_url: str = "http://localhost:11434"
     llamacpp_base_url: str = "http://localhost:8080"
+    # Verbose executor tracing, and the ONLY place it is switched: writes the
+    # COMPLETE prompt, tool schemas and tool results of every iteration to
+    # ~/myagent/logs/debug.log — full chat content on disk — so it is off by
+    # default and meant to be turned on for a while, read, and turned off.
+    debug: bool = False
     # No connectors_base_url / connectors_api_key any more: notify_user reaches
     # the connectors plugin in-process, so there is no URL or bearer key to
     # configure. Pydantic ignores unknown keys, so an existing settings.json

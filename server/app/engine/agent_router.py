@@ -67,6 +67,53 @@ def route_candidates(stores: Stores) -> list[dict]:
     return out
 
 
+# Words that carry no SUBJECT: acknowledgements, retries, politeness, "more".
+# A message made only of these tells a classifier nothing at all — and asking
+# one anyway is how "si" ended up routed to `master` while the user was three
+# turns into a conversation with a health-records agent (observed).
+#
+# Both UI languages, on purpose: this is a fast path, not a language model. A
+# word that could name a topic must NEVER be in here — one contentful token is
+# enough to send the message to the classifier, which is the safe direction.
+_FILLER_WORDS = {
+    # italiano
+    "si", "sì", "sí", "no", "ok", "okay", "va", "bene", "certo", "esatto",
+    "giusto", "vero", "grazie", "prego", "per", "favore", "riprova", "ritenta",
+    "continua", "prosegui", "procedi", "vai", "avanti", "ancora", "altro",
+    "altre", "altri", "dimmi", "dimmelo", "raccontami", "mostrami", "mostra",
+    "fammi", "dammi", "dammelo", "vedere", "di", "più", "piu", "dettagli",
+    "dettaglio", "meglio", "un", "po", "pò", "anche", "ripeti", "sicuro",
+    "spiega", "spiegami", "e", "poi", "allora", "quindi", "tutto", "tutti",
+    "quale", "quali", "come", "cosa", "che", "il", "la", "lo", "i", "gli", "le",
+    # english
+    "yes", "yeah", "yep", "sure", "right", "correct", "true", "thanks",
+    "thank", "you", "please", "nope", "retry", "again", "continue", "go",
+    "on", "ahead", "more", "details", "detail", "better", "tell", "me",
+    "show", "explain", "give", "repeat", "bit", "also", "it", "this",
+    "that", "and", "then", "so", "all",
+    "the", "a", "an", "what", "which", "how",
+}
+# A wall of filler is not a follow-up any more; past this it is prose worth
+# classifying even if every word happens to be in the set above.
+_FILLER_MAX_WORDS = 6
+
+_WORD_RE = re.compile(r"[^\W\d_]+", re.UNICODE)
+
+
+def is_continuation(message: str) -> bool:
+    """True when *message* names no subject at all — "si", "ok", "dimmi di più".
+
+    Such a message is not ambiguous, it is EMPTY of routing signal: the right
+    answer is always "whoever was already answering". Deciding it here rather
+    than asking the model is both cheaper and more accurate — the model answers
+    confidently and often wrongly, because it has nothing to go on.
+    """
+    words = _WORD_RE.findall((message or "").lower())
+    if not words or len(words) > _FILLER_MAX_WORDS:
+        return False
+    return all(w in _FILLER_WORDS for w in words)
+
+
 def parse_pick(text: str, candidate_ids: list[str]) -> str | None:
     """Forgiving parse of the classifier reply → a candidate id or None.
 
@@ -123,6 +170,14 @@ async def pick_agent(message: str, stores: Stores, tool_registry: ToolRegistry,
         return None
     if len(candidates) == 1:
         return candidates[0]["id"]
+    # A message with no subject in it ("si", "ok", "dimmi di più") belongs to
+    # whoever was already answering — no classification needed, and none
+    # possible. Short-circuited BEFORE the LLM call for the same reason the
+    # empty-message case above is: there is nothing to classify, and asking
+    # anyway produces a confident wrong answer.
+    if last_agent_id and is_continuation(message) and \
+            any(a["id"] == last_agent_id for a in candidates):
+        return last_agent_id
 
     model_data = stores.models.get(model_override) if model_override else None
     if model_data is not None:
@@ -141,6 +196,9 @@ async def pick_agent(message: str, stores: Stores, tool_registry: ToolRegistry,
     if last_agent_id and any(a["id"] == last_agent_id for a in candidates):
         last_line = prompts.AUTO_ROUTE_LAST_AGENT.format(agent_id=last_agent_id)
     provider = LLMProvider(model_config)
+    # Named in the API log: "which agent answers this" is one of the
+    # questions a trace gets opened for, and this call is the answer.
+    provider.trace_label = f"auto-route ({len(candidates)} candidates)"
 
     async def _collect() -> str:
         out = ""

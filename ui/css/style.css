@@ -4,8 +4,11 @@ body {
     padding-bottom: env(safe-area-inset-bottom);
 }
 
+/* --nav-h is measured by App._trackNavHeight (fallback for the first paint);
+   #app carries mt-3 = 1rem, so it is subtracted too or the page overflows. */
+:root { --nav-h: 57px; }
 #app {
-    min-height: calc(100vh - 70px);
+    min-height: calc(100vh - var(--nav-h) - 1rem);
 }
 
 /* ---- Home dashboard ------------------------------------------------------ */
@@ -43,10 +46,11 @@ body {
    virtual keyboard so the input bar stays visible; 100vh is the fallback. The
    safe-area inset is already added to the body as padding-bottom, so subtract
    it here too — otherwise the two stack and the page overflows by that inset
-   on notched phones. */
+   on notched phones. Same --nav-h + 1rem (#app's mt-3) budget as #app, plus
+   a little slack so no rounding ever yields a page scrollbar. */
 .chat-wrap {
-    height: calc(100vh - 80px);
-    height: calc(100dvh - 80px - env(safe-area-inset-bottom));
+    height: calc(100vh - var(--nav-h) - 1rem - 6px);
+    height: calc(100dvh - var(--nav-h) - 1rem - 6px - env(safe-area-inset-bottom));
     max-width: 900px;
 }
 
@@ -394,6 +398,22 @@ body {
     transform: translateY(-2px);
 }
 
+/* The whole agent card is the link to its editor, and a card that navigates
+   looks like a card that doesn't: the pencil next to the name is the only
+   affordance saying so. Muted at rest (it's a hint, not an action — the real
+   actions live in the footer) and lit on hover, where the pointer already is. */
+.card-edit-hint {
+    margin-left: .4rem;
+    font-size: .8em;
+    opacity: .35;
+    transition: opacity 0.1s, color 0.1s;
+}
+
+.card-agent:hover .card-edit-hint {
+    opacity: 1;
+    color: var(--bs-primary);
+}
+
 /* Agent descriptions are prompt-facing text and range from a line to a
    paragraph: clamp them so one verbose agent doesn't stretch a whole row of
    cards. The full text stays in the tooltip. */
@@ -613,6 +633,13 @@ body {
 }
 .msg-assistant .msg-time {
     text-align: left;
+}
+
+/* Auto mode: which agent answered, shown as a header above the answer */
+.msg-agent {
+    font-size: 0.68rem;
+    opacity: 0.55;
+    margin-bottom: 4px;
 }
 
 /* Per-message actions: copy / markdown source on answers, edit on prompts,

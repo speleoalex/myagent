@@ -8,6 +8,7 @@ from typing import AsyncIterator
 import httpx
 
 from app.engine import model_probe, prompts
+from app.engine import trace
 from app.models import ModelConfig
 
 log = logging.getLogger(__name__)
@@ -71,6 +72,32 @@ def _clamp_from_error(detail: str, current: int) -> int | None:
     return cap if 0 < cap < current else None
 
 
+def _accumulate(chunk: dict, text: str, reasoning: str, tools: dict) -> tuple[str, str]:
+    """Rebuild the reply as it streams, for the API log only.
+
+    Deliberately separate from the executor's own accumulation: this must never
+    change what the caller sees, so it only reads the chunks going past.
+    """
+    try:
+        delta = (chunk.get("choices") or [{}])[0].get("delta") or {}
+    except Exception:
+        return text, reasoning
+    if delta.get("content"):
+        text += delta["content"]
+    if delta.get("reasoning_content"):
+        reasoning += delta["reasoning_content"]
+    for tc in delta.get("tool_calls") or []:
+        idx = tc.get("index", 0)
+        cur = tools.setdefault(idx, {"id": tc.get("id"), "type": "function",
+                                     "function": {"name": "", "arguments": ""}})
+        fn = tc.get("function") or {}
+        if fn.get("name"):
+            cur["function"]["name"] = fn["name"]
+        if fn.get("arguments"):
+            cur["function"]["arguments"] += fn["arguments"]
+    return text, reasoning
+
+
 class LLMProvider:
     """Unified LLM interface via OpenAI-compatible chat completions API.
     Works identically for Ollama and llama.cpp.
@@ -125,6 +152,12 @@ class LLMProvider:
         # value always wins.
         if self.supports_tools is None and "tools" in self._param_fixes:
             self.supports_tools = False
+
+    # Who is making the call, for the raw API log. Set by the caller — the
+    # executor stamps agent+iteration, the auto-router "auto-route", the memory
+    # compactor "memory". Default is honest rather than empty: an unlabelled
+    # call in the log is a call nobody can attribute.
+    trace_label: str = "llm"
 
     def _resolve_endpoint(self) -> str:
         """Accept both base-URL conventions: with or without a trailing /v1
@@ -609,7 +642,16 @@ class LLMProvider:
         # next to `tools` — then fall back to no tools) and retry until
         # nothing is left to adapt. Bound = every droppable param + the
         # reasoning_effort add + the no-tools fallback, plus the final attempt.
+        # EVERY model call is traced here, whoever made it: this is the one
+        # choke point, which is why the auto-routing classifier and the memory
+        # compactor show up in the log without knowing anything about it.
+        attempt = 0
         for _ in range(len(DROPPABLE_PARAMS) + 3):
+            attempt += 1
+            label = (self.trace_label if attempt == 1
+                     else f"{self.trace_label} retry {attempt}")
+            trace.call(label, self._endpoint, payload)
+            seen_text, seen_tools, seen_reasoning = "", {}, ""
             async with self._client.stream("POST", self._endpoint, json=payload) as resp:
                 if resp.status_code >= 400:
                     body = await resp.aread()
@@ -617,12 +659,16 @@ class LLMProvider:
                     if resp.status_code == 400 and self._adapt_payload(payload, detail):
                         log.warning("Model '%s' rejected the request (%s) — retrying adapted",
                                     self.config.model, detail or "no detail")
+                        trace.reply(label, "", error=f"HTTP 400 ({detail or 'no detail'}) "
+                                                     f"— payload adapted, retrying")
                         continue
                     # Nothing left to adapt (or 401/404/500...): surface the
                     # provider's own message when there is one — "credit
                     # balance is too low" beats a bare "400 Bad Request" in
                     # the chat UI (the executor shows str(exception)).
                     self._log_error_body(body, streaming=True)
+                    trace.reply(label, "", error=f"HTTP {resp.status_code}: "
+                                                 f"{detail or body[:400]!r}")
                     if detail:
                         raise RuntimeError(
                             f"LLM provider error (HTTP {resp.status_code}): {detail}")
@@ -642,9 +688,16 @@ class LLMProvider:
                             continue
                         if anthropic:
                             for translated in self._anthropic_chunks(chunk, tool_idx):
+                                seen_text, seen_reasoning = _accumulate(
+                                    translated, seen_text, seen_reasoning, seen_tools)
                                 yield translated
                         else:
+                            seen_text, seen_reasoning = _accumulate(
+                                chunk, seen_text, seen_reasoning, seen_tools)
                             yield chunk
+                trace.reply(label, seen_text,
+                            [seen_tools[k] for k in sorted(seen_tools)] or None,
+                            seen_reasoning)
                 return
 
         # Unreachable: each adaptation can fire at most once per payload.

@@ -288,21 +288,64 @@ CORS_ORIGINS = [
     if o.strip()
 ]
 
-# Verbose per-iteration executor tracing (messages sent to the LLM, tool
-# results, dedup decisions). Off by default: it logs full chat content, so it
-# is opt-in via MYAGENT_DEBUG=1 and written under the user's home (not /tmp,
-# which is world-readable). Path overridable with MYAGENT_DEBUG_FILE.
-DEBUG = os.environ.get("MYAGENT_DEBUG", "") not in ("", "0", "false")
+# Verbose per-iteration executor tracing (the complete payload sent to the LLM,
+# the tool schemas, every tool result, dedup decisions). Off by default: it
+# writes full chat content to disk, so it is opt-in and lands under the user's
+# home rather than /tmp, which is world-readable. Path: MYAGENT_DEBUG_FILE.
+#
+# ONE source: settings.json `debug`, owned by Settings → Debug trace. There is
+# deliberately no environment override — the switch is a development aid you
+# reach for mid-incident, and a second way to set it only creates the question
+# "why is it on when the UI says off".
+#
+# Resolved on EVERY call, never cached at import: a debug switch that needs a
+# restart is useless exactly when you want it.
+def debug_enabled() -> bool:
+    """Whether executor tracing is on right now."""
+    return bool(getattr(settings, "debug", False))
+
+
 DEBUG_LOG_FILE = Path(
     os.environ.get("MYAGENT_DEBUG_FILE") or (HOME_DIR / "logs" / "debug.log")
 ).expanduser()
-if DEBUG:
-    # Create the log's parent dir up front: the executor's debug writes are
-    # wrapped in try/except and would otherwise fail silently.
+# The raw model calls go to their OWN file. One switch turns both on, but the
+# two answer different questions: debug.log is the turn's narrative (which
+# iteration, which tool, which decision), api.log is every request payload and
+# reply verbatim — including the calls made OUTSIDE a turn, like the classifier
+# that picks which agent answers. Interleaved they drowned each other.
+API_LOG_FILE = DEBUG_LOG_FILE.with_name("api.log")
+
+# A trace file truncated every turn cannot answer "what did it do an hour ago",
+# which is most of what tracing is for. It APPENDS, and is bounded by rotation:
+# one previous generation is kept, the rest is dropped. A constant, not a knob:
+# nobody tunes this, and a trace is not an archive.
+DEBUG_MAX_BYTES = 20 * 1024 * 1024
+
+
+def ensure_debug_dir() -> None:
+    """The executor's debug writes are wrapped in try/except and would fail
+    silently, so the directory is created before the first one."""
     try:
         DEBUG_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
     except OSError:
         pass
+
+
+def rotate_debug_log(path: Path | None = None) -> None:
+    """Keep a trace bounded: over DEBUG_MAX_BYTES the file becomes `.1` and a
+    fresh one starts. One generation only — these hold full chat content nobody
+    should keep by accident."""
+    path = path or DEBUG_LOG_FILE
+    try:
+        if path.exists() and path.stat().st_size > DEBUG_MAX_BYTES:
+            os.replace(path, path.with_suffix(path.suffix + ".1"))
+    except OSError:
+        pass
+
+
+def debug_files() -> dict[str, Path]:
+    """The trace files, by the key the UI and the routes address them with."""
+    return {"debug": DEBUG_LOG_FILE, "api": API_LOG_FILE}
 
 
 def load_settings() -> Settings:

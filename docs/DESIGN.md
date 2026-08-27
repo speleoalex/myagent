@@ -58,12 +58,16 @@ ever a command it prints, onto a disk only you can choose.
 - **No visual workflow builder.** An agent is a model, a prompt and a list of
   tools. If you want to draw a graph, [Dify](https://dify.ai),
   [Flowise](https://flowiseai.com) and [n8n](https://n8n.io) do it well.
-- **No embeddings, no vector database.** The library is searched with the ZIM
-  full-text index and a keyword scorer. Semantic search is planned and will
-  stay optional: on a disconnected box a second resident model costs exactly
-  the VRAM your chat model needs. For an embeddings-first document assistant,
-  [Khoj](https://github.com/khoj-ai/khoj) or
-  [AnythingLLM](https://anythingllm.com) are the better tool today.
+- **Semantic search is optional, and off by default.** The library is searched
+  with the ZIM full-text index and a keyword scorer; choosing an embedding
+  model in Settings adds vector search on top of that, over your own documents
+  only (an encyclopedia already has a full-text index — there is no reason to
+  embed millions of articles). The original reason for leaving it out has not
+  gone away, which is why it stays opt-in: on a disconnected box a second
+  resident model costs exactly the VRAM your chat model needs, and while the
+  index builds it competes with that model for the same backend. The embedding
+  model must be a **local** one — indexing sends the contents of your documents
+  to the endpoint, not just your question.
 - **No multi-user accounts or RBAC.** One trusted user — see
   [SECURITY.md](SECURITY.md).
 - **No sandbox.** Tools run as the server user. That's what makes "a folder

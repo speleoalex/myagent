@@ -128,6 +128,28 @@ each tool can be ticked individually.
   - `MYAGENT_LIBRARY` — the offline library folder
   - `MYAGENT_CACHE` — derived data, safe to delete (the PDF text layers live
     in `$MYAGENT_CACHE/pdftext`)
+  - `MYAGENT_AGENT_DIR` — the **calling agent's** working folder, when it has
+    one (the *Working folder* field on the agent form). Unlike every variable
+    above it varies from one call to the next, and it is absent for most
+    agents. It is the default ROOT of a search — `local_search` and
+    `local_read` use it in place of the shared library when the call passes no
+    `path` — and deliberately nothing more: it is **not** a second place to
+    resolve relative paths, and it does not move the working directory. Two
+    roots for relative paths would mean `file_read("notes.md")` reading the
+    agent's folder while `file_write("notes.md")` creates a different file in
+    the workspace, with nothing to tell the model apart.
+
+    A tool that honours it must fail loudly when the folder is missing, never
+    fall back: an agent pointed at an unmounted drive has to say so, not
+    quietly answer from somewhere else.
+  - `MYAGENT_INDEX_OCR` — `1` when the calling agent asked for scanned PDFs and
+    images to be OCR'd while indexing.
+  - `MYAGENT_EMBED_URL` / `MYAGENT_EMBED_MODEL` — an OpenAI-compatible
+    `/v1/embeddings` endpoint, present only when the user has chosen an
+    embedding model. It is always a LOCAL model: indexing sends the contents of
+    the user's documents there, so the server refuses to export a remote one
+    (`server/app/engine/embedding.py`), and a tool must treat their absence as
+    "semantic search is off", never as an error.
 
 ## Returning files to the user (resources)
 

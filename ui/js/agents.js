@@ -1,6 +1,9 @@
 const AgentsPage = {
     async render(params) {
-        if (params[0] === 'new') return this.renderForm();
+        // #/agents/new/<sourceId> opens the form pre-filled from that agent —
+        // the clone action. Same shape as #/tasks/new/<agentId>; App.route()
+        // already hands every extra segment through in `params`.
+        if (params[0] === 'new') return this.renderForm(null, params[1] || '');
         if (params[0]) return this.renderForm(params[0]);
         return this.renderList();
     },
@@ -41,6 +44,15 @@ const AgentsPage = {
         this.wireNative();
         App.container.querySelectorAll('[data-preview]').forEach(btn => {
             btn.onclick = (e) => { e.stopPropagation(); this.openPreviewById(btn.dataset.preview); };
+        });
+        // stopPropagation, like every other card button: the card itself
+        // navigates to the editor on click, so without it cloning would ALSO
+        // open the source agent.
+        App.container.querySelectorAll('[data-clone]').forEach(btn => {
+            btn.onclick = (e) => {
+                e.stopPropagation();
+                location.hash = `#/agents/new/${btn.dataset.clone}`;
+            };
         });
         // Start/stop = flip the persisted `live` flag: the scheduler notices
         // within one scan, and a started agent survives server restarts.
@@ -122,7 +134,8 @@ const AgentsPage = {
             <div class="col-md-6 col-lg-4 col-xl-3">
                 <div class="card card-agent h-100" onclick="location.hash='#/agents/${id}'">
                     <div class="card-body">
-                        <h5 class="card-title">${App.esc(a.name)}</h5>
+                        <h5 class="card-title">${App.esc(a.name)}<i class="bi bi-pencil card-edit-hint"
+                            title="${App.escAttr(i18n('common.edit'))}"></i></h5>
                         <p class="card-text text-secondary small card-desc"
                            title="${App.escAttr(a.description || '')}">${App.esc(a.description || '')}</p>
                         <div class="small">
@@ -138,6 +151,10 @@ const AgentsPage = {
                         </a>
                         <button type="button" class="btn btn-sm btn-outline-info" data-preview="${id}">
                             <i class="bi bi-diagram-3"></i> ${i18n('agents.preview')}
+                        </button>
+                        <button type="button" class="btn btn-sm btn-outline-secondary" data-clone="${id}"
+                                title="${App.escAttr(i18n('agents.cloneTitle'))}">
+                            <i class="bi bi-copy"></i> ${i18n('agents.clone')}
                         </button>
                         <div class="ms-auto d-flex gap-2">
                             ${resetBtn}
@@ -603,6 +620,9 @@ const AgentsPage = {
             if (slot) slot.innerHTML = html;
         };
         set('tab-tools', `<span class="badge text-bg-secondary" title="${App.escAttr(i18n('agents.tabToolsCount', { n: d.tools.length }))}">${d.tools.length}</span>`);
+        set('tab-general', d.folder
+            ? `<span class="tab-dot" title="${App.escAttr(i18n('agents.tabFolderOn', { path: d.folder.path }))}"></span>`
+            : '');
         set('tab-memory', d.memory_enabled
             ? `<span class="tab-dot${notes.memoryWidening ? ' tab-dot-warn' : ''}" title="${App.escAttr(i18n('agents.tabMemoryOn'))}"></span>`
             : '');
@@ -735,7 +755,7 @@ const AgentsPage = {
         return html || `<div class="text-secondary">${i18n('agents.noTools')}</div>`;
     },
 
-    async renderForm(agentId) {
+    async renderForm(agentId, sourceId = '') {
         // callable_agents defaults to [] (no delegation) for NEW agents only:
         // the user opts in explicitly. Existing agents keep their stored value.
         let agent = { id: '', name: '', description: '', model_id: '', system_prompt: '', tools: [], max_iterations: 10, max_tool_calls: 5, temperature: 0.7, enabled: true, callable: true, callable_agents: [], memory_enabled: false, memory_threshold: 4000, live: false, schedule_others: false, autonomous: null };
@@ -793,6 +813,23 @@ const AgentsPage = {
         this._allAgents = agents;
         this._allTools = tools;
 
+        // Clone: seed every field from the source, then blank what must be
+        // typed and force `live` off. A clone that inherited `live` would start
+        // waking on its own to run the ORIGINAL's tasks — those stay with the
+        // original, as do its long-term memory and autonomy state, all keyed by
+        // agent id. The source comes from the /agents list already fetched
+        // above, so cloning costs no extra round trip.
+        let cloning = false;
+        if (sourceId && !isEdit) {
+            const src = agents.find(a => a.id === sourceId);
+            if (src) {
+                agent = { ...src, id: '', name: '', live: false };
+                cloning = true;
+            } else {
+                App.toast(i18n('agents.notFound'), 'danger');
+            }
+        }
+
         const agentTools = agent.tools || [];
         const callableList = agent.callable_agents || ['*'];
         const callableAll = callableList.includes('*');
@@ -835,6 +872,12 @@ const AgentsPage = {
         // "delegates to everyone" and get the grant on its first save.
         const canDelegate = agentTools.includes('call_agent');
 
+        // The working folder is a BLOCK server-side ({path, index_ocr}); the
+        // form only edits the path, so index_ocr must be carried across a save
+        // rather than reset to its default.
+        const folderPath = agent.folder?.path || '';
+        const folderExtra = { index_ocr: !!agent.folder?.index_ocr };
+
         const specs = this.numSpecs();
         const modelById = {};
         models.forEach(m => { modelById[m.id] = m; });
@@ -871,7 +914,12 @@ const AgentsPage = {
         App.container.innerHTML = `
             <div class="row">
                 <div class="col-lg-8 mx-auto">
-                    <h3>${isEdit ? i18n('agents.editTitle') : i18n('agents.newTitle')}</h3>
+                    <h3>${isEdit ? i18n('agents.editTitle')
+                            : (cloning ? i18n('agents.cloneTitle') : i18n('agents.newTitle'))}</h3>
+                    ${cloning ? `<div class="alert alert-info py-2 small">
+                        <i class="bi bi-copy"></i>
+                        ${App.esc(i18n('agents.cloneHint', { source: sourceId }))}
+                    </div>` : ''}
                     <!-- novalidate: a required control inside a hidden tab pane is not
                          focusable, so the browser would refuse the submit and tell the
                          user NOTHING. validateAcrossTabs() drives validation instead. -->
@@ -908,6 +956,12 @@ const AgentsPage = {
                                 <div class="mb-3">
                                     <label class="form-label" for="f-desc">${i18n('common.description')}</label>
                                     <input type="text" class="form-control" id="f-desc" value="${App.escAttr(agent.description || '')}">
+                                </div>
+                                <div class="mb-3">
+                                    <label class="form-label" for="f-folder">${i18n('agents.folder')}</label>
+                                    <input type="text" class="form-control" id="f-folder" value="${App.escAttr(folderPath)}"
+                                           placeholder="${App.escAttr(i18n('agents.folderPlaceholder'))}">
+                                    <div class="form-text">${i18n('agents.folderHint')}</div>
                                 </div>
                                 <div class="mb-3">
                                     <label class="form-label" for="f-model">${i18n('agents.model')}</label>
@@ -1099,6 +1153,11 @@ const AgentsPage = {
         const callableAllEl = document.getElementById('f-callable-all');
         const liveEl = document.getElementById('f-live');
 
+        const folderValue = () => {
+            const path = document.getElementById('f-folder').value.trim();
+            return path ? { path, ...folderExtra } : null;
+        };
+
         // Read the current (possibly unsaved) form values into an agent object.
         // Declared BEFORE the wiring below, because refreshState() calls it.
         const readForm = () => {
@@ -1117,6 +1176,10 @@ const AgentsPage = {
                 description: document.getElementById('f-desc').value.trim(),
                 model_id: document.getElementById('f-model').value,
                 system_prompt: document.getElementById('f-prompt').value,
+                // null when the path is blank, so an agent without a folder does
+                // not carry an inert block around. index_ocr is preserved from the
+                // stored value — the form does not render it (Stage 2 does).
+                folder: folderValue(),
                 // Derived grants come AFTER the picked ones so a hidden id can
                 // never be contributed twice (it is not rendered, so it cannot be
                 // picked — the Set is insurance, not the mechanism).
@@ -1360,6 +1423,9 @@ const AgentsPage = {
         // fire it, which is why the handlers above call refreshState() themselves
         // and why it recomputes from the DOM instead of tracking deltas.
         document.getElementById('agent-form').addEventListener('change', refreshState);
+        // The only text field driving an indicator. `change` alone would leave the
+        // General dot stale until the field loses focus.
+        document.getElementById('f-folder').addEventListener('input', refreshState);
 
         // Remember the tab so reopening the SAME agent lands where you left off,
         // and keep the active trigger on screen on a narrow, scrolling strip.

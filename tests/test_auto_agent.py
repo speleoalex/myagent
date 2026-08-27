@@ -38,6 +38,7 @@ sys.path.insert(0, str(ROOT / "server"))
 _tmp = tempfile.TemporaryDirectory()
 os.environ["MYAGENT_HOME"] = _tmp.name
 
+from app.engine import agent_router                                 # noqa: E402
 from app.engine.agent_router import (mark_foreign, parse_pick,     # noqa: E402
                                      pick_agent, route_candidates)
 from app.engine.executor import AgentExecutor, Stores               # noqa: E402
@@ -268,11 +269,64 @@ for lang in ("en", "it"):
     check(f"{lang}.js has chat.agentAuto", "chat.agentAuto" in src)
     check(f"{lang}.js has chat.viaAgent", "chat.viaAgent" in src)
 
+# --------------------------------------------------------------------------- #
+# A message with no SUBJECT belongs to whoever was already answering.
+#
+# "si", "ok", "grazie", "dimmi di più" carry no routing signal at all — they are
+# not ambiguous, they are empty — so they never reach the classifier. Measured
+# on Qwen3-VL-4B against a real install, three turns into a conversation with a
+# health-records agent: asking the model anyway gave 1/10, with "si" going to
+# `coder`, "ok" to `master` and "grazie" to `conversation`. The short-circuit
+# gives 10/10 and costs no call.
+#
+# The rule is deliberately one-sided: ONE contentful word sends the message to
+# the classifier. Sticking to the previous agent when the user did name a
+# subject would be the damaging error, so the boundary errs that way.
+# --------------------------------------------------------------------------- #
+STICK = ["si", "sì", "ok", "okay", "va bene", "certo", "grazie", "no",
+         "riprova", "ripeti", "continua", "vai avanti", "ancora",
+         "dimmi di più", "dammi più dettagli", "un po di più",
+         "yes", "sure", "thanks", "tell me more", "go on", "give me more"]
+ROUTE = ["dammi il meteo", "ripeti la ricetta", "mostrami il referto",
+         "scrivimi uno script", "traduci questo testo", "meteo a Genova",
+         "che cos'è l'ipertensione?", "coppia di serraggio della frizione"]
+
+for m in STICK:
+    check(f"'{m}' carries no subject and must stay with the previous agent",
+          agent_router.is_continuation(m))
+for m in ROUTE:
+    check(f"'{m}' names a subject and must reach the classifier",
+          not agent_router.is_continuation(m))
+check("an empty message is not a continuation (it is the attachments case)",
+      not agent_router.is_continuation(""))
+check("a wall of filler is prose again, not a follow-up",
+      not agent_router.is_continuation(" ".join(["si"] * 12)))
+
+# ...and the short-circuit only fires when there IS a previous agent, and only
+# when that agent can still be picked.
+async def check_continuation():
+    # "normal" is one of the fixtures above, so it IS a candidate.
+    picked = await agent_router.pick_agent("si", stores, registry,
+                                           last_agent_id="normal")
+    check("a continuation returns the previous agent, with no model call",
+          picked == "normal")
+    # A previous agent that is no longer selectable (deleted, disabled, made
+    # non-callable) must not be handed back: the short-circuit checks
+    # membership, then falls through to the normal path.
+    picked = await agent_router.pick_agent("si", stores, registry,
+                                           last_agent_id="disabled")
+    check("a previous agent that is no longer a candidate is not returned",
+          picked != "disabled")
+
+
+asyncio.run(check_continuation())
+
 if failures:
     print(f"FAIL — {len(failures)} case(s)")
     for f in failures:
         print(" -", f)
     sys.exit(1)
 print("OK — Auto routes per message through enabled+callable agents (plus"
-      " master), parses forgivingly without inventing ids, short-circuits"
-      " without a model, and both endpoints resolve the sentinel")
+      " master), parses forgivingly without inventing ids, keeps a"
+      " subject-less message with the previous agent, and both endpoints"
+      " resolve the sentinel")

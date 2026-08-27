@@ -151,9 +151,16 @@ def myagent_home():
 
 
 def default_library_dir():
-    # duplicated from local_search
-    return os.environ.get("MYAGENT_LIBRARY") or os.path.join(
-        myagent_home(), "library")
+    """Where an id resolves when the call passes no ``path``.
+
+    Must stay byte-identical in behaviour to local_search's copy: that tool
+    prints the ids this one is asked to open, and the two processes share
+    nothing but the environment. MYAGENT_AGENT_DIR is the calling agent's
+    folder (Agent.folder.path); the shared library is the fallback.
+    """
+    return (os.environ.get("MYAGENT_AGENT_DIR")
+            or os.environ.get("MYAGENT_LIBRARY")
+            or os.path.join(myagent_home(), "library"))
 
 
 def _walk(root):
@@ -692,8 +699,13 @@ def wrong_root_hint(path_given, certain=True):
             "local_read again now.")
 
 
-def resolve_in_root(root, rel, path_given=True):
+def resolve_in_root(root, rel, path_given=True, quiet=False):
     """The file an ``f:``/``p:`` id points at, or fail.
+
+    With ``quiet=True`` it PROBES instead: returns None where it would
+    otherwise stop the tool. That is what lets main() ask "would this resolve?"
+    before deciding how to read a malformed id, without turning the question
+    into an answer.
 
     The id comes from the MODEL, which can invent one, so a fabricated
     "../../etc/passwd" must never resolve. The check is LEXICAL and not
@@ -708,9 +720,13 @@ def resolve_in_root(root, rel, path_given=True):
         return root
     rel = os.path.normpath(rel).replace(os.sep, "/")
     if os.path.isabs(rel) or rel == ".." or rel.startswith("../"):
+        if quiet:
+            return None
         fail(f"path in id escapes the library root: {rel}")
     target = os.path.normpath(os.path.join(root, rel))
     if not os.path.isfile(target):
+        if quiet:
+            return None
         fail(f"file not found: {target}.{wrong_root_hint(path_given)}")
     return target
 
@@ -811,12 +827,53 @@ def main():
         return
     if rid.startswith(("f:", "p:")):
         rel, sep, tail = rid[2:].rpartition(":")
+        # A `path` the model made up is the OTHER half of the same problem: the
+        # id is right and the root is wrong. If the file is not under the root
+        # we were handed but IS under the default one, use that and say so —
+        # the same forgiveness read_zim already extends to a drifted z<N>
+        # index. Only ever a FALLBACK: an explicit path that works still wins.
+        if given:
+            probe = rel if (sep and tail.isdigit()) else rid[2:]
+            fallback = os.path.expanduser(default_library_dir())
+            if (probe and os.path.realpath(fallback) != os.path.realpath(root)
+                    and not resolve_in_root(root, probe, quiet=True)
+                    and resolve_in_root(fallback, probe, quiet=True)):
+                print(f"NOTE: '{given}' does not hold this id; read from "
+                      f"{fallback} instead. Do not pass 'path'.")
+                root, given = fallback, ""
         if sep and tail.isdigit():
             if rid.startswith("p:"):
                 read_pdf(root, rid, rel, int(tail), offset, offset_given,
                          bool(given), export)
             else:
                 read_file(root, rid, rel, int(tail), offset, offset_given,
+                          bool(given), export)
+            return
+        # No trailing ":<n>". Dropping the page number off a `p:` id is by far
+        # the commonest way a model mangles one, and the file is still named in
+        # full — the only thing missing is WHERE to start, which already has a
+        # default. So open it at the top instead of refusing.
+        #
+        # This is not the tolerant-matching that file_edit deliberately refuses
+        # to do: there, guessing could rewrite the wrong line, silently. Here
+        # nothing is ambiguous (the path is exact), nothing is written, and the
+        # header states what was opened — `id p:x.pdf:1, chars 0-2072` — so
+        # both the model and the user can see the assumption.
+        #
+        # Only when the path RESOLVES, though: an invented id must still come
+        # back as "nothing was read", or a hallucinated filename would quietly
+        # open whatever happened to be nearby.
+        whole = rid[2:]
+        if whole and "/" not in whole[:1]:
+            # Straight through: resolve_in_root then reports what is REALLY
+            # wrong — "file not found: <root>/x.pdf" plus the wrong-root hint —
+            # instead of "not a complete id", which sent the model chasing the
+            # id when the path was the problem (observed).
+            if rid.startswith("p:"):
+                read_pdf(root, f"{rid}:1", whole, 1, offset, offset_given,
+                         bool(given), export)
+            else:
+                read_file(root, f"{rid}:1", whole, 1, offset, offset_given,
                           bool(given), export)
             return
     fail_bad_id(rid)

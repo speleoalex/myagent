@@ -9,9 +9,10 @@ import re
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import datetime
 
 from app import config
-from app.engine import prompts
+from app.engine import embedding, prompts, trace
 from app.models import Agent, ChatMessage, ChatResponse, ModelConfig
 from app.engine.default_model import resolve_default
 from app.engine.llm_provider import LLMProvider
@@ -180,6 +181,11 @@ class AgentExecutor:
         # it does for memory_context. Quoted verbatim in the system prompt and
         # readable in full through recall_delegation.
         self._delegations: list[dict] = []
+        # What THIS agent's own tools returned in the PREVIOUS turns
+        # (storage.sessions.tool_history). Same reason as _delegations one
+        # level down: a `tool` message never survives into conversation[], so
+        # without this the model answers a follow-up from its own past PROSE.
+        self._tool_results: list[dict] = []
         # Turn-scoped system-prompt suffix (memory digest + findings +
         # attachments manifest), re-appended when the no-tools fallback
         # rebuilds the prompt.
@@ -273,43 +279,29 @@ class AgentExecutor:
         return step
 
     def _debug_log(self, msg: str):
-        """Append to the debug trace file (only when MYAGENT_DEBUG is on)."""
-        if not config.DEBUG:
-            return
-        try:
-            with open(config.DEBUG_LOG_FILE, "a") as f:
-                f.write(msg + "\n")
-        except Exception:
-            pass
+        """Append one line to the trace file, when tracing is on.
 
-    # base64 data URIs (attached images/audio) are the one thing that must NOT
-    # go verbatim into the debug trace: a single photo is megabytes of noise.
-    _DATA_URI = re.compile(r"data:([\w/+.-]+);base64,([A-Za-z0-9+/=]{64,})")
-
-    @classmethod
-    def _dbg_content(cls, content) -> str:
-        """Render a message content for the debug trace IN FULL: text as-is,
-        multimodal part-lists as JSON, with only base64 payloads replaced by a
-        size placeholder."""
-        if content is None:
-            return ""
-        if not isinstance(content, str):
-            content = json.dumps(content, ensure_ascii=False)
-        return cls._DATA_URI.sub(
-            lambda m: f"data:{m.group(1)};base64,<{len(m.group(2))} chars omitted>",
-            content,
-        )
+        config.debug_enabled() is asked EVERY time rather than cached: the
+        switch lives in Settings and must take effect on the next turn, without
+        a restart — a debug switch that needs one is useless exactly when you
+        reach for it.
+        """
+        trace.log(msg)
 
     def _debug_reset(self, user_message: str):
-        """Truncate the debug file at the start of a top-level turn."""
-        if not config.DEBUG or self.depth != 0:
+        """Open a new TURN block in the narrative log.
+
+        Appends — it used to truncate, so the file could only answer "what did
+        the LAST turn do", while tracing is mostly opened to explain something
+        that already happened.
+        """
+        if self.depth != 0:
             return
-        try:
-            with open(config.DEBUG_LOG_FILE, "w") as f:
-                f.write(f"=== New chat with agent '{self.agent.id}' ===\n")
-                f.write(f"User: {user_message}\n\n")
-        except Exception:
-            pass
+        trace.begin_turn(
+            f"TURN  agent '{self.agent.id}'"
+            f"  model {getattr(self.model_config, 'id', '?')}"
+            f" ({getattr(self.model_config, 'model', '?')})",
+            f"User: {trace.content(user_message)}")
 
     @classmethod
     async def create_for_agent(
@@ -472,6 +464,35 @@ class AgentExecutor:
         """The agent's tool grants with group wildcards (``<category>/*``)
         expanded — the wildcard-aware form of ``x in self.agent.tools``."""
         return set(self.tool_registry.expand_tool_ids(self.agent.tools))
+
+    def tool_env_overrides(self) -> dict[str, str]:
+        """Per-agent environment for tool subprocesses.
+
+        ONLY what the AGENT decides, never what the install decides: the
+        resolved runtime paths come from config.tool_env() once at startup,
+        and MYAGENT_WORKSPACE deliberately stays global — the resource channel
+        (tools/resources.py, routers/files.py) has exactly one root, and a
+        second one would make every [[resource:...]] marker written outside it
+        vanish silently.
+
+        An agent with nothing set returns {}, so its tools see the same
+        environment they see today, key for key.
+
+        The registry calls this once per tool execution (it holds executor=self
+        already), which is also why the value is always fresh: nothing here is
+        cached in the process-wide _tool_env.
+        """
+        env: dict[str, str] = {}
+        folder = getattr(self.agent, "folder", None)
+        if folder is not None and folder.path:
+            env["MYAGENT_AGENT_DIR"] = folder.path
+            if folder.index_ocr:
+                env["MYAGENT_INDEX_OCR"] = "1"
+        # Local-only, resolved per turn: app.engine.embedding owns that rule,
+        # and IndexService reads the SAME one when it builds the index.
+        env.update(embedding.resolve_embed_env(self.stores.models))
+        return env
+
 
     # ------------------------------------------------------------------
     # Public surface for internal tool handlers (app.tools.internal).
@@ -1044,6 +1065,64 @@ class AgentExecutor:
             notes.append(prompts.FINDINGS_RECALL_NOTE)
         return prompts.SECTION_FINDINGS + "\n".join(lines) + "\n" + " ".join(notes)
 
+    # The same shape as the findings window, one level down. Smaller budget on
+    # purpose: a tool result is RAW output (a search listing, a page of a PDF,
+    # a command's stdout), not a reply written for this agent, so the useful
+    # part is usually its head — and unlike a delegation it can be had again
+    # for the price of one call.
+    _TOOL_RESULTS_WINDOW = 4
+    _TOOL_RESULTS_CHARS = 600
+    _TOOL_RESULTS_CHARS_OLDER = 180
+
+    def _build_tool_results_section(self) -> str:
+        """The '## What your tools returned earlier in this chat' block.
+
+        The twin of _build_findings_section, and it exists for the same bug:
+        is_scaffolding_message drops `tool` messages from conversation[], so
+        from the second turn on the model can see only its own prose. Observed
+        on a real chat over a folder of medical records — the agent found the
+        report, then said "yes it exists", then "I cannot find it", never
+        searching again in either turn.
+
+        Deliberately NO recall_* companion, unlike delegations: re-running a
+        search costs one call, re-running a delegation costs a whole sub-agent
+        turn. So a cut points at the tool itself (R3: the truncated branch
+        carries the retry instruction), and the payload stays one section
+        lighter.
+
+        Not gated on memory_enabled — this is session state, not long-term
+        memory — and it rides on the SYSTEM prompt like ## Memory, so
+        is_scaffolding_message and the rewind endpoint are untouched.
+        """
+        window = self._tool_results[-self._TOOL_RESULTS_WINDOW:]
+        lines = []
+        for pos, t in enumerate(reversed(window)):      # newest first
+            result = " ".join((t.get("result") or "").split())
+            if not result:
+                continue
+            budget = (self._TOOL_RESULTS_CHARS if pos == 0
+                      else self._TOOL_RESULTS_CHARS_OLDER)
+            if len(result) > budget:
+                result = (result[:budget].rstrip()
+                          + f"… [cut at {budget} of {len(result)} chars — call "
+                            f"{t.get('tool')} again for the rest]")
+            args = t.get("arguments") or {}
+            # The QUERY is what makes an entry recognisable ("did I already
+            # look for the report?"), and it is short. The rest of the
+            # arguments is not worth its tokens here.
+            hint = args.get("query") or args.get("id") or args.get("path") or ""
+            hint = " ".join(str(hint).split())[:80]
+            label = f"{t.get('tool')}({hint})" if hint else str(t.get("tool"))
+            lines.append(f"- [{t.get('id')}] {label}: {result}")
+        if not lines:
+            return ""
+        hidden = len(self._tool_results) - len(window)
+        if hidden > 0:
+            lines.append(f"({hidden} earlier tool call(s) not shown — run the "
+                         f"tool again if you need them)")
+        return (prompts.SECTION_TOOL_RESULTS + "\n".join(lines) + "\n"
+                + prompts.TOOL_RESULTS_NOTE)
+
     def _prepare_turn(self, tool_defs: list[dict], attachments: list[dict] | None,
                       memory_context: list | None = None,
                       transcribed: bool = False,
@@ -1068,6 +1147,7 @@ class AgentExecutor:
         # otherwise silently drop them (llama.cpp starts in that mode).
         suffix = self._build_memory_section(memory_context)
         suffix += self._build_findings_section()
+        suffix += self._build_tool_results_section()
         has_attachment = bool(attachments) and any(
             (a or {}).get("data") or (a or {}).get("path") for a in attachments
         )
@@ -1124,6 +1204,7 @@ class AgentExecutor:
         event_sink=None,
         transcribed: bool = False,
         delegations: list[dict] | None = None,
+        tool_results: list[dict] | None = None,
     ) -> ChatResponse:
         """Non-streaming entry point: drain run_stream() and return the final
         ChatResponse (single implementation of the loop lives there).
@@ -1136,7 +1217,8 @@ class AgentExecutor:
         error: str | None = None
         async for event in self.run_stream(user_message, conversation, attachments,
                                            memory_context, transcribed=transcribed,
-                                           delegations=delegations):
+                                           delegations=delegations,
+                                           tool_results=tool_results):
             et = event.get("type")
             if et == "done":
                 response = ChatResponse(**event.get("data", {}))
@@ -1165,6 +1247,7 @@ class AgentExecutor:
         memory_context: list | None = None,
         transcribed: bool = False,
         delegations: list[dict] | None = None,
+        tool_results: list[dict] | None = None,
     ):
         """The agent loop, as an async generator of SSE-compatible event dicts.
 
@@ -1199,7 +1282,8 @@ class AgentExecutor:
             async for event in self._run_stream_inner(user_message, conversation,
                                                       attachments, memory_context,
                                                       transcribed=transcribed,
-                                                      delegations=delegations):
+                                                      delegations=delegations,
+                                           tool_results=tool_results):
                 yield event
         finally:
             # Runs on normal completion AND on generator abort (Stop button /
@@ -1214,6 +1298,7 @@ class AgentExecutor:
         memory_context: list | None = None,
         transcribed: bool = False,
         delegations: list[dict] | None = None,
+        tool_results: list[dict] | None = None,
     ):
         self._debug_reset(user_message)
         # What sub-agents reported in the PREVIOUS turns (this turn's own
@@ -1221,6 +1306,9 @@ class AgentExecutor:
         # Sub-agents get nothing: call_agent_handler runs them without this
         # argument — between agents only message/reply travel.
         self._delegations = list(delegations or [])
+        # Same contract: handed in per run by whoever owns the session, so the
+        # executor stays session-agnostic. Sub-agents get nothing here either.
+        self._tool_results = list(tool_results or [])
         # Write attachments to workspace files (stamping a `path` on each) so the
         # model can reach any file via a tool, independently of what it can read
         # inline. Done once here; forwarded sub-agent attachments carry the path.
@@ -1299,13 +1387,24 @@ class AgentExecutor:
 
             # Debug log: dump the COMPLETE payload sent to the LLM (system
             # prompt included — this is where "Available Agents" shows up).
-            self._debug_log(f"=== Agent '{self.agent.id}' iteration {iterations} ===")
-            self._debug_log(f"Messages sent ({len(messages)}):")
-            for i, m in enumerate(messages):
-                role = m.get("role", "?")
-                content = self._dbg_content(m.get("content"))
-                tc = m.get("tool_calls")
-                self._debug_log(f"  [{i}] {role}: {content}" + (f" [tool_calls: {len(tc)}]" if tc else ""))
+            # Everything needed to replay the call by hand: who, on what, with
+            # which sampling, which tool schemas, and the exact messages.
+            self._debug_log(
+                f"\n--- iteration {iterations}  agent '{self.agent.id}'"
+                f"  depth {self.depth}"
+                f"  {datetime.now().isoformat(timespec='seconds')} ---")
+            self._debug_log(
+                f"Request: model={getattr(self.model_config, 'model', '?')} "
+                f"temperature={current_temp} "
+                f"protocol={'native' if self.provider.supports_tools is not False else 'text'} "
+                f"tools_sent={len(openai_tools or [])} "
+                f"messages={len(messages)}  (full payload in api.log)")
+            # The payload itself is NOT dumped here: LLMProvider writes every
+            # call to api.log, so repeating it would double the biggest thing
+            # in the trace and let the two copies disagree. This file stays the
+            # narrative — which iteration, which decision, which tool result.
+            self.provider.trace_label = (
+                f"agent '{self.agent.id}' iteration {iterations} depth {self.depth}")
 
             # Stream LLM response token by token
             pre_tools = self.provider.supports_tools  # to detect a mid-call downgrade
@@ -1361,6 +1460,7 @@ class AgentExecutor:
                 # was talking to and at which URL (see LLMProvider.explain_error).
                 err_msg = self.provider.explain_error(e)
                 log.error("LLM stream failed: %s", err_msg)
+                self._debug_log(f"LLM stream FAILED: {err_msg}")
                 stream_error = err_msg
                 # Break out of the loop; the post-loop code decides whether to
                 # salvage a partial answer (tool results this turn) or surface
@@ -1370,6 +1470,8 @@ class AgentExecutor:
             tool_calls = [tool_calls_accum[i] for i in sorted(tool_calls_accum)] if tool_calls_accum else None
 
             # Debug log LLM response (complete)
+            if full_reasoning:
+                self._debug_log(f"LLM reasoning: {len(full_reasoning)} chars (see api.log)")
             self._debug_log(f"LLM response content: {full_content or ''}")
             if tool_calls:
                 self._debug_log(f"  Structured tool_calls: {json.dumps(tool_calls, ensure_ascii=False)}")
@@ -1515,7 +1617,7 @@ class AgentExecutor:
                                        resources=step_resources)
                 trace_steps.append(step)
                 yield {"type": "tool_result", "data": _step_summary(step)}
-                self._debug_log(f"  Tool result: {func_name} -> {self._dbg_content(result)}")
+                self._debug_log(f"  Tool result: {func_name} -> {trace.content(result)}")
 
                 if self.provider.supports_tools is False:
                     call_result_parts.append(f"- {func_name}: {result}")

@@ -12,7 +12,8 @@ from app.engine.memory_compactor import cancel_compaction, schedule_compaction
 from app.ids import is_valid_id
 from app.models import ChatRequest, ChatResponse, ChatMessage
 from app.storage.sessions import (delegation_history, memory_context, now_iso,
-                                  record_turn, record_user_turn, steps_from)
+                                  record_turn, record_user_turn, steps_from,
+                                  tool_history)
 
 log = logging.getLogger(__name__)
 
@@ -146,7 +147,8 @@ async def chat(req: ChatRequest, request: Request) -> ChatResponse:
 
     response = await executor.run(req.message, prior, attachments,
                                   memory_context=memory_context(session),
-                                  delegations=delegation_history(session))
+                                  delegations=delegation_history(session),
+                                  tool_results=tool_history(session))
 
     conv = [m.model_dump(exclude_none=True) for m in response.conversation]
     steps = steps_from(response.trace, response.tool_results)
@@ -159,19 +161,28 @@ async def chat(req: ChatRequest, request: Request) -> ChatResponse:
     return response
 
 
-def _make_drive(executor, message, prior, attachments, session, session_store, live=None):
+def _make_drive(executor, message, prior, attachments, session, session_store, live=None,
+                announce_agent: str | None = None):
     """Build the async routine that drives one turn: stream events from the
     executor, persist the turn, and emit each event into the LiveRun. On Stop
-    (task cancellation) it persists the partial answer instead of losing it."""
+    (task cancellation) it persists the partial answer instead of losing it.
+
+    ``announce_agent`` (Auto mode): the RESOLVED agent id, emitted as the very
+    first event so the UI can label the bubble before the first token — the
+    ``done`` trace carries it too, but only at the end of the turn. Not
+    persisted: the reload path reads the id from the recorded user turn."""
     async def drive(run):
         tool_events: list[dict] = []
         reply_text = ""
         reasoning_text = ""
         recorded = False  # the completed turn has been recorded to `session`
+        if announce_agent:
+            run.emit({"type": "agent", "data": announce_agent})
         try:
             async for event in executor.run_stream(
                     message, prior, attachments, memory_context(session),
-                    delegations=delegation_history(session)):
+                    delegations=delegation_history(session),
+                    tool_results=tool_history(session)):
                 et = event.get("type")
                 # agent_event (a sub-agent's live tokens/tools) is deliberately
                 # pass-through: it must reach SSE via run.emit below but never
@@ -271,7 +282,8 @@ async def chat_stream(req: ChatRequest, request: Request):
     await asyncio.to_thread(session_store.save_current, session)
 
     drive = _make_drive(executor, req.message, prior, attachments, session,
-                        session_store, live)
+                        session_store, live,
+                        announce_agent=req.agent_id if req.agent_auto else None)
     run = live.start(sid, drive)
     return _sse(run.subscribe())
 

@@ -14,7 +14,8 @@ from app.models import ChatRequest, ChatResponse, ChatMessage
 from app.engine.agent_router import mark_foreign
 from app.engine.memory_compactor import cancel_compaction, schedule_compaction
 from app.storage.sessions import (delegation_history, memory_context, record_turn,
-                                  record_user_turn, steps_from, title_from)
+                                  record_user_turn, steps_from, title_from,
+                                  tool_history)
 
 
 async def run_channel_turn(req: ChatRequest, named, executor) -> ChatResponse:
@@ -67,7 +68,8 @@ async def run_channel_turn(req: ChatRequest, named, executor) -> ChatResponse:
         response = await executor.run(model_message, prior, attachments,
                                       memory_context=memory_context(session),
                                       transcribed=req.transcribed,
-                                      delegations=delegation_history(session))
+                                      delegations=delegation_history(session),
+                                      tool_results=tool_history(session))
 
         conv = [m.model_dump(exclude_none=True) for m in response.conversation]
         record_user_turn(session, req.message,

@@ -152,6 +152,7 @@ async def summarize(model_config: ModelConfig, text: str, max_chars: int,
                     instruction: str) -> str | None:
     """One bare LLM call (no executor, no tools) → validated summary or None."""
     provider = LLMProvider(model_config)
+    provider.trace_label = "memory summary"
     try:
         out = ""
         async for chunk in provider.chat_completion_stream(

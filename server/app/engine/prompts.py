@@ -117,6 +117,20 @@ FINDINGS_RECALL_NOTE = (
     "For the full text of one, call recall_delegation with its id."
 )
 
+SECTION_TOOL_RESULTS = "\n\n## What your tools returned earlier in this chat\n"
+
+#: Closing line of the tool-results section. Same load-bearing job as
+#: FINDINGS_NOTE — without it the block reads as background — plus the half
+#: that differs: it tells the model to RE-RUN the tool rather than offering a
+#: recall tool. Re-running a search is cheap, which is exactly why this section
+#: needs no recall_* companion the way delegations do.
+TOOL_RESULTS_NOTE = (
+    "These are facts YOU obtained in this chat with your own tools. Answer from "
+    "them when they cover the question. When they do not, or when they were cut "
+    "short, call the tool AGAIN now — never answer from what you said in an "
+    "earlier reply, and never promise a document you have not opened."
+)
+
 #: Turn-scoped note for a message that arrived as SPEECH (voice satellite,
 #: Telegram voice note) and was machine-transcribed. Whisper does not fail on a
 #: bad capture, it produces plausible wrong words — and a model that answers a

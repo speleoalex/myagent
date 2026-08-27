@@ -360,7 +360,7 @@ const ChatPage = {
             // Known cosmetic limit: a chat where Auto was toggled midway labels
             // every turn — each label still names the agent that really answered.
             if (session.agent_auto && lastAgentId) {
-                msgDiv.appendChild(this._agentTag(lastAgentId));
+                this._tagAgent(msgDiv, lastAgentId);
             }
             pendingTools = [];
         };
@@ -817,7 +817,7 @@ const ChatPage = {
                         // re-attach replays the same done event, so this works
                         // there too.
                         if (this.currentAgentId === 'auto' && trace && trace.agent_id) {
-                            msgDiv.appendChild(this._agentTag(trace.agent_id));
+                            this._tagAgent(msgDiv, trace.agent_id);
                         }
                         break;
                     }
@@ -835,6 +835,12 @@ const ChatPage = {
                         settleReasoning();
                         if (!allText() && !flow.querySelector('.tool-calls')) msgDiv.remove();
                         this.appendMessage('error', i18n('chat.errorPrefix', { msg: event.data }));
+                        break;
+                    case 'agent':
+                        // Auto mode: the server announces the resolved agent
+                        // before the first token, so the label is visible while
+                        // the answer is still being written.
+                        this._tagAgent(msgDiv, event.data);
                         break;
                     case 'notice':
                         // Inserted ABOVE the answer bubble, which already exists:
@@ -934,14 +940,19 @@ const ChatPage = {
         return el;
     },
 
-    /** "via <agent>" label under an answer, shown only in Auto mode: it makes
-     * the router's per-message pick visible and verifiable. Same discreet
-     * styling as the timestamp. */
-    _agentTag(agentId) {
+    /** "via <agent>" label at the TOP of an answer, shown only in Auto mode:
+     * it makes the router's per-message pick visible and verifiable. Placed
+     * first (not under the timestamp) because the reader wants to know who is
+     * speaking before reading what was said — on a long answer a footer label
+     * is off-screen. Prepended: at `done` the bubble already holds the text.
+     * Idempotent: live turns get it from the early `agent` event AND from
+     * `done` (the fallback for a run started before this event existed). */
+    _tagAgent(msgDiv, agentId) {
+        if (msgDiv.querySelector(':scope > .msg-agent')) return;
         const el = document.createElement('div');
-        el.className = 'msg-time';
+        el.className = 'msg-agent';
         el.textContent = i18n('chat.viaAgent', { name: this.agentName(agentId) });
-        return el;
+        msgDiv.insertBefore(el, msgDiv.firstChild);
     },
 
     /** A server-side notice (e.g. the configured default model was down and

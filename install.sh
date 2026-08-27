@@ -263,6 +263,18 @@ if ! "$VENV/bin/python" -c "import libzim" >/dev/null 2>&1; then
     fi
 fi
 
+# numpy, same rule and same reason: it is what the optional semantic index
+# scores with. It usually arrives anyway as a dependency of faster-whisper, and
+# that is exactly why it is asked for explicitly — an install without voice
+# support would otherwise silently have no semantic search either.
+if ! "$VENV/bin/python" -c "import numpy" >/dev/null 2>&1; then
+    echo "  Installing numpy (semantic search over your documents)..."
+    if ! "$VENV/bin/pip" install -q numpy; then
+        echo "  numpy could not be installed — semantic search stays disabled"
+        echo "  (keyword search is unaffected). Retry: $VENV/bin/pip install numpy"
+    fi
+fi
+
 # ============================================================ 3. tools + deps
 echo "[3/5] Tools..."
 find "$INSTALL_DIR/server/tools" -name "run" -exec chmod +x {} \;
@@ -485,7 +497,6 @@ $STATE_ENV"; fi
 #                                                 # normally set it in the UI instead: no restart
 #     Environment=MYAGENT_SSL_CERTFILE=/etc/myagent/fullchain.pem
 #     Environment=MYAGENT_SSL_KEYFILE=/etc/myagent/privkey.pem   # omit for a combined PEM
-#     Environment=MYAGENT_DEBUG=1                 # executor trace, logs FULL chat content
 # and restart the service.
 [Unit]
 Description=MyAgent - AI Agent Platform
@@ -692,6 +703,16 @@ elif [ "$ZIM_COUNT" -gt 0 ]; then
     echo "  [ok] offline library      ($ZIM_COUNT archive(s) in $LIB_DIR)"
 else
     echo "  [--] offline library      (libzim ready, no archives yet)"
+fi
+
+# Semantic search needs numpy AND an embedding model the user has to choose;
+# naming only what is actually missing keeps the line actionable.
+if ! "$VENV/bin/python" -c "import numpy" >/dev/null 2>&1; then
+    echo "  [--] semantic search      (numpy missing: $VENV/bin/pip install numpy)"
+else
+    echo "  [--] semantic search      (optional: pull a local embedding model,"
+    echo "                             e.g. ollama pull embeddinggemma:300m,"
+    echo "                             then pick it in Settings)"
 fi
 
 echo ""

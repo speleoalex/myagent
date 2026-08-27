@@ -18,6 +18,7 @@ from app.config import (
     PROJECT_ROOT,
     CONFIG_DIR,
     DEFAULT_CONFIG_DIR,
+    CACHE_DIR,
     MCP_CACHE_DIR,
     MCP_DIR,
     TOOLS_DIR,
@@ -33,6 +34,7 @@ from app.config import (
     ensure_autonomy,
 )
 from app.engine.autonomy import AutonomyService
+from app.engine.index_service import IndexService
 from app.engine.executor import Stores
 from app.engine.live import LiveRunManager
 from app.mcp.manager import McpManager
@@ -58,7 +60,7 @@ from app.tools.memory_tools import (
 )
 from app.plugins import load_plugins, start_plugins, stop_plugins
 from app.routers import (agents, tools, llm_models, chat, mcp, system, sessions,
-                         autonomy, files, plugins, tasks)
+                         autonomy, files, index, plugins, tasks)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -80,6 +82,10 @@ async def lifespan(app: FastAPI):
     unaffected.
     """
     app.state.autonomy.start()
+    # Builds the semantic indexes the search tools ask for, and only those:
+    # it scans one directory for request files and does nothing when there are
+    # none, so an install that never uses semantic search never starts a run.
+    app.state.index.start()
     # Plugins start last and stop first: they are PRODUCERS of agent turns (an
     # inbound message drives the executor and may schedule a wake), so the
     # engines they feed must be up before them and still up while they drain.
@@ -90,6 +96,12 @@ async def lifespan(app: FastAPI):
         await app.state.autonomy.aclose()
     except Exception as e:
         log.warning("Autonomy shutdown did not complete cleanly: %s", e)
+    try:
+        # An indexer is a child process: it must not outlive us. Its work is
+        # committed one file at a time, so being cut off costs nothing.
+        await app.state.index.aclose()
+    except Exception as e:
+        log.warning("Index service shutdown did not complete cleanly: %s", e)
     manager = getattr(app.state, "mcp", None)
     if manager is not None:
         try:
@@ -228,6 +240,12 @@ autonomy_service = AutonomyService(
     stores, tool_registry, named_sessions,
     live_runs, task_store, AUTONOMY_DIR,
 )
+# The semantic-index builder. Constructed here, started in the lifespan, and
+# deliberately given the registry rather than the tool path: semindex.py ships
+# INSIDE local_search, which the user may have overridden copy-on-write, and
+# the registry is what already resolves that.
+index_service = IndexService(CACHE_DIR, tool_registry, stores.models)
+
 # notify_user is registered here, not with the others above: besides sending, it
 # appends the message to the target chat's OWN conversation, so it needs the named
 # session store (which only exists further down). Without that append the user sees
@@ -273,6 +291,7 @@ app.state.live = live_runs
 app.state.memory = memory_store
 app.state.tasks = task_store
 app.state.autonomy = autonomy_service
+app.state.index = index_service
 
 # Include API routers
 app.include_router(agents.router, prefix="/api/agents", tags=["agents"])
@@ -283,6 +302,7 @@ app.include_router(mcp.router, prefix="/api/mcp", tags=["mcp"])
 app.include_router(sessions.router, prefix="/api/sessions", tags=["sessions"])
 app.include_router(system.router, prefix="/api/system", tags=["system"])
 app.include_router(autonomy.router, prefix="/api/autonomy", tags=["autonomy"])
+app.include_router(index.router, prefix="/api/index", tags=["index"])
 app.include_router(tasks.router, prefix="/api/tasks", tags=["tasks"])
 app.include_router(files.router, prefix="/api/files", tags=["files"])
 app.include_router(plugins.router, prefix="/api/plugins", tags=["plugins"])

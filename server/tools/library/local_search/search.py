@@ -141,9 +141,20 @@ def myagent_home():
 
 
 def default_library_dir():
-    # duplicated in local_read
-    return os.environ.get("MYAGENT_LIBRARY") or os.path.join(
-        myagent_home(), "library")
+    """Where to search when the call passes no ``path``.
+
+    MYAGENT_AGENT_DIR is the calling agent's own folder (Agent.folder.path,
+    exported per turn by the registry). It wins over the shared library so an
+    agent pointed at a folder of manuals stops having to repeat that path in
+    its system prompt — and it must resolve IDENTICALLY here and in local_read,
+    or a `p:manual.pdf:112` handed over by a search would open a different
+    document. That is what tests/test_library_helpers_sync.py enforces.
+
+    An explicit ``path`` argument still beats both (see main()).
+    """
+    return (os.environ.get("MYAGENT_AGENT_DIR")
+            or os.environ.get("MYAGENT_LIBRARY")
+            or os.path.join(myagent_home(), "library"))
 
 
 def _walk(root):
@@ -432,6 +443,74 @@ def chunk_document(text):
             buf.append(line)
     flush()
     return chunks
+
+
+# Aggregated chunks for the SEMANTIC index. Deliberately built on top of
+# chunk_document / pdf_pages rather than beside them: the index stores the id
+# local_search would print, and semindex hands those ids straight to the model,
+# which passes them to local_read. A separate splitter here would mint line
+# numbers no keyword hit ever has — the id would open a different passage, or
+# nothing, and nothing would raise.
+SEM_CHUNK_CHARS = 1200          # target size of one embedded chunk
+# Only near-empty fragments are dropped. A tighter floor loses answers: "La
+# coppia di serraggio e' 15-22 Nm." is 33 chars and IS the answer, while the
+# heading prepended at embedding time gives even a one-line paragraph enough
+# context to sit sensibly in the vector space. A little noise beats a silent
+# omission — the same trade the whole search already makes.
+SEM_CHUNK_MIN = 24
+
+
+def chunks_for(path, rel, deadline=None, target=SEM_CHUNK_CHARS):
+    """Yield ``(locator, heading, text, line_from, line_to)`` for one file.
+
+    Text: consecutive chunk_document paragraphs are packed up to *target*
+    chars and the locator is the FIRST paragraph's line — which is exactly the
+    id search_text_file would emit for it, so the merge can recognise the two
+    as the same passage (that is what line_from/line_to are stored for).
+
+    PDF: the chunk IS the page, matching the rule search_pdf_file already
+    applies to scoring — a troubleshooting table is one row per symptom, and
+    splitting it by paragraph loses the row.
+
+    Returns [] for anything unreadable, None for a PDF whose text is not
+    cached yet and whose extraction would blow *deadline* (the caller reports
+    it as not indexed yet, the same way a search reports it as not searched).
+    """
+    ext = os.path.splitext(path)[1].lower()
+    if ext in PDF_EXTS:
+        pages = pdf_pages(path, deadline)
+        if pages is None:
+            return None
+        return [(f"p:{rel}:{n}", f"{os.path.basename(path)} p.{n}", body, n, n)
+                for n, body in enumerate(pages, 1)
+                if len(body.strip()) >= SEM_CHUNK_MIN]
+    if ext not in TEXT_EXTS:
+        return []
+    text = read_text_file(path)
+    if not text:
+        return []
+    out, buf, head, first, last = [], [], "", 0, 0
+
+    def flush():
+        body = "\n\n".join(buf).strip()
+        if len(body) >= SEM_CHUNK_MIN:
+            out.append((f"f:{rel}:{first}", head or os.path.basename(path),
+                        body, first, last))
+        buf.clear()
+
+    for heading, body, line_no in chunk_document(text):
+        # A heading change starts a new chunk: the heading is prepended to the
+        # embedded text, so mixing two of them under one label would mislabel
+        # half the passage.
+        if buf and (heading != head or
+                    sum(len(b) for b in buf) + len(body) > target):
+            flush()
+        if not buf:
+            head, first = heading, line_no
+        buf.append(body)
+        last = line_no
+    flush()
+    return out
 
 
 def read_text_file(path):
@@ -892,6 +971,118 @@ def dedup_key(result):
     return " ".join(result["title"].lower().split())
 
 
+def semantic_bucket(root, query, terms, phrase, limit):
+    """Vector hits for *query*, shaped exactly like every other bucket.
+
+    Returns ``(hits, note)``. Both are empty when semantic search is off — no
+    embedder configured, no numpy, no index yet — and that is the normal case:
+    the semantic side is an upgrade, never a requirement, so a failure here can
+    only cost the extra results, never the search.
+
+    Everything expensive is somebody else's problem: the index is built by a
+    background pass (semindex.py --index, driven by the server's IndexService),
+    never inside this call, which has a 30s tool timeout to respect.
+    """
+    try:
+        import semindex
+    except Exception:
+        return [], ""
+    idx = semindex.open_index(root, create=False)
+    if idx is None:
+        # No index on disk yet, or nothing to search with. Ask for one to be
+        # built if an embedder IS configured — the request is a file, because a
+        # tool subprocess has no way to talk to the server.
+        try:
+            semindex.request_index(root)
+        except Exception:
+            pass
+        return [], ""
+    try:
+        prog = idx.progress()
+        hits = idx.search(query, limit * 2)
+        out = []
+        for h in hits:
+            text = h["text"]
+            snippet, _ = best_window(text, terms, phrase)
+            if not any(t in text.lower() for t in terms):
+                # Nothing lexical to centre on: show the head of the passage
+                # rather than a window around a match that is not there.
+                snippet = clean_snippet(text)
+            out.append({
+                "id": h["locator"],
+                "title": h["heading"] or os.path.basename(h["rel"]),
+                "snippet": snippet,
+                "score": h["score"],
+                "line_from": h["line_from"],
+                "line_to": h["line_to"],
+                "rel": h["rel"],
+            })
+        note = ""
+        if not prog.get("complete"):
+            # R2: a cap reached is DECLARED. "5 results" and "5 results, and a
+            # third of your documents are not indexed yet" are opposite
+            # messages, and the second is the one that tells the user to ask
+            # again in a minute instead of concluding the answer is not there.
+            semindex.request_index(root)
+            note = (f"semantic index still building "
+                    f"({prog.get('indexed', 0)} of {prog.get('total', 0)} files) "
+                    f"— repeat this search later for more.")
+        idx.close()
+        return out, note
+    except Exception as e:
+        print(f"WARNING: semantic search unavailable: {e}", file=sys.stderr)
+        return [], ""
+
+
+def clean_snippet(text, width=SNIPPET_WIDTH):
+    """The head of a passage, whitespace squeezed — used when no query term
+    appears literally, which is exactly what a semantic hit can look like."""
+    flat = " ".join(text.split())
+    return flat[:width] + ("…" if len(flat) > width else "")
+
+
+def drop_overlaps(sem_hits, keyword_hits):
+    """Remove semantic hits that are the SAME passage as a keyword hit.
+
+    dedup_key cannot do this job, for two separate reasons:
+
+    - A PDF page reached BOTH ways is one answer with two keys. The keyword hit
+      carries ``dedup`` (a hash of the page text); the semantic hit does not,
+      so dedup_key falls through to the title and the two never meet. Measured
+      on "clutch bolt torque specification": page 4 of 21_Clutch.pdf occupied
+      the first TWO of five slots.
+    - For ``f:`` ids dedup_key deliberately keys on the full id, because two
+      paragraphs of one note are two answers. But a semantic chunk aggregates
+      several paragraphs, so the chunk at line 3 CONTAINS the keyword hit at
+      line 5 while carrying a different id. That is what line_from/line_to are
+      stored for.
+
+    The keyword hit wins in both cases: it is the tuned one, and it is the one
+    whose snippet is centred on what the user actually typed.
+    """
+    exact = {h.get("id") for h in keyword_hits}
+    ranges = {}
+    for h in keyword_hits:
+        rid = h.get("id", "")
+        if not rid.startswith("f:"):
+            continue
+        rel, _, line = rid[2:].rpartition(":")
+        if line.isdigit():
+            ranges.setdefault(rel, []).append(int(line))
+    out, seen = [], set()
+    for h in sem_hits:
+        hid = h.get("id")
+        if hid in exact or hid in seen:
+            continue
+        spans = ranges.get(h.get("rel"))
+        if spans and any(h.get("line_from", 0) <= n <= h.get("line_to", 0)
+                         for n in spans):
+            continue
+        seen.add(hid)
+        out.append(h)
+    return out
+
+
 def name_a_few(items, k=4):
     """Name a handful of files in a NOTE: the whole list would eat the 2000
     char budget the results themselves live in."""
@@ -1054,6 +1245,17 @@ def main():
 
     per_file.sort(key=lambda hits: hits[0]["score"], reverse=True)
     text_bucket = round_robin(per_file, limit)
+
+    # The semantic bucket. NOT fused with RRF: the keyword scorer here is
+    # heavily tuned (IDF weights sampled per search, rare-term anchors,
+    # proximity, leave-one-out relaxation) and reciprocal-rank fusion would
+    # flatten all of that into a position. One more bucket reuses the machinery
+    # that is already here, and — the part that matters — with no embedder
+    # configured `buckets` is byte-for-byte what it was before this existed.
+    # RRF stays worth measuring AGAINST this baseline, not instead of it.
+    sem_bucket, sem_note = semantic_bucket(root, query, terms, phrase, limit)
+    sem_bucket = drop_overlaps(sem_bucket, text_bucket)
+
     if text_bucket:
         # FIRST, not last. round_robin serves buckets in order, so appending the
         # user's own documents behind every archive stopped reaching them at all
@@ -1064,8 +1266,15 @@ def main():
         # scores (score_text counts occurrences, relevance weighs coverage), which
         # is why this is a fixed position and not part of the sort above.
         buckets.insert(0, text_bucket)
+    if sem_bucket:
+        # After the user's own documents, before the encyclopedias: the
+        # ownership rule that puts text_bucket first still holds, and the
+        # semantic hits come from those same files anyway.
+        buckets.insert(1 if text_bucket else 0, sem_bucket)
 
     notes = []
+    if sem_note:
+        notes.append(sem_note)
     if pdf_no_tool:
         notes.append(f"{len(pdf_files)} PDF(s) in this folder were NOT searched: "
                      f"pdftotext (poppler-utils) is not installed.")

@@ -27,6 +27,10 @@
         },
         "description": "Tool ids the agent may use (e.g. 'web_search', 'file_write'). A whole group at once as '<group>/*' (e.g. 'file_management/*'), an MCP server as 'mcp:<server>/*'. action='list' prints every valid id; an unknown one comes back with the full list."
       },
+      "folder": {
+        "type": "object",
+        "description": "The folder this agent works on: {path, index_ocr}. It becomes the default root of local_search / local_read, so the agent no longer has to repeat that path in its prompt. null = the shared library. It does NOT change where file_write writes."
+      },
       "callable": {
         "type": "boolean",
         "description": "Whether other agents may delegate to this one (default true). false = only a human can select it in the chat."

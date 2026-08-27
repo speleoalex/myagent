@@ -18,6 +18,7 @@ const App = {
         this.apiKey = this._initApiKey();
         I18n.init();
         this.applyStaticI18n();
+        this._trackNavHeight();
         // Not awaited: the other pages must not wait on the network to render.
         // Pages that need it await pluginsReady(), sharing this same promise.
         this.pluginsReady();
@@ -25,6 +26,22 @@ const App = {
         this._wireReveal();
         this.route();
         this.updateActiveNav();
+    },
+
+    /** Publish the navbar's REAL height as --nav-h, so the CSS that sizes the
+     * page below it (#app min-height, .chat-wrap) subtracts what is actually
+     * there. It used to be two hard-coded pixel values (70 / 80) that drifted
+     * from the rem-sized navbar, and the page overflowed by a few pixels —
+     * a full-height scrollbar on the right for nothing. The navbar wraps
+     * onto two rows on narrow screens, hence the observer, not a one-shot. */
+    _trackNavHeight() {
+        const nav = document.querySelector('nav.navbar');
+        if (!nav) return;
+        const apply = () => document.documentElement.style.setProperty(
+            '--nav-h', `${Math.ceil(nav.getBoundingClientRect().height)}px`);
+        apply();
+        if (window.ResizeObserver) new ResizeObserver(apply).observe(nav);
+        else window.addEventListener('resize', apply);
     },
 
     /** Markup for the "show it" button beside a secret input. A password field

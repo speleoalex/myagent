@@ -109,7 +109,7 @@ effect of how the system is built:
 
 | Chapter III obligation | What MyAgent already produces |
 | --- | --- |
-| Art. 12 — automatic recording of events | Every turn is persisted with its full recursive trace, sub-agent calls included (`~/myagent/sessions/`, `server/app/storage/sessions.py`); `MYAGENT_DEBUG=1` adds a full executor trace |
+| Art. 12 — automatic recording of events | Every turn is persisted with its full recursive trace, sub-agent calls included (`~/myagent/sessions/`, `server/app/storage/sessions.py`); the debug trace in Settings adds a full executor trace |
 | Art. 14 — human oversight | Per-agent tool grants, `max_iterations` and `max_tool_calls` ceilings, duplicate-call suppression, and a stop button that interrupts a run in flight |
 | Art. 13 — instructions for use | [ARCHITECTURE.md](ARCHITECTURE.md), [AGENTS.md](AGENTS.md), [AUTONOMY.md](AUTONOMY.md), [SECURITY.md](SECURITY.md), [CONFIGURATION.md](CONFIGURATION.md) |
 | Art. 10 — data governance | The library is a set of files you assembled and can enumerate; answers cite the archive and entry they came from |

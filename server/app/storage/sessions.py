@@ -172,6 +172,47 @@ def delegation_history(session: dict, limit: int | None = None) -> list[dict]:
     return out
 
 
+def tool_history(session: dict, limit: int | None = None) -> list[dict]:
+    """What THIS agent's own tools returned earlier in the chat, oldest first.
+
+    The twin of :func:`delegation_history`, and it exists for the same bug seen
+    one level down. ``is_scaffolding_message`` drops every ``tool`` message from
+    ``conversation`` — it has to, or the model mimics the tool protocol in later
+    turns — so from the second turn on the model sees only its own past PROSE.
+    Asked a follow-up it therefore answers from what it once said rather than
+    from what it once found, and small models confabulate in both directions:
+    observed on a real chat where the agent found a medical report, then
+    answered "yes, it exists" and, one question later, "I cannot find it".
+
+    ``call_agent`` is excluded: :func:`delegation_history` already covers it,
+    verbatim and with its own recall tool. Quoting a delegation twice would
+    double its cost and let the two blocks disagree about where it was cut.
+
+    Ids are ``t<N>`` from the OLDEST, like ``d<N>``: stable as the chat grows.
+    Nothing extra is persisted — every session file already keeps the whole
+    result (see :func:`tool_message_from_step`).
+    """
+    out: list[dict] = []
+    for m in session.get("messages") or []:
+        if m.get("role") != "tool" or m.get("tool") == DELEGATION_TOOL:
+            continue
+        if not m.get("tool"):
+            continue
+        args = m.get("arguments") if isinstance(m.get("arguments"), dict) else {}
+        out.append({
+            "id": f"t{len(out) + 1}",
+            "tool": m.get("tool"),
+            "arguments": args,
+            # A failed call is kept, same rule as a failed delegation: "we
+            # looked there and it was not there" is information.
+            "result": m.get("result") or m.get("result_preview") or "",
+            "ts": m.get("ts") or "",
+        })
+    if limit and len(out) > limit:
+        return out[-limit:]
+    return out
+
+
 def record_turn(session: dict, steps: list[dict], reply: str, conversation,
                 reasoning: str = "") -> None:
     """Append the tool calls (recursive trace) and assistant reply, and update

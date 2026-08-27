@@ -10,7 +10,7 @@ from pydantic import BaseModel
 
 from app import config
 from app.config import save_settings, WORKSPACE_DIR
-from app.engine import default_model
+from app.engine import default_model, embedding
 from app.models import Settings
 
 router = APIRouter()
@@ -83,13 +83,92 @@ async def get_settings():
 
 
 @router.put("/settings")
-async def update_settings(new_settings: Settings):
+async def update_settings(new_settings: Settings, request: Request):
+    # A remote embedder would send the CONTENT of every indexed document to a
+    # third party, so it is refused rather than warned about. This is the
+    # friendly half of the rule — the enforcing half is in
+    # AgentExecutor.tool_env_overrides, which simply exports nothing for a
+    # non-local model, so hand-editing settings.json cannot get around it.
+    emb = new_settings.embedding_model_id
+    if emb:
+        raw = request.app.state.stores.models.get(emb) or {}
+        if not raw:
+            raise HTTPException(status_code=400,
+                                detail=f"Unknown model '{emb}'")
+        why = embedding.rejection_reason(raw)
+        if why:
+            raise HTTPException(
+                status_code=400,
+                detail=(f"'{raw.get('name') or emb}' cannot provide embeddings "
+                        f"({why}). Indexing sends the CONTENTS of your documents "
+                        "to the embedding endpoint, not just your question, so "
+                        "only a local model (Ollama or llama.cpp) can be used."))
     save_settings(new_settings)
     config.settings = new_settings
     # The default model and the backend URLs are exactly what the fallback
     # resolver keys on: choosing one here must take effect on the next turn.
     default_model.invalidate()
     return new_settings.model_dump()
+
+
+# --- Debug trace --------------------------------------------------------------
+# The switch lives in Settings (a plain bool on the Settings model, so PUT
+# /settings already saves it); these three routes are what makes it USABLE:
+# without a way to see the file's size, read it and clear it, "debug is on"
+# tells the user nothing and leaves full chat content growing on disk unseen.
+
+
+@router.get("/debug")
+async def debug_status():
+    """The switch, and both trace files. TWO of them because they answer
+    different questions: debug.log is the turn's narrative, api.log is every
+    model call verbatim — including the ones made outside a turn, like the
+    classifier that picks which agent answers."""
+    files = []
+    for key, path in config.debug_files().items():
+        try:
+            size = path.stat().st_size
+        except OSError:
+            size = 0
+        files.append({"key": key, "path": str(path), "size": size})
+    return {"enabled": config.debug_enabled(),
+            "max_bytes": config.DEBUG_MAX_BYTES, "files": files}
+
+
+def _debug_file(key: str):
+    path = config.debug_files().get(key)
+    if path is None:
+        raise HTTPException(status_code=404, detail=f"Unknown log '{key}'")
+    return path
+
+
+@router.get("/debug/log/{key}")
+async def debug_log(key: str, tail: int = 400):
+    """The last *tail* lines, newest last. A tail and not the whole file: these
+    hold every prompt and every reply verbatim, and a 20 MB response would hang
+    the browser that asked for it."""
+    try:
+        with open(_debug_file(key), "r", errors="replace") as f:
+            lines = f.readlines()
+    except OSError:
+        return {"lines": [], "truncated": False, "total": 0}
+    tail = max(1, min(int(tail or 400), 5000))
+    return {"lines": [ln.rstrip("\n") for ln in lines[-tail:]],
+            "truncated": len(lines) > tail, "total": len(lines)}
+
+
+@router.delete("/debug/log/{key}")
+async def debug_clear(key: str):
+    """Empty one trace, rotated generation included. The point of the button is
+    that these files hold full conversations: having turned tracing on to look
+    at something, you need one click to not keep it."""
+    path = _debug_file(key)
+    for p in (path, path.with_suffix(path.suffix + ".1")):
+        try:
+            p.unlink(missing_ok=True)
+        except OSError as e:
+            raise HTTPException(status_code=500, detail=f"Could not clear: {e}")
+    return {"ok": True}
 
 
 # --- API key -----------------------------------------------------------------

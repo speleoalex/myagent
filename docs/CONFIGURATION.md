@@ -22,8 +22,8 @@ touches your data:
 ├── sessions/    # chat state: current, history, connector channels
 ├── memory/      # per-agent long-term memory (only for agents that enable it)
 ├── autonomy/    # live agents' state and event queues (only for started agents)
-├── cache/       # derived data, safe to delete (pdftext/: PDF text layers, for library search)
-└── logs/        # debug.log (only with MYAGENT_DEBUG=1)
+├── cache/       # derived data, safe to delete (pdftext/: PDF text layers; index/: semantic indexes)
+└── logs/        # debug.log (only while the debug trace is on in Settings)
 ```
 
 Two of those directories hold everything that is irreplaceable — a full backup
@@ -35,6 +35,53 @@ tar czf myagent-backup.tgz -C ~ myagent/config myagent/connectors
 
 The library is deliberately left out: it is large, and it is re-downloadable
 with [`library/fetch.py`](../library/README.md).
+
+
+## Semantic search (optional)
+
+Choosing an *embedding model* in Settings turns on vector search over your own
+documents, alongside the keyword search that is always there. Without one,
+nothing changes.
+
+- **Local models only.** Indexing sends the CONTENTS of your documents to the
+  embedding endpoint — not just your question — so a remote provider is
+  refused, both by the settings form and by the server when it exports the
+  endpoint to the tools.
+- **The index lives in `~/myagent/cache/index/`**, one SQLite database per
+  indexed folder, named by that folder's path. It is derived data: deleting it
+  costs a rebuild, never information. Changing the embedding model discards
+  every index, because vectors from two models are not comparable.
+- **Building happens in the background**, one folder at a time, and only after
+  a search over an unindexed folder asks for it. Settings shows the progress
+  and offers a Stop button.
+- **Known limit:** if the embedding model and the chat model are served by the
+  same backend with `OLLAMA_NUM_PARALLEL=1`, their requests serialize and the
+  assistant feels slower while an index builds. Indexing is throttled and
+  niced to soften this, but stopping it from Settings is the real remedy.
+
+
+## Debug trace
+
+*Settings → Debug trace* writes two files under `~/myagent/logs/`:
+
+| File | What it holds |
+|---|---|
+| `debug.log` | the **narrative** of each turn: iteration by iteration, which tool was called, which results came back, which decisions were taken (dedup, forced answer, protocol downgrade) |
+| `api.log` | **every call made to a model**, request payload and reply verbatim — the parameters, the tool schemas actually sent, the complete message list, the reasoning and the tool calls |
+
+`api.log` includes the calls made *outside* a turn — notably the classifier
+that picks which agent answers in Auto mode, labelled `auto-route`, so "why did
+it choose that agent" is answerable. Each entry is labelled with who made it.
+
+- **It takes effect immediately**, with no restart: the flag is resolved on
+  every write, because a debug switch that needs a restart is useless exactly
+  when you reach for it. The switch in Settings is the only place it lives —
+  there is no environment variable for it.
+- **They contain the full text of your conversations.** Turn it on to
+  investigate something, then turn it off and press Delete. Settings shows each
+  file's path and size, and can show its tail.
+- Both files **append** across turns and are bounded by rotation at 20 MB
+  each (one previous generation is kept).
 
 ## Environment variables
 
@@ -95,13 +142,11 @@ runtime state (read by `install.sh`; default `$MYAGENT_HOME/bin`, or
 | `MYAGENT_OLLAMA_DEFAULT_CTX` | `4096` | assumed context window of an Ollama model when not probed |
 | `MYAGENT_CHANNEL_ROTATE_BYTES` | `2 MiB` | size at which a channel session is archived and restarted |
 | `MYAGENT_MCP_SHUTDOWN_TIMEOUT` | `10` | seconds shutdown waits for MCP servers to close |
-| `MYAGENT_DEBUG` | *(off)* | `1` = verbose executor trace — **logs full chat content** |
 | `MYAGENT_DEBUG_FILE` | `~/myagent/logs/debug.log` | trace file location |
 
-`MYAGENT_DEBUG=1` is the tool for "why did the agent do that": it records every
-message sent to the model, the raw reply and the parsed tool calls. It is
-cleared at each top-level turn, and it contains everything you said — enable it
-while debugging an agent, not permanently.
+The **debug trace** is the tool for "why did the agent do that", and it is
+switched in Settings — see [above](#debug-trace). There is no environment
+variable to enable it: one switch, in one place.
 
 The connectors plugin adds a few of its own (state directory, poll timeout,
 Whisper model) — see [connectors/README.md](../connectors/README.md).

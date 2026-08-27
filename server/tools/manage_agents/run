@@ -42,6 +42,7 @@ _AGENT_DEFAULTS = {
     "model_id": "default",
     "system_prompt": "",
     "tools": [],
+    "folder": None,
     "max_iterations": 10,
     "max_tool_calls": 5,
     "temperature": None,
@@ -312,6 +313,25 @@ def do_save(args: dict) -> None:
         if v is not None and not isinstance(v, dict):
             fail("'autonomous' must be an object (or null for defaults).")
         agent["autonomous"] = v
+    # The agent's working folder. A bare string is accepted and lifted into the
+    # block: told "folder", a small model writes the path, not an object.
+    # Existence is NOT checked — the folder may live on a disk that is not
+    # mounted right now, and local_search fails loudly on a missing root.
+    if "folder" in args:
+        v = args["folder"]
+        if isinstance(v, str):
+            v = {"path": v.strip()} if v.strip() else None
+        if v is not None and not isinstance(v, dict):
+            fail("'folder' must be a path string, an object "
+                 "{path, index_ocr}, or null for none.")
+        if isinstance(v, dict):
+            path_v = str(v.get("path") or "").strip()
+            if not path_v:
+                v = None
+            else:
+                v = {"path": os.path.expanduser(path_v),
+                     "index_ocr": bool(v.get("index_ocr", False))}
+        agent["folder"] = v
     if "tools" in args and args["tools"] is not None:
         agent["tools"] = list(args["tools"])
     if "callable" in args and args["callable"] is not None:

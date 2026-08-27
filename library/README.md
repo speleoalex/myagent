@@ -39,6 +39,15 @@ file live side by side:
 |---|---|
 | **Wikipedia / ZIM archives** (`*.zim`) | full-text index built into the archive |
 | **Your notes and documents** (`.md`, `.txt`, `.rst`) | keyword scorer, one result per section |
+| **PDFs** | keyword scorer over the text layer, one result per page |
+
+With an **embedding model** chosen in Settings, your documents and PDFs are also
+matched by MEANING — which is what makes an Italian question find an answer in
+an English manual. It is opt-in and additive: the keyword results are exactly
+what they were, with the semantic ones merged in beside them, and the ZIM
+archives are left alone (they already have a full-text index; embedding
+millions of encyclopedia articles buys nothing). The index builds in the
+background the first time you search a folder, and Settings shows its progress.
 
 Searching happens in **two steps**, so an agent pays only for the text it
 actually wants: `local_search` returns a compact list (`id | title | snippet`),

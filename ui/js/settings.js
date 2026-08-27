@@ -5,6 +5,8 @@ const SettingsPage = {
 
         let models = [];
         try { models = await App.api('GET', '/models'); } catch (e) { /* empty */ }
+        // Only a LOCAL model can embed — see the select below for why.
+        const localModels = models.filter(m => m.provider === 'ollama' || m.provider === 'llamacpp');
 
         App.container.innerHTML = `
             <div class="row">
@@ -57,12 +59,40 @@ const SettingsPage = {
                             <small class="text-secondary">${i18n('settings.defaultModelHint')}</small>
                         </div>
                         <div class="mb-3">
+                            <label class="form-label">${i18n('settings.embeddingModel')}</label>
+                            <!-- LOCAL providers only, and this filter is NOT the
+                                 enforcement: indexing sends the CONTENTS of every
+                                 document to this endpoint, so app/engine/embedding.py
+                                 refuses a remote one whatever is stored. Listing
+                                 remote models here would only offer a 400. -->
+                            <select class="form-select" id="f-embedding-model">
+                                <option value="">${i18n('settings.noEmbeddingModel')}</option>
+                                ${localModels.map(m => `<option value="${App.escAttr(m.id)}" ${m.id === settings.embedding_model_id ? 'selected' : ''}>${App.esc(m.name)} (${App.esc(m.provider)})</option>`).join('')}
+                            </select>
+                            <small class="text-secondary">${i18n('settings.embeddingModelHint')}</small>
+                            <div id="index-rebuild-warn" class="form-text text-warning-emphasis d-none">
+                                <i class="bi bi-exclamation-triangle"></i> ${i18n('settings.embeddingModelChanged')}
+                            </div>
+                            ${localModels.length ? '' : `<div class="form-text">
+                                <i class="bi bi-info-circle"></i> ${i18n('settings.noEmbeddingModelHint')}
+                                <code>ollama pull embeddinggemma:300m</code>
+                            </div>`}
+                            <div id="index-status" class="mt-2"></div>
+                        </div>
+                        <div class="mb-3">
                             <label class="form-label">${i18n('settings.ollamaUrl')}</label>
                             <input type="text" class="form-control" id="f-ollama-url" value="${App.esc(settings.ollama_base_url || 'http://localhost:11434')}">
                         </div>
                         <div class="mb-3">
                             <label class="form-label">${i18n('settings.llamacppUrl')}</label>
                             <input type="text" class="form-control" id="f-llamacpp-url" value="${App.esc(settings.llamacpp_base_url || 'http://localhost:8080')}">
+                        </div>
+                        <div class="mb-3 form-check form-switch">
+                            <input class="form-check-input" type="checkbox" id="f-debug"
+                                   ${settings.debug ? 'checked' : ''}>
+                            <label class="form-check-label" for="f-debug">${i18n('settings.debug')}</label>
+                            <div class="form-text">${i18n('settings.debugHint')}</div>
+                            <div id="debug-box" class="mt-2"></div>
                         </div>
                         <button type="submit" class="btn btn-primary">${i18n('settings.save')}</button>
                     </form>
@@ -129,16 +159,37 @@ const SettingsPage = {
                 ollama_base_url: document.getElementById('f-ollama-url').value.trim(),
                 llamacpp_base_url: document.getElementById('f-llamacpp-url').value.trim(),
                 default_model_id: document.getElementById('f-default-model').value || null,
+                embedding_model_id: document.getElementById('f-embedding-model').value || null,
+                debug: document.getElementById('f-debug').checked,
             };
             try {
                 await App.api('PUT', '/system/settings', data);
                 App.toast(i18n('settings.saved'));
+                // Choosing an embedder is what turns indexing on: show the
+                // state now, not on the next visit to this page.
+                settings.embedding_model_id = data.embedding_model_id;
+                settings.debug = data.debug;
+                this.renderDebugBox();
+                document.getElementById('index-rebuild-warn').classList.add('d-none');
+                this.renderIndexStatus();
             } catch (err) {
                 App.toast(err.message, 'danger');
             }
         };
 
+        // Changing the embedder discards every index. Say so BEFORE the save,
+        // not after hours of re-indexing.
+        document.getElementById('f-embedding-model').onchange = (e) => {
+            const prev = settings.embedding_model_id || '';
+            document.getElementById('index-rebuild-warn')
+                .classList.toggle('d-none', !prev || e.target.value === prev);
+        };
+
         this.renderApiKey();
+
+        this.renderIndexStatus();
+
+        this.renderDebugBox();
 
         this.renderInstall();
         // The install prompt often arrives after this page has rendered, and
@@ -149,6 +200,159 @@ const SettingsPage = {
         this.loadServerInfo();
 
         this.checkStatus();
+    },
+
+    /** The semantic index box, drawn under the embedding-model select.
+     *
+     * It exists because the indexer is otherwise INVISIBLE: it competes with
+     * the chat model for the same backend, so "why is the assistant slow right
+     * now" needs an answer, and there has to be a way to stop it. Only
+     * exceptional state is drawn — with no embedder chosen nothing is wrong,
+     * semantic search is simply off, and the box says nothing at all.
+     */
+    async renderIndexStatus() {
+        const box = document.getElementById('index-status');
+        if (!box) return;                       // navigated away mid-fetch
+        let st = null;
+        try { st = await App.api('GET', '/index/status'); } catch (e) { /* no service */ }
+        if (!st) { box.innerHTML = ''; return; }
+
+        if (st.problem) {
+            box.innerHTML = `<div class="form-text text-danger">
+                <i class="bi bi-exclamation-triangle"></i>
+                ${App.esc(i18n('settings.indexProblem', { problem: st.problem }))}</div>`;
+            return;
+        }
+        if (!st.configured || !st.roots.length) { box.innerHTML = ''; return; }
+
+        const rows = st.roots.map(r => {
+            const pct = r.total ? Math.round(100 * r.indexed / r.total) : 0;
+            const running = r.state === 'running';
+            const done = r.indexed >= r.total && r.total > 0 && r.state !== 'paused';
+            const label = done ? i18n('settings.indexDone', { chunks: r.chunks })
+                : i18n(`settings.indexState.${r.state}`, { n: r.indexed, total: r.total });
+            const btn = r.state === 'paused'
+                ? `<button type="button" class="btn btn-sm btn-outline-success" data-index-start="${App.escAttr(r.key)}">
+                       <i class="bi bi-play-fill"></i> ${i18n('settings.indexResume')}</button>`
+                : (done ? '' : `<button type="button" class="btn btn-sm btn-outline-danger" data-index-stop="${App.escAttr(r.key)}">
+                       <i class="bi bi-stop-fill"></i> ${i18n('settings.indexStop')}</button>`);
+            return `<div class="d-flex align-items-center gap-2 small py-1">
+                <span class="text-truncate flex-grow-1" title="${App.escAttr(r.root)}">
+                    ${running ? '<span class="spinner-border spinner-border-sm me-1"></span>' : ''}
+                    <code>${App.esc(r.root)}</code> — ${App.esc(label)}
+                    ${r.error ? `<span class="text-danger" title="${App.escAttr(r.error)}">
+                        <i class="bi bi-exclamation-triangle"></i></span>` : ''}
+                </span>
+                ${!done && r.total ? `<div class="progress flex-shrink-0" style="width:80px;height:6px">
+                    <div class="progress-bar" style="width:${pct}%"></div></div>` : ''}
+                ${btn}
+            </div>`;
+        }).join('');
+
+        box.innerHTML = `<div class="border rounded p-2">
+            <div class="small text-secondary mb-1">${i18n('settings.indexTitle')}</div>${rows}</div>`;
+
+        box.querySelectorAll('[data-index-stop]').forEach(b => {
+            b.onclick = () => this.indexAction(b.dataset.indexStop, 'stop');
+        });
+        box.querySelectorAll('[data-index-start]').forEach(b => {
+            b.onclick = () => this.indexAction(b.dataset.indexStart, 'start');
+        });
+
+        // Poll only while something is actually moving, and STOP when it is
+        // not: setPageInterval replaces the timer but never cancels it, so
+        // simply not re-arming would leave the previous one polling forever
+        // on a page that has nothing left to say.
+        if (st.roots.some(r => r.state === 'running' || r.state === 'queued')) {
+            App.setPageInterval(() => this.renderIndexStatus(), 3000);
+        } else {
+            clearInterval(App.pageInterval);
+        }
+    },
+
+    async indexAction(key, action) {
+        try {
+            await App.api('POST', `/index/${encodeURIComponent(key)}/${action}`);
+        } catch (err) {
+            App.toast(err.message, 'danger');
+        }
+        this.renderIndexStatus();
+    },
+
+    /** State of the debug trace, under its switch.
+
+     * Only exceptional state is drawn: with tracing off the box says nothing
+     * at all. With it on it must say WHERE the file is and HOW BIG it has got,
+     * because what is accumulating there is the full text of every
+     * conversation — and it offers the one click that removes it.
+     */
+    async renderDebugBox() {
+        const box = document.getElementById('debug-box');
+        const sw = document.getElementById('f-debug');
+        if (!box || !sw) return;                 // navigated away mid-fetch
+        let st = null;
+        try { st = await App.api('GET', '/system/debug'); } catch (e) { /* older server */ }
+        if (!st) { box.innerHTML = ''; return; }
+
+        sw.checked = st.enabled;
+        const files = (st.files || []).filter(f => st.enabled || f.size);
+        // Drawn when tracing is on, and ALSO when it is off but a file is still
+        // there: that is the state where something has to say "there is a
+        // transcript of your conversations on disk" and offer the delete.
+        if (!files.length) { box.innerHTML = ''; return; }
+
+        box.innerHTML = `<div class="border rounded p-2 small">${files.map(f => `
+            <div class="d-flex align-items-center gap-2 py-1">
+                <span class="badge text-bg-secondary">${App.esc(i18n('settings.debugFile.' + f.key))}</span>
+                <code class="text-truncate flex-grow-1">${App.esc(f.path)}</code>
+                <span class="text-secondary">${App.esc(this.humanSize(f.size))}</span>
+                <button type="button" class="btn btn-sm btn-outline-secondary"
+                        data-debug-view="${App.escAttr(f.key)}">
+                    <i class="bi bi-eye"></i> ${i18n('settings.debugView')}</button>
+                <button type="button" class="btn btn-sm btn-outline-danger"
+                        data-debug-clear="${App.escAttr(f.key)}">
+                    <i class="bi bi-trash"></i></button>
+            </div>`).join('')}
+            <pre id="debug-tail" class="mt-2 mb-0 d-none" style="max-height:40vh;overflow:auto"></pre>
+        </div>`;
+
+        box.querySelectorAll('[data-debug-view]').forEach(b => {
+            b.onclick = async () => {
+                const pre = document.getElementById('debug-tail');
+                const key = b.dataset.debugView;
+                if (!pre.classList.contains('d-none') && pre.dataset.key === key) {
+                    pre.classList.add('d-none'); return;
+                }
+                try {
+                    const r = await App.api('GET',
+                        `/system/debug/log/${encodeURIComponent(key)}?tail=400`);
+                    // textContent, never innerHTML: these files hold whatever
+                    // the user and the model wrote, markup included.
+                    pre.textContent = r.lines.join('\n') || i18n('settings.debugEmpty');
+                    pre.dataset.key = key;
+                    pre.classList.remove('d-none');
+                    pre.scrollTop = pre.scrollHeight;
+                } catch (err) { App.toast(err.message, 'danger'); }
+            };
+        });
+        box.querySelectorAll('[data-debug-clear]').forEach(b => {
+            b.onclick = async () => {
+                if (!confirm(i18n('settings.debugConfirmClear'))) return;
+                try {
+                    await App.api('DELETE',
+                        `/system/debug/log/${encodeURIComponent(b.dataset.debugClear)}`);
+                    App.toast(i18n('settings.debugCleared'));
+                } catch (err) { App.toast(err.message, 'danger'); }
+                this.renderDebugBox();
+            };
+        });
+    },
+
+    humanSize(n) {
+        if (!n) return '0 B';
+        const u = ['B', 'KB', 'MB', 'GB'];
+        const i = Math.min(u.length - 1, Math.floor(Math.log(n) / Math.log(1024)));
+        return `${(n / Math.pow(1024, i)).toFixed(i ? 1 : 0)} ${u[i]}`;
     },
 
     /** The API-key box. Re-rendered from the server's answer after every

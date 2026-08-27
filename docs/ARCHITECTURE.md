@@ -55,7 +55,9 @@ connectors/            # optional Telegram plugin: source only, NOT deployed
    to an external subprocess or an internal Python handler.
 
 SSE events emitted: `token`, `reasoning`, `tool_start`, `tool_result`,
-`clear_tokens`, `error`, `done` (plus `stopped` from the live-run manager),
+`clear_tokens`, `notice`, `agent` (Auto mode: the resolved agent id, sent before
+the first token so the UI can label the bubble immediately), `error`, `done`
+(plus `stopped` from the live-run manager),
 and `agent_event` — a delegated sub-agent's live activity, wrapped as
 `{"path": ["agent", "ids"], "event": {inner event}}`. The `path` is the
 delegation chain seen from the top level and is *flattened*: each delegation
@@ -729,7 +731,7 @@ never re-derives them from `$HOME`:
 | `~/myagent/autonomy/` | `MYAGENT_AUTONOMY` | live agents' runtime state: `<agent_id>/state.json` (the schedule itself lives in `config/tasks/`) |
 | `~/myagent/connectors/` | `MYAGENT_CONNECTORS_DIR` | connectors *plugin* state: bot bindings (0600), grants, contacts, kill switch |
 | `~/myagent/plugins/` | `MYAGENT_PLUGINS` | installed plugins (code, replaceable — state never lives here) |
-| `~/myagent/logs/` | `MYAGENT_DEBUG_FILE` | `debug.log` when `MYAGENT_DEBUG=1` |
+| `~/myagent/logs/` | `MYAGENT_DEBUG_FILE` | `debug.log` (turn narrative) + `api.log` (every model call), when the debug trace is on in Settings |
 
 On first run, if `~/myagent/config` (or `~/myagent/tools`) doesn't exist,
 it is seeded by copying the bundled defaults; existing data is never

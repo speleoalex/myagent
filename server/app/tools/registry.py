@@ -341,6 +341,30 @@ class ToolRegistry:
         self._scan()
         return self._user_dirs.get(tool_id)
 
+    def tool_dir(self, tool_id: str) -> Path | None:
+        """Where a tool's folder actually IS — the user's copy-on-write copy
+        when there is one, the bundle otherwise.
+
+        Exists so a core service can run a script that ships WITH a tool
+        (IndexService runs local_search's semindex.py) without importing from
+        the tools layer: an import would bind one copy forever and silently
+        ignore the user's override.
+        """
+        if tool_id not in self._cache:
+            self._scan()
+        return self._dirs.get(tool_id)
+
+    def tool_env_for_index(self) -> dict[str, str]:
+        """The install-wide tool environment, for a background run that has no
+        agent behind it. Only the resolved paths — an indexer needs no
+        per-agent context, and MYAGENT_EMBED_* is added by the caller."""
+        env = dict(self._tool_env)
+        if self._app_dir is not None:
+            env["MYAGENT_APP_DIR"] = str(self._app_dir)
+        if self._workdir is not None:
+            env["MYAGENT_WORKSPACE"] = str(self._workdir)
+        return env
+
     def is_modified(self, tool_id: str) -> bool:
         """True when a native tool's override actually differs from the
         bundled original (parsed tool.json + run script bytes — vendored
@@ -550,11 +574,23 @@ class ToolRegistry:
                 kwargs = {k: v for k, v in kwargs.items() if k in params}
             return await handler(**kwargs)
 
-        # External tool: run executable via subprocess
-        return await self._execute_external(tool_id, arguments, meta)
+        # External tool: run executable via subprocess. The executor handle is
+        # NOT forwarded (a subprocess cannot use it) — what travels is the
+        # per-agent environment it resolves, so the registry never has to know
+        # the Agent model.
+        ex = extra.get("executor")
+        env_extra = {}
+        if ex is not None:
+            try:
+                env_extra = ex.tool_env_overrides() or {}
+            except Exception:
+                log.exception("tool_env_overrides failed; running with the "
+                              "install-wide environment")
+        return await self._execute_external(tool_id, arguments, meta, env_extra)
 
     async def _execute_external(
-        self, tool_id: str, arguments: dict, meta: dict
+        self, tool_id: str, arguments: dict, meta: dict,
+        env_extra: dict[str, str] | None = None,
     ) -> str:
         tool_dir = self._dirs.get(tool_id, self._tools_dir / tool_id)
         run_path = tool_dir / "run"
@@ -575,7 +611,9 @@ class ToolRegistry:
         # launched by absolute path, so cwd doesn't affect finding it; Node
         # tools resolve node_modules via __dirname, not cwd.
         cwd = tool_dir
-        env = {**os.environ, **self._tool_env}
+        # Order: process env < install-wide resolved paths < per-agent. Only
+        # the last one varies between two calls of the same tool.
+        env = {**os.environ, **self._tool_env, **(env_extra or {})}
         if self._app_dir is not None:
             env["MYAGENT_APP_DIR"] = str(self._app_dir)
         if self._workdir is not None:

@@ -47,7 +47,8 @@ dimmed card — one click on *Import* adds it.
 **Don't want to pick an agent yourself?** The chat's agent selector has an
 **Auto** entry: every message is first classified (one short LLM call over the
 agent directory) and routed to the agent best suited to answer it — a small
-"via *agent*" label under each answer says who that was. Follow-ups stick: a
+"via *agent*" label at the top of each answer, shown as soon as the answer
+starts, says who that was. Follow-ups stick: a
 message like "try again" or "more detail" goes back to the agent that just
 answered. When the classifier can't decide, the chat's last-used agent answers
 instead, and a notice above the answer says so. Auto respects the same opt-out as delegation: agents with
@@ -73,6 +74,78 @@ Some grants are managed rather than picked: the three memory tools follow the
 single *memory* switch, and `call_agent` follows *can delegate*. The autonomy
 tools stay individually selectable, because `autonomy_control` is genuinely
 useful with `live` off.
+
+### Working folder
+
+*General → Working folder* points an agent at one directory. It becomes the
+default root of the search tools, so `local_search` and `local_read` look there
+instead of the shared library whenever a call passes no `path` — and the agent
+stops having to repeat that path in its prompt, where a small model has to copy
+it correctly on every call and hand the very same one back to `local_read` or
+the result id will not open.
+
+Simplifying such a prompt afterwards, **remove the path and nothing else**.
+Measured on a 4B model against a folder of service manuals: deleting the path
+alone kept the search working 3 times out of 3, while a broader rewrite of the
+same prompt — same folder, same question — stopped the agent calling any tool
+at all and left it answering from its own memory with an invented source.
+
+The agent also carries what its own tools returned earlier in the chat into
+the next turn's prompt, so a follow-up ("is there a report too?", "show it to
+me") is answered from what it FOUND rather than from what it once said. That
+covers the recall; it does not replace the instruction to search again, which
+is what gets fresh facts.
+
+In particular, keep whatever tells the agent **when** to search. A prompt that
+only says "never invent" describes the answer, not the procedure: a small model
+reads it, answers the first question correctly from a search, and then handles
+the follow-ups from its own previous replies — confidently, and eventually
+contradicting itself. A line as plain as *"your FIRST action is always
+local_search, at every message, even for a follow-up"* is what puts the tool
+call back.
+
+The scope stops at searching. It does not change where `file_write` writes, nor
+the tools' working directory, both of which stay on the workspace. And a folder
+that does not exist is an error, never a silent fall back to the library — an
+agent pointed at a drive you unplugged tells you so.
+
+### Writing a description that routes
+
+An agent's `description` is not a label: it is the **routing key**. In Auto mode
+a classifier picks the agent from these one-liners alone, and when `master`
+delegates it reads the same list. Everything measured on a 4B model against a
+real installation:
+
+- **Say what SUBJECT it covers, in the words the user will use.** "Esperto di
+  salute" loses "quando era la visita cardiologica?" to the general library
+  agent; naming the actual nouns — *referti, esami, analisi, ricette,
+  prenotazioni, date delle visite* — wins it. 5/7 → 7/7.
+- **Say whose material it is** when that is the distinction. Between an agent
+  holding the user's medical records and one holding an encyclopedia, the word
+  that separates them is *PERSONALI*, not *mediche*.
+- **A negative half is often the load-bearing one.** "Non conoscenza medica
+  generale" is what stops a health-records agent from being handed "che cos'è
+  l'ipertensione?", the same way `master`'s prompt has to say coder is "not
+  'sysadmin', which is for one-shot commands".
+- **Do not write instructions to the router.** A description saying "you MUST
+  use this agent for…" is a megaphone: the bundled `librarian` carried 553
+  characters of it against 63 for a user's own agent, and won questions that
+  were not its own. Routing rules belong in `master`'s prompt, which is where
+  they already are.
+- **The id does not do this work.** Renaming an agent to smuggle a keyword into
+  its id changes nothing measurable — the classifier reads the description.
+- **After cloning, rewrite the description first.** A clone inherits it
+  verbatim, so two agents end up describing the same subject and the router
+  picks between them by coin-flip.
+
+### Cloning
+
+Every agent card has a **Clone** button. It opens the form filled in from that
+agent with the id and name blank, so you review the copy before it exists and
+name it yourself. Long-term memory, scheduled tasks and autonomous state are
+keyed by agent id and stay with the original, and the clone is always created
+with *live* off — otherwise it would immediately start waking up to run
+somebody else's schedule.
 
 ## Local devices & home automation
 
