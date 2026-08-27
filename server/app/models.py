@@ -446,14 +446,19 @@ class ChatResponse(BaseModel):
 
 class Settings(BaseModel):
     default_model_id: str | None = None
-    # Which registered model provides embeddings for the semantic index.
-    # None = no semantic search: local_search does exactly what it always did.
+    # Where embeddings for the semantic index come from. Two accepted values:
+    # the id of a registered model (queried over its /v1/embeddings endpoint),
+    # or the reserved id "local" — in-process via fastembed, no endpoint and
+    # nothing to register. None = no semantic search: local_search does exactly
+    # what it always did, even with fastembed installed (nothing is chosen
+    # automatically; see app.engine.embedding for why).
     #
-    # It must name a LOCAL model, and that is enforced where the value is USED
+    # A named model must be LOCAL, and that is enforced where the value is USED
     # (AgentExecutor.tool_env_overrides) as well as on save. Indexing sends the
     # CONTENT of every document to the endpoint — not the query, the corpus —
     # so a remote embedder would ship the user's whole library off the machine
-    # on an app whose whole point is working offline.
+    # on an app whose whole point is working offline. "local" needs no such
+    # policing: it cannot reach a network.
     embedding_model_id: str | None = None
     ollama_base_url: str = "http://localhost:11434"
     llamacpp_base_url: str = "http://localhost:8080"

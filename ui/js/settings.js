@@ -7,6 +7,13 @@ const SettingsPage = {
         try { models = await App.api('GET', '/models'); } catch (e) { /* empty */ }
         // Only a LOCAL model can embed — see the select below for why.
         const localModels = models.filter(m => m.provider === 'ollama' || m.provider === 'llamacpp');
+        // Whether the in-process embedder can be offered at all. Asked here
+        // rather than in renderIndexStatus because the answer decides whether
+        // an <option> exists: offering one that can only answer 400 is the
+        // inert-button anti-pattern the PWA box already avoids.
+        let idx = null;
+        try { idx = await App.api('GET', '/index/status'); } catch (e) { /* no service */ }
+        const localEmbed = !!(idx && idx.local_available);
 
         App.container.innerHTML = `
             <div class="row">
@@ -67,12 +74,21 @@ const SettingsPage = {
                                  remote models here would only offer a 400. -->
                             <select class="form-select" id="f-embedding-model">
                                 <option value="">${i18n('settings.noEmbeddingModel')}</option>
+                                <!-- The in-process backend goes FIRST: it needs
+                                     no server, no pulled model and no registered
+                                     config, so it is the one most people want.
+                                     Listed only when fastembed is importable. -->
+                                ${localEmbed ? `<option value="local" ${settings.embedding_model_id === 'local' ? 'selected' : ''}>${App.esc(i18n('settings.embeddingLocal'))}</option>` : ''}
                                 ${localModels.map(m => `<option value="${App.escAttr(m.id)}" ${m.id === settings.embedding_model_id ? 'selected' : ''}>${App.esc(m.name)} (${App.esc(m.provider)})</option>`).join('')}
                             </select>
                             <small class="text-secondary">${i18n('settings.embeddingModelHint')}</small>
                             <div id="index-rebuild-warn" class="form-text text-warning-emphasis d-none">
                                 <i class="bi bi-exclamation-triangle"></i> ${i18n('settings.embeddingModelChanged')}
                             </div>
+                            ${localEmbed ? '' : `<div class="form-text">
+                                <i class="bi bi-info-circle"></i> ${i18n('settings.embeddingLocalHint')}
+                                <code>server/.venv/bin/pip install fastembed</code>
+                            </div>`}
                             ${localModels.length ? '' : `<div class="form-text">
                                 <i class="bi bi-info-circle"></i> ${i18n('settings.noEmbeddingModelHint')}
                                 <code>ollama pull embeddinggemma:300m</code>
@@ -249,8 +265,13 @@ const SettingsPage = {
             </div>`;
         }).join('');
 
+        // Name the backend next to the title. "Indexing" over an endpoint and
+        // "indexing" in this process answer two different support questions —
+        // "why is my model server busy" versus "why is my CPU busy" — and the
+        // user cannot tell which one is happening from the progress bar.
+        const where = st.backend === 'local' ? i18n('settings.indexLocal') : '';
         box.innerHTML = `<div class="border rounded p-2">
-            <div class="small text-secondary mb-1">${i18n('settings.indexTitle')}</div>${rows}</div>`;
+            <div class="small text-secondary mb-1">${i18n('settings.indexTitle')}${where ? ` <span class="badge text-bg-light fw-normal">${App.esc(where)}</span>` : ''}</div>${rows}</div>`;
 
         box.querySelectorAll('[data-index-stop]').forEach(b => {
             b.onclick = () => this.indexAction(b.dataset.indexStop, 'stop');

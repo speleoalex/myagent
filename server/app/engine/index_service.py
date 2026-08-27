@@ -192,13 +192,22 @@ class IndexService:
         # The SAME embedder the search tools query with (app.engine.embedding
         # owns that rule, local-only included): building an index with one
         # model and querying it with another produces noise, silently.
-        env = {**os.environ, **self.registry.tool_env_for_index(),
-               **resolve_embed_env(self.models_store)}
-        if not env.get("MYAGENT_EMBED_URL"):
+        embed_env = resolve_embed_env(self.models_store)
+        env = {**os.environ, **self.registry.tool_env_for_index(), **embed_env}
+        if not embed_env:
             log.info("no embedding model configured; dropping index request "
                      "for %s", root)
             req.unlink(missing_ok=True)
             return
+        # Which backend was chosen is resolve_embed_env's business, but ONE
+        # thing has to be undone here: this process may itself have been
+        # started with MYAGENT_EMBED_URL in its environment (a drop-in, a
+        # container), and `{**os.environ, **embed_env}` would leave it in place
+        # next to MYAGENT_EMBED_LOCAL — where embedder_from_env prefers the
+        # endpoint and would silently index with the wrong model.
+        if "MYAGENT_EMBED_LOCAL" in embed_env:
+            env.pop("MYAGENT_EMBED_URL", None)
+            env.pop("MYAGENT_EMBED_MODEL", None)
         try:
             self._proc = await asyncio.create_subprocess_exec(
                 *cmd, stdout=asyncio.subprocess.PIPE,

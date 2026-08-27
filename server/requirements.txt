@@ -6,3 +6,8 @@ httpx>=0.27.0
 
 # Optional, per-tool (not required by the core app):
 #   libzim>=3.4.0   # only for the `library/*` tools (offline ZIM knowledge base)
+#   numpy           # scores the optional semantic index
+#   fastembed       # optional IN-PROCESS embeddings for that index: no endpoint
+#                   # and nothing to register. 8 packages, no torch — against 82
+#                   # (15 of them nvidia wheels) for sentence-transformers.
+#                   # install.sh OFFERS it, because its model is a 241 MB fetch.

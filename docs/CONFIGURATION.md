@@ -41,12 +41,24 @@ with [`library/fetch.py`](../library/README.md).
 
 Choosing an *embedding model* in Settings turns on vector search over your own
 documents, alongside the keyword search that is always there. Without one,
-nothing changes.
+nothing changes — including when the optional package below is installed:
+nothing is switched on for you.
 
-- **Local models only.** Indexing sends the CONTENTS of your documents to the
-  embedding endpoint — not just your question — so a remote provider is
+There are two ways to provide the embeddings.
+
+| Option | What it needs |
+|---|---|
+| **In this process** (recommended) | the optional `fastembed` package: `server/.venv/bin/pip install fastembed`, then pick *In this process* in Settings. No server, no model to pull, no model to register. The first index run downloads a 241 MB multilingual model into `~/myagent/cache/embed-models/`; `install.sh` offers to fetch it up front. |
+| **An embedding endpoint** | a local embedding model pulled and registered under *Models* (e.g. `ollama pull embeddinggemma:300m`), then picked in Settings. Use this when you already run one, or want a specific model. |
+
+- **Nothing leaves this machine.** Indexing sends the CONTENTS of your
+  documents to the embedder — not just your question — so a remote provider is
   refused, both by the settings form and by the server when it exports the
-  endpoint to the tools.
+  choice to the tools. The in-process option cannot leak by construction: there
+  is no endpoint.
+- **A search never downloads the model.** Only a background index run may, so a
+  cold cache costs an empty semantic bucket rather than a 241 MB fetch inside a
+  tool call with a 30-second timeout.
 - **The index lives in `~/myagent/cache/index/`**, one SQLite database per
   indexed folder, named by that folder's path. It is derived data: deleting it
   costs a rebuild, never information. Changing the embedding model discards
@@ -54,10 +66,19 @@ nothing changes.
 - **Building happens in the background**, one folder at a time, and only after
   a search over an unindexed folder asks for it. Settings shows the progress
   and offers a Stop button.
-- **Known limit:** if the embedding model and the chat model are served by the
-  same backend with `OLLAMA_NUM_PARALLEL=1`, their requests serialize and the
-  assistant feels slower while an index builds. Indexing is throttled and
-  niced to soften this, but stopping it from Settings is the real remedy.
+- **Known limit (endpoint option only):** if the embedding model and the chat
+  model are served by the same backend with `OLLAMA_NUM_PARALLEL=1`, their
+  requests serialize and the assistant feels slower while an index builds.
+  Indexing is throttled and niced to soften this, but stopping it from Settings
+  is the real remedy. The in-process option does not contend for the model
+  server at all — it costs CPU instead, which `nice` handles.
+
+Extra environment variables, both optional:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `MYAGENT_EMBED_CACHE` | `$MYAGENT_CACHE/embed-models` | where the in-process embedder keeps its model files |
+| `MYAGENT_EMBED_LOCAL` | unset | passed to the tools by the server; set by hand only to run `semindex.py` from a terminal. A model name, or `1` for the default |
 
 
 ## Debug trace

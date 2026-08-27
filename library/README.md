@@ -43,11 +43,33 @@ file live side by side:
 
 With an **embedding model** chosen in Settings, your documents and PDFs are also
 matched by MEANING — which is what makes an Italian question find an answer in
-an English manual. It is opt-in and additive: the keyword results are exactly
-what they were, with the semantic ones merged in beside them, and the ZIM
-archives are left alone (they already have a full-text index; embedding
-millions of encyclopedia articles buys nothing). The index builds in the
-background the first time you search a folder, and Settings shows its progress.
+an English manual. Measured on a folder of Mitsubishi service manuals: the
+query *"pressione olio motore"* returns, in second place, the English page
+titled `INSTALLATION OF OIL PRESSURE SWITCH`; keyword search alone puts *tyre*
+pressure from an unrelated magazine article there instead.
+
+It is opt-in and additive: the keyword results are exactly what they were, with
+the semantic ones merged in beside them, and the ZIM archives are left alone
+(they already have a full-text index; embedding millions of encyclopedia
+articles buys nothing). The index builds in the background the first time you
+search a folder, and Settings shows its progress.
+
+The simplest way to switch it on needs no model server and nothing registered —
+install the optional in-process embedder and pick it:
+
+```bash
+server/.venv/bin/pip install fastembed     # 8 packages, no torch
+# then: Settings -> Embedding model -> "In this process"
+```
+
+To check the quality yourself on your own folder (this is the manual test the
+automated ones deliberately skip, because it needs the 241 MB model):
+
+```bash
+S=server/tools/library/local_search/semindex.py
+server/.venv/bin/python $S --root ~/myagent/library --index  --embed-local
+server/.venv/bin/python $S --root ~/myagent/library --query "your question" --embed-local
+```
 
 Searching happens in **two steps**, so an agent pays only for the text it
 actually wants: `local_search` returns a compact list (`id | title | snippet`),

@@ -28,10 +28,13 @@
 #
 # Runtime state (config, tools, sessions, library, ...) always lives under the
 # service user's ~/myagent (MYAGENT_HOME), outside the code, so re-running this
-# script is safe. Optional dependencies fall in three kinds, handled differently
-# ON PURPOSE: what goes in our own venv (libzim) is just installed; system
-# packages (poppler, tesseract, ffmpeg, Node) are OFFERED with the exact command
-# printed; library CONTENT (the .zim archives) is never downloaded here.
+# script is safe. Optional dependencies are handled differently ON PURPOSE, and
+# the rule is what the install COSTS the user, not where it lands: things that
+# merely complete our own installation (libzim, numpy) are just installed; things
+# that change the machine (poppler, tesseract, ffmpeg, Node — root) or pull
+# hundreds of MB over the network (fastembed and its model) are OFFERED with the
+# exact command printed; library CONTENT (the .zim archives) is never downloaded
+# here at all.
 set -e
 
 SERVICE_NAME="myagent"
@@ -272,6 +275,66 @@ if ! "$VENV/bin/python" -c "import numpy" >/dev/null 2>&1; then
     if ! "$VENV/bin/pip" install -q numpy; then
         echo "  numpy could not be installed — semantic search stays disabled"
         echo "  (keyword search is unaffected). Retry: $VENV/bin/pip install numpy"
+    fi
+fi
+
+# fastembed: embeddings computed IN THIS PROCESS, so semantic search needs no
+# endpoint, no pulled model and no registered config — one dropdown entry in
+# Settings and it works. OFFERED rather than installed, unlike libzim and numpy
+# above, for one reason: the model is a 241 MB download from Hugging Face on
+# first use. Deciding to spend that (and the disk, and the CPU that indexing
+# costs) is the user's, not ours — and an install that reaches out to a model
+# host unasked would be a strange thing on an app that sells itself on working
+# offline.
+#
+# 8 packages, no torch and no CUDA. The obvious alternative,
+# sentence-transformers (what the doc_indexer project uses), resolves to 82
+# packages including 15 nvidia wheels: measured, not assumed.
+FASTEMBED_MODEL="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+if "$VENV/bin/python" -c "import fastembed" >/dev/null 2>&1; then
+    echo "  fastembed already present (in-process embeddings)."
+else
+    echo "  Semantic search can embed in-process, with nothing to configure."
+    echo "  It needs the optional 'fastembed' package (8 packages, no torch)."
+    if ask "Install fastembed?"; then
+        if "$VENV/bin/pip" install -q fastembed; then
+            echo "  Installed. Choose 'In this process' under Settings -> Embedding model."
+        else
+            echo "  fastembed could not be installed — semantic search can still use"
+            echo "  a local embedding endpoint. Retry: $VENV/bin/pip install fastembed"
+        fi
+    else
+        echo "  Skipped. Later: $VENV/bin/pip install fastembed"
+    fi
+fi
+
+# The model download, asked SEPARATELY from the package: someone may well want
+# the code without 241 MB right now, and getting it out of the way here is only
+# a convenience — the first index run downloads it anyway, in the background,
+# under a service that throttles, nices and can be stopped. Runs as the service
+# user so the cache lands in the right home, and never as a hard failure.
+if "$VENV/bin/python" -c "import fastembed" >/dev/null 2>&1; then
+    SEMINDEX="$INSTALL_DIR/server/tools/library/local_search/semindex.py"
+    if ask "Download the embedding model now (241 MB)?"; then
+        echo "  Fetching $FASTEMBED_MODEL ..."
+        # As the SERVICE user and with its MYAGENT_HOME: under `sudo ./install.sh`
+        # $HOME is /root, and a cache written there is one the service cannot
+        # read — the same trap the library report already works around. --root
+        # is required by the CLI but unused by --prefetch.
+        PREFETCH_OK=1
+        if [ "$RUN_USER" != "$(id -un)" ]; then
+            sudo -u "$RUN_USER" MYAGENT_HOME="$STATE_HOME" \
+                "$VENV/bin/python" "$SEMINDEX" --root "$INSTALL_DIR" \
+                --prefetch --embed-local "$FASTEMBED_MODEL" || PREFETCH_OK=""
+        else
+            MYAGENT_HOME="$STATE_HOME" \
+                "$VENV/bin/python" "$SEMINDEX" --root "$INSTALL_DIR" \
+                --prefetch --embed-local "$FASTEMBED_MODEL" || PREFETCH_OK=""
+        fi
+        [ -n "$PREFETCH_OK" ] || \
+            echo "  Could not fetch it now — the first index run will try again."
+    else
+        echo "  Skipped: the first semantic search downloads it in the background."
     fi
 fi
 
@@ -706,13 +769,18 @@ else
 fi
 
 # Semantic search needs numpy AND an embedding model the user has to choose;
-# naming only what is actually missing keeps the line actionable.
+# naming only what is actually missing keeps the line actionable — the flat
+# "needs numpy + a model" version sent people to install numpy they already had.
 if ! "$VENV/bin/python" -c "import numpy" >/dev/null 2>&1; then
     echo "  [--] semantic search      (numpy missing: $VENV/bin/pip install numpy)"
+elif "$VENV/bin/python" -c "import fastembed" >/dev/null 2>&1; then
+    echo "  [--] semantic search      (ready: pick 'In this process' under"
+    echo "                             Settings -> Embedding model)"
 else
-    echo "  [--] semantic search      (optional: pull a local embedding model,"
-    echo "                             e.g. ollama pull embeddinggemma:300m,"
-    echo "                             then pick it in Settings)"
+    echo "  [--] semantic search      (optional: $VENV/bin/pip install fastembed,"
+    echo "                             or pull a local embedding model such as"
+    echo "                             ollama pull embeddinggemma:300m, then"
+    echo "                             pick it in Settings)"
 fi
 
 echo ""

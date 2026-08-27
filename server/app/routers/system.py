@@ -92,10 +92,23 @@ async def update_settings(new_settings: Settings, request: Request):
     emb = new_settings.embedding_model_id
     if emb:
         raw = request.app.state.stores.models.get(emb) or {}
-        if not raw:
+        if emb == embedding.LOCAL_ID and not raw:
+            # The in-process backend: nothing to validate about a model that
+            # does not exist as a config, but refuse if the package is missing
+            # rather than accept a setting that can only ever do nothing.
+            if not embedding.local_available():
+                raise HTTPException(
+                    status_code=400,
+                    detail=("In-process embeddings need the optional "
+                            "`fastembed` package. Install it with "
+                            "`server/.venv/bin/pip install fastembed` (or "
+                            "re-run install.sh and accept the optional "
+                            "dependencies), then choose it again."))
+            raw = None
+        elif not raw:
             raise HTTPException(status_code=400,
                                 detail=f"Unknown model '{emb}'")
-        why = embedding.rejection_reason(raw)
+        why = embedding.rejection_reason(raw) if raw else ""
         if why:
             raise HTTPException(
                 status_code=400,

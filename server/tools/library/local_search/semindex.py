@@ -2,13 +2,21 @@
 """Semantic (vector) index over a folder of documents — standalone.
 
 Deliberately independent of MyAgent: stdlib sqlite3 + urllib only, numpy as an
-optional accelerator, and NOTHING imported from the server. It talks to any
-OpenAI-compatible ``/v1/embeddings`` endpoint, so a different search tool can
-reuse it as-is, and it runs from a bare terminal:
+optional accelerator, and NOTHING imported from the server. It runs from a bare
+terminal and takes its vectors from either of two backends:
 
-    python semindex.py --root DIR --index [--ocr]
+    # an OpenAI-compatible /v1/embeddings endpoint (llama.cpp, Ollama, ...)
+    python semindex.py --root DIR --index --embed-url URL --embed-model NAME
+    # or in this very process, via fastembed — no server, nothing to configure
+    python semindex.py --root DIR --index --embed-local
     python semindex.py --root DIR --query "clutch bolt torque"
     python semindex.py --root DIR --stats
+
+The two are interchangeable behind ``embedder_from_env()`` and differ in one
+way that matters: the local one cannot leak. Indexing sends the CONTENT of
+every document to the embedder — the corpus, not the query — which is why the
+HTTP side has to be *policed* (only local providers, see
+``app.engine.embedding``) while the in-process side is safe by construction.
 
 THE CALLBACK IS THE POINT. ``sync()`` takes ``read_chunks(path, rel)`` and knows
 nothing about PDFs, Markdown or ZIM archives — only about sqlite, vectors and
@@ -71,6 +79,21 @@ PDF_EXTS = {".pdf"}
 # root would embed forever without ever reporting that it is not finished.
 MAX_INDEX_FILES = 20_000
 HTTP_TIMEOUT = 120
+# The in-process embedder's default model. Multilingual on purpose: this index
+# exists for a library that mixes Italian notes with English service manuals,
+# and a monolingual model turns "coppia di serraggio" over an English manual
+# into no answer at all — the exact failure local_search already fights with
+# query relaxation. Measured (fastembed 0.8, this model): an Italian query
+# scores 0.60 against the equivalent ENGLISH sentence and 0.11 against an
+# unrelated one, so the cross-language hit is real and not noise.
+#
+# 384 dimensions and 241 MB on disk, against 1.0 GB for the mpnet sibling
+# doc_indexer uses: at this corpus size the recall difference does not pay for
+# a download four times bigger on a machine that may be a laptop.
+DEFAULT_LOCAL_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+# Bigger than the HTTP batch: there is no request per batch to amortise, and
+# onnxruntime is faster with more rows. Measured ~540 chunks/s on this CPU.
+DEFAULT_LOCAL_BATCH = 64
 
 try:                                            # optional, and checked for
     import numpy as _np
@@ -119,7 +142,7 @@ def request_index(root, ocr=None, cache_dir=None):
     their back, and any failure here is silent — a search must never fail
     because of bookkeeping.
     """
-    if Embedder.from_env() is None:
+    if embedder_from_env() is None:
         return False
     req = request_path_for(root, cache_dir)
     try:
@@ -203,6 +226,142 @@ class Embedder:
         # costs nothing and protects against one that reorders.
         rows.sort(key=lambda d: d.get("index", 0))
         return [d["embedding"] for d in rows]
+
+
+def embed_cache_dir():
+    """Where the in-process embedder keeps its model files.
+
+    Under the cache and not the config dir: it is derived data, it is large,
+    and deleting it must be safe — the next index run downloads it again.
+    """
+    return os.environ.get("MYAGENT_EMBED_CACHE") or os.path.join(
+        os.environ.get("MYAGENT_CACHE") or os.path.join(myagent_home(), "cache"),
+        "embed-models")
+
+
+class LocalEmbedder:
+    """An embedding model running IN THIS PROCESS, via fastembed (onnxruntime).
+
+    The point is not speed, it is that there is nothing to configure and
+    nothing to leak: no endpoint, no registered model, no second server to keep
+    running, and the corpus never leaves the machine — so the local-only rule
+    that ``app.engine.embedding`` has to *enforce* for the HTTP backend holds
+    here by construction.
+
+    Two properties make it safe to reach for from a search path:
+
+    - **Nothing happens until ``encode()``.** Constructing this object does not
+      import fastembed, create an ONNX session or touch the network. Measured:
+      0.00s with a warm cache, because ``open_index()`` builds an embedder just
+      to answer "is semantic search on?" and must not pay for a model to do it.
+    - **A search may never download.** With ``allow_download`` false we set
+      ``HF_HUB_OFFLINE``, so a missing model raises in ~1s instead of pulling
+      241 MB inside a tool with a 30s timeout. Only an index run — background,
+      niced, throttled, stoppable, and retried on failure — is allowed to
+      fetch it. The gate is the library's own offline switch rather than a
+      guess at its cache layout, which would rot the moment fastembed
+      reorganised it.
+    """
+
+    def __init__(self, name=None, cache_dir=None, batch=DEFAULT_LOCAL_BATCH,
+                 throttle_ms=0, allow_download=False):
+        self.name = name or DEFAULT_LOCAL_MODEL
+        # The invalidation key, read by SemanticIndex._check_model_name. The
+        # prefix is load-bearing: `nomic-embed-text` served over HTTP and the
+        # same weights run locally are not guaranteed to agree (pooling,
+        # quantisation), and a silently mixed index answers worse than none.
+        self.model = f"fastembed:{self.name}"
+        self.cache_dir = cache_dir or embed_cache_dir()
+        self.batch = max(1, int(batch or DEFAULT_LOCAL_BATCH))
+        self.throttle_ms = max(0, int(throttle_ms or 0))
+        self.allow_download = bool(allow_download)
+        self._impl = None
+
+    @staticmethod
+    def available():
+        """True if fastembed can be imported — WITHOUT importing it.
+
+        importlib.find_spec costs a stat; importing fastembed pulls onnxruntime
+        and tokenizers, which is far too much for a question the server answers
+        on every settings page load.
+        """
+        try:
+            import importlib.util
+            return importlib.util.find_spec("fastembed") is not None
+        except Exception:                              # pragma: no cover
+            return False
+
+    @classmethod
+    def from_env(cls, allow_download=False, **kw):
+        """The local embedder the server asked for, or None.
+
+        ``MYAGENT_EMBED_LOCAL`` carries the model name, or a bare truthy value
+        to mean "the default one". Absent = off: an installed package is not a
+        decision to spend CPU and 241 MB on somebody's folders, so switching
+        this on stays explicit (Settings -> Embedding model -> Local).
+        """
+        name = (os.environ.get("MYAGENT_EMBED_LOCAL") or "").strip()
+        if not name:
+            return None
+        if name.lower() in ("1", "true", "yes", "on", "local", "default"):
+            name = DEFAULT_LOCAL_MODEL
+        kw.pop("batch", None)                  # the HTTP batch size is not ours
+        return cls(name, allow_download=allow_download, **kw)
+
+    def _load(self):
+        if self._impl is not None:
+            return self._impl
+        if not self.allow_download:
+            os.environ.setdefault("HF_HUB_OFFLINE", "1")
+        import warnings
+        # fastembed warns that this model switched from CLS to mean pooling and
+        # suggests pinning 0.5.1. We do not: the index carries the model name
+        # and re-embeds itself if it ever changes. Silenced because this text
+        # would otherwise be the first 200 characters the IndexService reports
+        # when a run really fails.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            from fastembed import TextEmbedding
+            os.makedirs(self.cache_dir, exist_ok=True)
+            # lazy_load defers the ONNX session, not the download: with a warm
+            # cache this is free, which is what makes open_index() cheap.
+            self._impl = TextEmbedding(self.name, cache_dir=self.cache_dir,
+                                       lazy_load=True)
+        return self._impl
+
+    def encode(self, texts):
+        """[[float, ...], ...] for *texts*, in order — same contract as the
+        HTTP Embedder, so nothing downstream knows which one it has."""
+        impl = self._load()
+        out = []
+        for i in range(0, len(texts), self.batch):
+            chunk = texts[i:i + self.batch]
+            vecs = list(impl.embed(chunk, batch_size=len(chunk)))
+            if len(vecs) != len(chunk):
+                raise ValueError(f"local embedder returned {len(vecs)} vectors "
+                                 f"for {len(chunk)} inputs")
+            # float64 comes back from onnxruntime; pack() writes float32 and
+            # the stored vectors are float32, so cast here rather than let
+            # struct silently narrow.
+            out.extend([float(x) for x in v] for v in vecs)
+            # CPU, not a shared model server — os.nice(10) in the IndexService
+            # covers most of it — but a throttle still keeps a single-core box
+            # answering the chat while it indexes.
+            if self.throttle_ms and i + self.batch < len(texts):
+                time.sleep(self.throttle_ms / 1000.0)
+        return out
+
+
+def embedder_from_env(allow_download=False, **kw):
+    """THE embedder, whichever kind — or None when semantic search is off.
+
+    An HTTP endpoint wins, because naming a registered model is the more
+    specific statement of intent; the in-process one is what you get when the
+    answer is just "yes, locally". Every call site goes through here so the
+    two backends can never both be half-used.
+    """
+    return (Embedder.from_env(**kw)
+            or LocalEmbedder.from_env(allow_download=allow_download, **kw))
 
 
 def pack(vec):
@@ -524,7 +683,11 @@ def open_index(root, cache_dir=None, embed=None, create=True):
     """
     if _np is None:
         return None
-    embed = embed if embed is not None else Embedder.from_env()
+    # No allow_download here on purpose: this is the SEARCH path. A local
+    # embedder built here refuses to fetch its model, so a cold cache costs a
+    # second and an empty bucket instead of a 241 MB download inside a tool
+    # call. Only the CLI's --index run passes allow_download.
+    embed = embed if embed is not None else embedder_from_env()
     if embed is None:
         return None
     try:
@@ -566,22 +729,62 @@ def _cli(argv=None):
     ap.add_argument("--throttle-ms", type=int, default=0,
                     help="pause between embedding batches, so a background "
                          "pass does not starve the chat model")
+    # Accepted and, for now, only passed on to the reader through the
+    # environment: IndexService already sends --ocr for a request that asks
+    # for it, and argparse would exit 2 on an unknown flag — a run that can
+    # only ever fail, retried with backoff forever. The reader does not OCR
+    # yet, so this is deliberately inert rather than a promise.
+    ap.add_argument("--ocr", action="store_true",
+                    help="allow OCR while extracting (reader support pending)")
     ap.add_argument("--embed-url"), ap.add_argument("--embed-model")
+    ap.add_argument("--embed-local", nargs="?", const=DEFAULT_LOCAL_MODEL,
+                    help="embed in this process with fastembed instead of an "
+                         "HTTP endpoint (optionally naming the model)")
+    ap.add_argument("--prefetch", action="store_true",
+                    help="download the local embedding model and exit (--root "
+                         "is ignored) — how install.sh gets the one-time fetch "
+                         "out of the way")
     args = ap.parse_args(argv)
 
     if args.embed_url:
         os.environ["MYAGENT_EMBED_URL"] = args.embed_url
     if args.embed_model:
         os.environ["MYAGENT_EMBED_MODEL"] = args.embed_model
+    if args.ocr:
+        os.environ["MYAGENT_INDEX_OCR"] = "1"
+    if args.embed_local:
+        os.environ["MYAGENT_EMBED_LOCAL"] = args.embed_local
+        # An explicit --embed-local means "use the local one", so it must not
+        # lose to an MYAGENT_EMBED_URL inherited from the service environment.
+        os.environ.pop("MYAGENT_EMBED_URL", None)
+
+    if args.prefetch:
+        emb = LocalEmbedder.from_env(allow_download=True)
+        if emb is None:
+            print("ERROR: --prefetch needs --embed-local or "
+                  "MYAGENT_EMBED_LOCAL.", file=sys.stderr)
+            return 2
+        try:
+            emb.encode(["warm the cache"])
+        except Exception as e:
+            print(f"ERROR: could not fetch {emb.name}: {e}", file=sys.stderr)
+            return 1
+        print(f"ready: {emb.name} in {emb.cache_dir}")
+        return 0
 
     root = os.path.expanduser(args.root)
     if not os.path.isdir(root):
         print(f"ERROR: not a folder: {root}", file=sys.stderr)
         return 2
-    embed = Embedder.from_env(throttle_ms=args.throttle_ms)
+    # Indexing is the ONE path allowed to fetch the local model: it runs in the
+    # background under the IndexService, which throttles, nices, times out,
+    # retries and can be stopped from the UI.
+    embed = embedder_from_env(throttle_ms=args.throttle_ms,
+                              allow_download=bool(args.index))
     if embed is None:
         print("ERROR: no embedder — set MYAGENT_EMBED_URL and "
-              "MYAGENT_EMBED_MODEL (or pass --embed-url/--embed-model).",
+              "MYAGENT_EMBED_MODEL (or pass --embed-url/--embed-model), or "
+              "use --embed-local to embed in this process with fastembed.",
               file=sys.stderr)
         return 2
     if _np is None:

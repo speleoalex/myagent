@@ -31,13 +31,26 @@ async def status(request: Request):
     """
     svc = _service(request)
     model_id = embedding.embedding_model_id()
-    reason = ""
+    reason, backend = "", ""
     if model_id:
         raw = request.app.state.stores.models.get(model_id) or {}
-        reason = embedding.rejection_reason(raw)
+        if model_id == embedding.LOCAL_ID and not raw:
+            backend = "local"
+            reason = "" if embedding.local_available() else (
+                "the optional `fastembed` package is not installed")
+        else:
+            backend = "endpoint"
+            reason = embedding.rejection_reason(raw)
     return {
         "configured": bool(model_id) and not reason,
         "model_id": model_id,
+        # Which KIND of embedder, so the UI can say "in this process" instead
+        # of implying there is a server involved — and so "why is indexing
+        # using my CPU" has an answer that names the reason.
+        "backend": backend,
+        # Advertised even when unused: the settings page offers the in-process
+        # option only when it would actually work, and it asks this route.
+        "local_available": embedding.local_available(),
         "problem": reason,
         "roots": svc.status(),
     }
