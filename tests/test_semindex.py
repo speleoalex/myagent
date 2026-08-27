@@ -19,7 +19,10 @@ The contract, one case each:
      requirement;
   8. THE ONE THAT MATTERS: the locators stored here are the ids local_search
      prints, so local_read opens the passage the search offered. A private
-     splitter in semindex would break this silently.
+     splitter in semindex would break this silently;
+  9. text that is not prose never gets a vector, and a hit below the score
+     floor is not offered. "Nearest" is not "relevant", and argsort always
+     returns `limit` rows.
 """
 
 import os
@@ -101,9 +104,15 @@ with tempfile.TemporaryDirectory() as tmp:
     check("progress() sees them", idx.progress()["indexed"] == 3)
 
     hits = idx.search("bulloni frizione coppia serraggio", limit=3)
-    check("a query comes back with hits", len(hits) == 3)
+    # NOT a fixed count: search() applies SEM_MIN_SCORE, so how many of three
+    # unrelated documents clear the floor is a property of the embedder, and
+    # this one is a 16-dimension word hash whose absolute cosines mean nothing.
+    # What must hold is that the relevant document comes back, and first.
+    check("a relevant query comes back with at least one hit", len(hits) >= 1)
     check("the best hit is the right document",
           hits[0]["rel"] == "frizione.md")
+    check("every hit clears the score floor",
+          all(h["score"] >= semindex.SEM_MIN_SCORE for h in hits))
 
     # 8. the locators must be the ids local_search prints.
     terms, phrase = search.parse_query("frizione bulloni")
@@ -145,6 +154,43 @@ with tempfile.TemporaryDirectory() as tmp:
     rep = idx.sync(files_in(root), reader)
     check("switching embedding model re-indexes from scratch", rep.indexed == 2)
     idx.close()
+
+with tempfile.TemporaryDirectory() as tmp:
+    # 7b. SEM_MIN_SCORE is a FLOOR, not just an ordering, and SEM_MIN_WORDLIKE
+    # keeps non-prose out of the index entirely. Both guard one failure the
+    # keyword scorer is immune to by accident: junk text matches no query term,
+    # so it never ranked — but a vector has a direction whatever built it, and
+    # argsort always yields `limit` rows. Measured on a folder of vehicle
+    # manuals: a scanned wiring diagram extracting as `z'o]I I lrr: I o(J T`
+    # scored 0.399 for "tubi EGR posizione e collegamento" and took a top slot
+    # ahead of a real page at 0.385 — and the merge gives this bucket a fixed
+    # position, so it evicted a real keyword hit from another source.
+    #
+    # A WIDE fake embedder here on purpose: the 16-dimension one above cannot
+    # express "far away", because hashing four nonsense words into 16 buckets
+    # collides with the corpus and yields a high cosine by accident.
+    os.environ["MYAGENT_CACHE"] = str(Path(tmp) / "cache")
+    root = build_root(tmp)
+    (root / "diagram.txt").write_text(
+        "z'o]I I lrr: I o(J T -t- Bt a, -t C) 6]> ;- 3r o F o EEL?EFS r:Is J m "
+        "bl d 5\u20acT '< (t ; bl/ | f ' E ; Hi 5:E o ffi tftt r> >trt >'C' _,- > 3\n")
+    db = semindex.db_path_for(str(root))
+    idx = semindex.SemanticIndex(str(root), db, FakeEmbedder(model="wide", dim=512))
+    rep = idx.sync(files_in(root), reader)
+    check("a file that is not prose contributes no vectors",
+          rep.skipped_chunks >= 1)
+    check("...and the run says so rather than dropping it silently",
+          "skipped_chunks" in repr(rep))
+    check("its text is nowhere in the index",
+          all("diagram" not in (h["rel"] or "")
+              for h in idx.search("z'o]I lrr o(J EEL?EFS", limit=5)))
+    check("a relevant query still works", 
+          idx.search("bulloni frizione coppia", limit=3)[0]["rel"] == "frizione.md")
+    far = idx.search("zzzz qqqq xxxx wwww yyyy vvvv", limit=3)
+    check("a query with nothing near it returns NOTHING, not the least distant",
+          far == [])
+    idx.close()
+
 
 with tempfile.TemporaryDirectory() as tmp:
     os.environ["MYAGENT_CACHE"] = str(Path(tmp) / "cache")

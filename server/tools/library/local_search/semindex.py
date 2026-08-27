@@ -61,7 +61,11 @@ import time
 import urllib.error
 import urllib.request
 
-SCHEMA_VERSION = 1
+# Bumped to 2 when SEM_MIN_WORDLIKE arrived: an index built without it holds
+# vectors for pages of OCR noise, and those took top slots. The stored set no
+# longer means the same thing, so _create() wipes and the next pass rebuilds —
+# the same mechanism a changed embedding model uses, for the same reason.
+SCHEMA_VERSION = 2
 DEFAULT_BATCH = 32
 # Skip a TEXT file this big — mirrors local_search's own MAX_TEXT_BYTES: past
 # this it is a log or a database dump, not something anyone wants matched.
@@ -94,6 +98,29 @@ DEFAULT_LOCAL_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-
 # Bigger than the HTTP batch: there is no request per batch to amortise, and
 # onnxruntime is faster with more rows. Measured ~540 chunks/s on this CPU.
 DEFAULT_LOCAL_BATCH = 64
+# A chunk whose text is mostly NOT words is not indexed, and a hit below
+# SEM_MIN_SCORE is not offered. Both guard the same failure, which the keyword
+# scorer is immune to by accident: junk matches no query term, so it never
+# ranked — but a vector has a direction whatever it was built from, and
+# "nearest" is not "relevant". Measured on a folder of vehicle manuals, the
+# scanned wiring diagrams extract as `z'o]I I lrr: I o(J T -t- Bt a,` and one of
+# them scored 0.399 for "tubi EGR posizione e collegamento", taking a top slot
+# ahead of a real page at 0.385.
+#
+# 0.30 comes from the measurement, not from taste: on that corpus the junk pages
+# sit at 0.08-0.13 wordlike and real manual pages have a median of 0.69-0.81.
+# The threshold costs 5.6% of pages with a text layer, and they are exactly the
+# ones it should cost — wiring and body DIAGRAMS, whose text layer is OCR noise
+# around a drawing. A drawing cannot be matched by meaning.
+#
+# The filter lives HERE and not in `search.chunks_for`, which is shared with the
+# keyword scorer and defines the locators: skipping a chunk must change what is
+# EMBEDDED, never what an id means. Keyword search still reaches those pages,
+# where an OCR-surviving part number is a legitimate match.
+SEM_MIN_WORDLIKE = 0.30
+SEM_MIN_SCORE = 0.30
+_WORD_RE = re.compile(r"[^\W\d_]+", re.UNICODE)
+_VOWEL_RE = re.compile(r"[aeiouyàèéìòóùáíúäöüåøæœ]", re.IGNORECASE)
 
 try:                                            # optional, and checked for
     import numpy as _np
@@ -364,6 +391,21 @@ def embedder_from_env(allow_download=False, **kw):
             or LocalEmbedder.from_env(allow_download=allow_download, **kw))
 
 
+def wordlike_ratio(text):
+    """Fraction of alphabetic tokens that look like words (3+ letters, a vowel).
+
+    Language-agnostic on purpose — it asks "is this prose at all", not "is this
+    Italian". A page of OCR noise scores under 0.15 because its tokens are one
+    and two character fragments of symbols; prose in any Latin-script language
+    scores well above 0.5. Empty text is 0.0, which is the right answer here.
+    """
+    toks = _WORD_RE.findall(text)
+    if not toks:
+        return 0.0
+    good = sum(1 for w in toks if len(w) >= 3 and _VOWEL_RE.search(w))
+    return good / len(toks)
+
+
 def pack(vec):
     """float32 little-endian, the on-disk form."""
     return struct.pack(f"<{len(vec)}f", *vec)
@@ -380,6 +422,7 @@ class SyncReport:
         self.pending = 0        # known to need work, not reached this run
         self.failed = 0
         self.oversized = 0      # permanently excluded (text file over the cap)
+        self.skipped_chunks = 0  # not prose (see SEM_MIN_WORDLIKE)
         self.total = 0
         self.capped = False     # the root has more files than MAX_INDEX_FILES
 
@@ -395,7 +438,7 @@ class SyncReport:
         return (f"<SyncReport indexed={self.indexed} skipped={self.skipped} "
                 f"forgotten={self.forgotten} pending={self.pending} "
                 f"failed={self.failed} oversized={self.oversized} "
-                f"total={self.total}>")
+                f"skipped_chunks={self.skipped_chunks} total={self.total}>")
 
 
 class SemanticIndex:
@@ -565,7 +608,7 @@ class SemanticIndex:
                 rep.pending = len(todo) - rep.indexed - rep.failed
                 break
             try:
-                ok = self._index_one(path, rel, st, fid, read_chunks)
+                ok = self._index_one(path, rel, st, fid, read_chunks, rep)
             except Exception as e:                      # never fatal
                 print(f"WARNING: could not index {rel}: {e}", file=sys.stderr)
                 rep.failed += 1
@@ -581,12 +624,21 @@ class SemanticIndex:
         self._set_meta(updated_at=time.time())
         return rep
 
-    def _index_one(self, path, rel, st, fid, read_chunks):
+    def _index_one(self, path, rel, st, fid, read_chunks, rep=None):
         """One file, one transaction. True = indexed, False = nothing to index,
         None = not readable yet (stays pending)."""
         chunks = read_chunks(path, rel)
         if chunks is None:
             return None
+        # Drop what is not prose BEFORE embedding. Kept as a count so the caller
+        # can say so: a page silently missing from the index is a page the user
+        # will assume was searched.
+        if chunks:
+            usable = [c for c in chunks
+                      if wordlike_ratio(c[2]) >= SEM_MIN_WORDLIKE]
+            if rep is not None:
+                rep.skipped_chunks += len(chunks) - len(usable)
+            chunks = usable
         if chunks:
             # The heading is prepended to what gets EMBEDDED but not to what is
             # stored: "Frizione\n\nLa coppia e' 15-22 Nm." places a one-line
@@ -659,7 +711,12 @@ class SemanticIndex:
         qn = _np.linalg.norm(qv) or 1.0
         scores = (mat @ qv) / (norms * qn)
 
-        best = _np.argsort(-scores)[:max(1, limit)]
+        # A floor, not just a ranking. argsort always yields `limit` rows, so
+        # without this a folder with nothing relevant still fills every slot —
+        # and the merge gives this bucket a fixed position, so those rows evict
+        # real keyword hits. "Nearest" is not "relevant".
+        best = [i for i in _np.argsort(-scores)[:max(1, limit)]
+                if scores[i] >= SEM_MIN_SCORE]
         return [{
             "locator": keep[i][0], "heading": keep[i][1],
             "line_from": keep[i][2], "line_to": keep[i][3],
