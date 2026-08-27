@@ -771,9 +771,31 @@ fi
 # Semantic search needs numpy AND an embedding model the user has to choose;
 # naming only what is actually missing keeps the line actionable — the flat
 # "needs numpy + a model" version sent people to install numpy they already had.
+# The CHOICE is read from settings.json, not assumed: reporting "ready, go pick
+# it" to someone who picked it three days ago reads as "your setting was lost"
+# and sends them to redo a step (observed on this machine, 2026-08-27).
+CONF_JSON="${MYAGENT_CONFIG:-$STATE_HOME/config}/settings.json"
+EMBED_ID=""
+if [ -f "$CONF_JSON" ]; then
+    EMBED_ID=$("$VENV/bin/python" -c 'import json,sys
+try: print(json.load(open(sys.argv[1])).get("embedding_model_id") or "")
+except Exception: pass' "$CONF_JSON" 2>/dev/null || true)
+fi
+HAS_FASTEMBED=0
+"$VENV/bin/python" -c "import fastembed" >/dev/null 2>&1 && HAS_FASTEMBED=1
+
 if ! "$VENV/bin/python" -c "import numpy" >/dev/null 2>&1; then
     echo "  [--] semantic search      (numpy missing: $VENV/bin/pip install numpy)"
-elif "$VENV/bin/python" -c "import fastembed" >/dev/null 2>&1; then
+elif [ "$EMBED_ID" = "local" ] && [ "$HAS_FASTEMBED" = 0 ]; then
+    # Set to in-process but the package is gone (a rebuilt venv): name THAT,
+    # or the user goes looking in Settings, where it already says the right thing.
+    echo "  [--] semantic search      (set to in-process, but fastembed is missing:"
+    echo "                             $VENV/bin/pip install fastembed)"
+elif [ "$EMBED_ID" = "local" ]; then
+    echo "  [ok] semantic search      (in this process, no endpoint)"
+elif [ -n "$EMBED_ID" ]; then
+    echo "  [ok] semantic search      (embedding model '$EMBED_ID')"
+elif [ "$HAS_FASTEMBED" = 1 ]; then
     echo "  [--] semantic search      (ready: pick 'In this process' under"
     echo "                             Settings -> Embedding model)"
 else
