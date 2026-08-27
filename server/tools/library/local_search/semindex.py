@@ -79,6 +79,12 @@ DEFAULT_BATCH = 32
 # pdftext cache, both of which already exist.
 MAX_TEXT_BYTES = 3_000_000
 PDF_EXTS = {".pdf"}
+# Exempt for the SAME reason as PDFs, one step removed: a .docx/.xlsx/.pptx is a
+# compressed archive, so its size on disk is not the size of its text either
+# (either direction — a 500 KB spreadsheet expands to megabytes, a 5 MB report is
+# mostly embedded images). What bounds them is MAX_OFFICE_CHARS, applied by
+# search.office_text to the text that comes OUT.
+OFFICE_EXTS = {".docx", ".xlsx", ".pptx"}
 # Refuse to index a root with more files than this, and SAY so. An unbounded
 # root would embed forever without ever reporting that it is not finished.
 MAX_INDEX_FILES = 20_000
@@ -587,7 +593,7 @@ class SemanticIndex:
             except OSError:
                 rep.failed += 1
                 continue
-            if (os.path.splitext(path)[1].lower() not in PDF_EXTS
+            if (os.path.splitext(path)[1].lower() not in PDF_EXTS | OFFICE_EXTS
                     and st.st_size > MAX_TEXT_BYTES):
                 rep.oversized += 1
                 continue

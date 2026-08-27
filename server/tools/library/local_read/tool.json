@@ -23,7 +23,7 @@
       },
       "export": {
         "type": "boolean",
-        "description": "Deliver the FULL document to the user as a file (a ZIM article becomes a readable HTML page; PDFs and text files go as the original file). Use when the user asks for the whole article or document. The tool prints only a confirmation — never paste the content yourself",
+        "description": "Deliver the FULL document to the user as a file (a ZIM article becomes a readable HTML page; PDFs, Office documents and text files go as the original file). Use when the user asks for the whole article or document. The tool prints only a confirmation — never paste the content yourself",
         "default": false
       }
     },

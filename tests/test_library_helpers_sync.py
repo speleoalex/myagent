@@ -42,11 +42,34 @@ SHARED_FUNCS = [
     "_pdf_cache_key",
     "_pdf_cache_write",
     "pdf_pages",            # page numbering behind every p: id
+    # Office (OOXML). Same rule as the PDF helpers above and for the same
+    # reason: local_search mints `f:<relpath>:<line>` from THIS text and
+    # local_read indexes its `offset` into it, so a divergence opens a
+    # different passage — or nothing — in silence.
+    "read_text_file",       # the single seam both tools read a file through
+    "office_text",
+    "_xml_tag",
+    "_xml_root",
+    "_docx_text",
+    "_docx_para_text",
+    "_docx_heading_level",
+    "_pptx_text",
+    "_pptx_slide_order",    # numeric order == the slide number printed
+    "_xlsx_text",
+    "_xlsx_cell_text",
+    "_xlsx_sheets",
+    "_xlsx_shared_strings",
+    "_xlsx_date_styles",
+    "_xlsx_serial_to_date",
+    "_xlsx_epoch_1904",
 ]
 
 # Module-level constants the shared code reads. Identical bodies are not enough
 # if the values they close over differ.
-SHARED_CONSTS = ["MAX_TEXT_BYTES", "PDF_CACHE_MAX_BYTES", "BLOCK_TAGS", "SKIP_TAGS"]
+SHARED_CONSTS = ["MAX_TEXT_BYTES", "PDF_CACHE_MAX_BYTES", "BLOCK_TAGS", "SKIP_TAGS",
+                 "OFFICE_EXTS", "MAX_OFFICE_CHARS", "MAX_OFFICE_UNCOMPRESSED",
+                 "CELL_SEP", "_XLS_EPOCH_1900", "_XLS_EPOCH_1904",
+                 "_XLS_DATE_FMT_IDS"]
 
 # Present in both, DELIBERATELY different — listed so the divergence is a
 # recorded decision rather than an oversight. local_read's copy also collects

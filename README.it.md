@@ -59,7 +59,7 @@ Quando la rete sparisce, l'assistente resta.
 Invece di chiedere a internet ogni volta, gli agenti cercano in una collezione
 tua: **Wikipedia completa offline** insieme a medicina, primo soccorso,
 manuali di riparazione, agricoltura ed elettronica — più i tuoi appunti
-Markdown, i PDF convertiti e la documentazione tecnica. Decine o centinaia di
+Markdown, i PDF e i documenti Word, Excel e PowerPoint. Decine o centinaia di
 gigabyte su un disco tuo, cercati full-text in un attimo, citati con la fonte
 ([la biblioteca](library/README.md)).
 
@@ -97,7 +97,7 @@ anni. Anche quando internet no.
 | ------------ | ----------- |
 | **Qualsiasi backend LLM** | llama.cpp, Ollama, qualsiasi API compatibile OpenAI e l'API Anthropic, parlata nativamente; la finestra di contesto viene *sondata*, non indovinata |
 | **Pensato per i modelli locali piccoli** | chiamate ai tool interpretate dal testo puro per i modelli senza function calling nativo, protezione dai loop, ritentativi sulle chiamate malformate ([perché](docs/DESIGN.md)) |
-| **Biblioteca offline** | archivi ZIM di Wikipedia e i tuoi documenti in `~/myagent/library/`, cercati full-text; articoli e documenti interi consegnabili in chat come file ([dettagli](library/README.md)) |
+| **Biblioteca offline** | archivi ZIM di Wikipedia e i tuoi documenti in `~/myagent/library/` (PDF, Word, Excel, PowerPoint, Markdown), cercati full-text; articoli e documenti interi consegnabili in chat come file ([dettagli](library/README.md)) |
 | **Ricerca semantica** | opzionale: scegli un modello di embedding locale e i tuoi documenti vengono trovati per significato oltre che per parole, anche fra lingue diverse — l'indice si costruisce in background e non lascia mai la macchina ([dettagli](docs/CONFIGURATION.md#semantic-search-optional)) |
 | **Agenti atomici** | un agente è solo `modello + prompt di sistema + tool`, modificabile dalla UI e salvato come file JSON |
 | **Agenti autonomi** | task programmati, esecuzioni non presidiate, agenti che si programmano il lavoro futuro e ti avvisano ([dettagli](docs/AUTONOMY.md)) |

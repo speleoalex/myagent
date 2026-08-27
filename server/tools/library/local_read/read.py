@@ -33,6 +33,7 @@ article images can be delivered to the chat — local_search's copy must NOT
 gain that (snippets don't need images); don't "fix" the divergence.
 """
 import base64
+import datetime
 import hashlib
 import json
 import mimetypes
@@ -43,8 +44,10 @@ import shutil
 import subprocess
 import sys
 import time
+import zipfile
 import unicodedata
 from html.parser import HTMLParser
+from xml.etree import ElementTree
 
 PAGE = 8000                    # chars per page, cut back to a word boundary
 MAX_TEXT_BYTES = 3_000_000     # refuse text files larger than this
@@ -70,9 +73,19 @@ MAX_EXPORT_BYTES = 25_000_000   # f:/p: copy cap — _resources/ is never pruned
 HTML_EXPORT_BUDGET = 400_000    # exported article incl. inlined images: keeps
                                 # an illustrated article under the web UI's
                                 # 512 KB inline-preview cap (ui/js/chat.js)
-# mimetypes.guess_type misses .md on some systems.
-EXPORT_MIME = {".md": "text/markdown", ".txt": "text/plain",
-               ".rst": "text/x-rst"}
+# mimetypes.guess_type misses .md on some systems, and the OOXML types are
+# absent from Python's built-in table (they come from /etc/mime.types when that
+# exists at all) — an export typed octet-stream is one the browser refuses to
+# hand to Word.
+EXPORT_MIME = {
+    ".md": "text/markdown", ".txt": "text/plain", ".rst": "text/x-rst",
+    ".docx": "application/vnd.openxmlformats-officedocument"
+             ".wordprocessingml.document",
+    ".xlsx": "application/vnd.openxmlformats-officedocument"
+             ".spreadsheetml.sheet",
+    ".pptx": "application/vnd.openxmlformats-officedocument"
+             ".presentationml.presentation",
+}
 # Injected at the top of exported articles. The <meta charset> is deliberate:
 # the content is re-encoded UTF-8 here, and a stale declaration deeper in the
 # original <head> must lose (the first one in the document wins in browsers).
@@ -759,6 +772,422 @@ def read_pdf(root, rid, rel, page, offset, offset_given, path_given=True,
     render(rid, rel, f"PDF, {len(pages)} pages", text, offset, note)
 
 
+# --------------------------------------------------------------------------- #
+# Office documents (OOXML) — duplicated in ../local_read/read.py
+#
+# .docx/.xlsx/.pptx are ZIP archives of XML, so the whole extractor is stdlib.
+# That is a deliberate choice over python-docx/openpyxl/python-pptx (~7 packages
+# including lxml, a C extension): these two tools are the OFFLINE core, their
+# `run` launcher falls back to the system python3 when the venv is missing, and
+# a dependency that is absent exactly in the disaster scenario the library
+# exists for is worse than a simpler parser. Text extraction needs the `<w:t>`
+# runs, not a document object model.
+#
+# The output of this code is where `f:<relpath>:<line>` ids POINT, so the two
+# copies must stay char-for-char equal in BEHAVIOUR: local_search mints a line
+# number from this text and local_read indexes its `offset` into it. Guarded by
+# tests/test_library_helpers_sync.py.
+#
+# Legacy .doc/.xls/.ppt (OLE2, not ZIP) are NOT supported and cannot be with
+# stdlib — neither do python-docx/openpyxl. Convert them once, with libreoffice.
+OFFICE_EXTS = {".docx", ".xlsx", ".pptx"}
+# The text a single Office file may yield. Unlike a plain text file the size on
+# disk is NOT the size of the text (it is a compressed archive), so the cap has
+# to be applied to what comes OUT — a 500 KB spreadsheet expands to megabytes of
+# cell values. Same number as MAX_TEXT_BYTES, applied one layer later.
+MAX_OFFICE_CHARS = 3_000_000
+# A zip that claims to expand to more than this is not a document anyone wants
+# matched; refusing before extracting also makes a zip bomb a non-event.
+MAX_OFFICE_UNCOMPRESSED = 80_000_000
+# Cells and table cells are joined with this, never a newline: a table of
+# torque values stops saying which figure belongs to which bolt when every
+# cell lands on its own line. Same lesson as keeping pdftotext's -layout.
+CELL_SEP = "  |  "
+# Excel serial dates. 1899-12-30 is the epoch that makes serial 1 = 1900-01-01
+# while absorbing the Lotus fake leap day (serial 60 = "1900-02-29", which does
+# not exist); serials at or below it are off by one and rare enough to be left
+# to the generic branch rather than given a wrong date.
+_XLS_EPOCH_1900 = "1899-12-30"
+_XLS_EPOCH_1904 = "1904-01-01"
+# Builtin numFmt ids that mean "this number is a date/time" (ECMA-376 18.8.30).
+_XLS_DATE_FMT_IDS = frozenset(list(range(14, 23)) + list(range(45, 48)))
+
+
+def _xml_tag(elem):
+    """An element's local name, namespace stripped.
+
+    Namespace-agnostic on purpose: OOXML ships in a transitional and a strict
+    flavour with DIFFERENT namespace URIs for the same elements, and a parser
+    keyed on the URI silently returns nothing for the other one.
+    """
+    tag = elem.tag
+    return tag.rsplit("}", 1)[-1] if isinstance(tag, str) else ""
+
+
+def _xml_root(zf, name):
+    """Parse one member of an open zip, or None if it is missing/unparseable."""
+    try:
+        with zf.open(name) as fh:
+            return ElementTree.parse(fh).getroot()
+    except Exception:
+        return None
+
+
+def _docx_para_text(para):
+    """One <w:p> flattened: runs joined, tabs and breaks kept as whitespace."""
+    out = []
+    for node in para.iter():
+        tag = _xml_tag(node)
+        if tag == "t":
+            out.append(node.text or "")
+        elif tag == "tab":
+            out.append("\t")
+        elif tag in ("br", "cr"):
+            out.append("\n")
+    return "".join(out)
+
+
+def _docx_heading_level(para):
+    """1-6 if this paragraph uses a Heading style, else 0.
+
+    Word headings become Markdown headings, which is not cosmetic: chunk_document
+    turns them into the running context of every paragraph beneath, so a
+    structured report gets real chunk titles in results AND in the semantic index
+    instead of the file name repeated.
+    """
+    for node in para.iter():
+        if _xml_tag(node) != "pStyle":
+            continue
+        val = ""
+        for key, value in node.attrib.items():
+            if key.rsplit("}", 1)[-1] == "val":
+                val = str(value)
+                break
+        m = re.match(r"(?:heading|titolo|titre|berschrift|kop)\s*([1-6])$",
+                     val.strip().lower())
+        if m:
+            return int(m.group(1))
+    return 0
+
+
+def _docx_text(zf):
+    """Body text of a .docx, in document order."""
+    root = _xml_root(zf, "word/document.xml")
+    if root is None:
+        return ""
+    lines = []
+    for body in root.iter():
+        if _xml_tag(body) == "body":
+            root = body
+            break
+    for node in root:
+        tag = _xml_tag(node)
+        if tag == "p":
+            text = _docx_para_text(node).strip()
+            if not text:
+                lines.append("")
+                continue
+            level = _docx_heading_level(node)
+            lines.append(f"{'#' * level} {text}" if level else text)
+        elif tag == "tbl":
+            # A table is emitted one row per line so a row stays readable as a
+            # unit, with a blank line around it so chunk_document keeps the
+            # whole table together instead of splitting it mid-row.
+            lines.append("")
+            for row in node:
+                if _xml_tag(row) != "tr":
+                    continue
+                cells = [" ".join(_docx_para_text(p).split())
+                         for cell in row if _xml_tag(cell) == "tc"
+                         for p in cell.iter() if _xml_tag(p) == "p"]
+                cells = [c for c in cells if c]
+                if cells:
+                    lines.append(CELL_SEP.join(cells))
+            lines.append("")
+    return "\n".join(lines)
+
+
+def _pptx_slide_order(zf):
+    """Slide part names in presentation order.
+
+    Sorted NUMERICALLY: a lexical sort puts slide10 between slide1 and slide2,
+    so every slide number printed in a result would be wrong from the tenth on.
+    """
+    names = [n for n in zf.namelist()
+             if re.fullmatch(r"ppt/slides/slide\d+\.xml", n)]
+
+    def key(name):
+        m = re.search(r"(\d+)\.xml$", name)
+        return int(m.group(1)) if m else 0
+
+    return sorted(names, key=key)
+
+
+def _pptx_text(zf):
+    """Slide text of a .pptx, one "## Slide N" section per slide.
+
+    The heading is what makes a hit citable — "slide 7" is how a presentation is
+    referred to, the way a page is for a PDF — and chunk_document picks it up as
+    the chunk title for free. Speaker notes are deliberately left out: mapping
+    notesSlideN to slideN needs the relationship parts, and guessing it by number
+    would attribute someone's notes to the wrong slide.
+    """
+    parts = []
+    for n, name in enumerate(_pptx_slide_order(zf), 1):
+        root = _xml_root(zf, name)
+        if root is None:
+            continue
+        lines = []
+        for para in root.iter():
+            if _xml_tag(para) != "p":
+                continue
+            text = "".join(node.text or "" for node in para.iter()
+                           if _xml_tag(node) == "t").strip()
+            if text:
+                lines.append(text)
+        parts.append(f"## Slide {n}\n\n" + "\n\n".join(lines) if lines
+                     else f"## Slide {n}")
+    return "\n\n".join(parts)
+
+
+def _xlsx_shared_strings(zf):
+    root = _xml_root(zf, "xl/sharedStrings.xml")
+    if root is None:
+        return []
+    out = []
+    for si in root:
+        out.append("".join(node.text or "" for node in si.iter()
+                           if _xml_tag(node) == "t"))
+    return out
+
+
+def _xlsx_date_styles(zf):
+    """Indices into cellXfs whose number format means "date".
+
+    Without this a column of dates is searchable only as five-digit serials —
+    and "when is the appointment" is exactly the question a folder of personal
+    documents gets asked.
+    """
+    root = _xml_root(zf, "xl/styles.xml")
+    if root is None:
+        return set()
+    custom = {}
+    for node in root.iter():
+        if _xml_tag(node) != "numFmt":
+            continue
+        fid = node.attrib.get("numFmtId")
+        code = node.attrib.get("formatCode") or ""
+        # Date tokens OUTSIDE literal quotes; "General" and currency codes
+        # containing a stray 'd' inside a quoted string must not qualify.
+        bare = re.sub(r'"[^"]*"', "", code).lower()
+        if fid and re.search(r"[ymd]", bare) and "e+" not in bare:
+            custom[fid] = True
+    dated = set()
+    for node in root.iter():
+        if _xml_tag(node) != "cellXfs":
+            continue
+        for i, xf in enumerate(node):
+            fid = xf.attrib.get("numFmtId")
+            if fid is None:
+                continue
+            try:
+                builtin = int(fid) in _XLS_DATE_FMT_IDS
+            except ValueError:
+                builtin = False
+            if builtin or custom.get(fid):
+                dated.add(i)
+        break
+    return dated
+
+
+def _xlsx_serial_to_date(raw, epoch_1904):
+    """An Excel serial rendered as ISO, or None if it is not one."""
+    try:
+        serial = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if serial <= 60 and not epoch_1904:
+        return None
+    base = _XLS_EPOCH_1904 if epoch_1904 else _XLS_EPOCH_1900
+    try:
+        day = datetime.date.fromisoformat(base) + datetime.timedelta(days=int(serial))
+    except (ValueError, OverflowError):
+        return None
+    frac = serial - int(serial)
+    if frac <= 0:
+        return day.isoformat()
+    seconds = int(round(frac * 86400))
+    return f"{day.isoformat()} {seconds // 3600:02d}:{seconds % 3600 // 60:02d}"
+
+
+def _xlsx_sheets(zf):
+    """``[(display name, part name)]`` in workbook order.
+
+    Read through the relationships rather than globbing sheetN.xml: the file
+    order is not the tab order, and the NAME only exists in workbook.xml — a
+    sheet called "Costi 2026" is what a result should be cited by.
+    """
+    book = _xml_root(zf, "xl/workbook.xml")
+    rels = _xml_root(zf, "xl/_rels/workbook.xml.rels")
+    targets = {}
+    if rels is not None:
+        for node in rels:
+            rid = node.attrib.get("Id")
+            target = node.attrib.get("Target") or ""
+            if not rid or not target:
+                continue
+            target = target.lstrip("/")
+            targets[rid] = target if target.startswith("xl/") else "xl/" + target
+    out = []
+    if book is not None:
+        for node in book.iter():
+            if _xml_tag(node) != "sheet":
+                continue
+            name = node.attrib.get("name") or ""
+            rid = next((v for k, v in node.attrib.items()
+                        if k.rsplit("}", 1)[-1] == "id"), None)
+            part = targets.get(rid)
+            if part and part in zf.namelist():
+                out.append((name, part))
+    if out:
+        return out
+    # A workbook we could not read the index of still has its sheets on disk.
+    return [(os.path.basename(n), n) for n in sorted(zf.namelist())
+            if re.fullmatch(r"xl/worksheets/sheet\d+\.xml", n)]
+
+
+def _xlsx_epoch_1904(zf):
+    book = _xml_root(zf, "xl/workbook.xml")
+    if book is None:
+        return False
+    for node in book.iter():
+        if _xml_tag(node) == "workbookPr":
+            return str(node.attrib.get("date1904", "")).lower() in ("1", "true")
+    return False
+
+
+def _xlsx_text(zf):
+    """Cell values of a .xlsx, one "## Sheet: name" section per sheet.
+
+    One line per row, cells joined by CELL_SEP; empty rows and empty trailing
+    cells are dropped, or a spreadsheet whose used range is wider than its data
+    (very common) pads every line with separators.
+    """
+    strings = _xlsx_shared_strings(zf)
+    dated = _xlsx_date_styles(zf)
+    epoch_1904 = _xlsx_epoch_1904(zf)
+    parts, budget = [], MAX_OFFICE_CHARS
+    for name, part in _xlsx_sheets(zf):
+        root = _xml_root(zf, part)
+        if root is None:
+            continue
+        lines = [f"## Sheet: {name}" if name else "## Sheet"]
+        for row in root.iter():
+            if _xml_tag(row) != "row":
+                continue
+            cells = []
+            for cell in row:
+                if _xml_tag(cell) != "c":
+                    continue
+                cells.append(_xlsx_cell_text(cell, strings, dated, epoch_1904))
+            while cells and not cells[-1]:
+                cells.pop()
+            if any(cells):
+                line = CELL_SEP.join(cells)
+                budget -= len(line) + 1
+                if budget <= 0:
+                    lines.append("[... spreadsheet truncated]")
+                    break
+                lines.append(line)
+        parts.append("\n".join(lines))
+        if budget <= 0:
+            break
+    return "\n\n".join(parts)
+
+
+def _xlsx_cell_text(cell, strings, dated, epoch_1904):
+    """One <c> rendered as text: shared/inline string, date, or raw number."""
+    ctype = cell.attrib.get("t") or "n"
+    if ctype == "inlineStr":
+        return " ".join("".join(n.text or "" for n in cell.iter()
+                                if _xml_tag(n) == "t").split())
+    value = ""
+    for node in cell:
+        if _xml_tag(node) == "v":
+            value = node.text or ""
+            break
+    if ctype == "s":
+        try:
+            return " ".join(strings[int(value)].split())
+        except (ValueError, IndexError):
+            return ""
+    if ctype == "b":
+        return "TRUE" if value == "1" else "FALSE"
+    if ctype in ("str", "e"):
+        return " ".join(value.split())
+    try:
+        style = int(cell.attrib.get("s", "-1"))
+    except ValueError:
+        style = -1
+    if style in dated:
+        iso = _xlsx_serial_to_date(value, epoch_1904)
+        if iso:
+            return iso
+    return value.strip()
+
+
+def office_text(path):
+    """Plain text of an OOXML document, or None if it cannot be read.
+
+    None (rather than "") for an unreadable file so the caller reports it the
+    same way it reports an unreadable text file; "" is a legitimately empty
+    document.
+    """
+    ext = os.path.splitext(path)[1].lower()
+    if ext not in OFFICE_EXTS:
+        return None
+    try:
+        with zipfile.ZipFile(path) as zf:
+            if sum(max(0, i.file_size) for i in zf.infolist()) > MAX_OFFICE_UNCOMPRESSED:
+                return None
+            if ext == ".docx":
+                text = _docx_text(zf)
+            elif ext == ".pptx":
+                text = _pptx_text(zf)
+            else:
+                text = _xlsx_text(zf)
+    except (OSError, zipfile.BadZipFile, ElementTree.ParseError):
+        return None
+    except Exception:
+        return None
+    text = re.sub(r"\n{3,}", "\n\n", text.replace("\r\n", "\n").replace("\r", "\n"))
+    if len(text) > MAX_OFFICE_CHARS:
+        # Declared, like every other cap here: a document cut in silence reads
+        # as a document that ends there.
+        text = text[:MAX_OFFICE_CHARS] + "\n\n[... document truncated]"
+    return text
+
+
+def read_text_file(path):
+    """The text of one searchable non-PDF file, or None if it cannot be read.
+
+    The single seam through which Office support reaches everything:
+    search_text_file, chunks_for (so the semantic index too) and local_read's
+    read_file all go through here, which is why `f:<relpath>:<line>` ids keep
+    meaning the same thing for all of them.
+    """
+    ext = os.path.splitext(path)[1].lower()
+    if ext in OFFICE_EXTS:
+        return office_text(path)
+    try:
+        if os.path.getsize(path) > MAX_TEXT_BYTES:
+            return None
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
 def read_file(root, rid, rel, line, offset, offset_given, path_given=True,
               export=False):
     target = resolve_in_root(root, rel, path_given)
@@ -770,10 +1199,12 @@ def read_file(root, rid, rel, line, offset, offset_given, path_given=True,
                     EXPORT_MIME.get(ext) or mimetypes.guess_type(rel)[0]
                     or "text/plain")
         return
-    if os.path.getsize(target) > MAX_TEXT_BYTES:
-        fail(f"file too large to read: {target}")
-    with open(target, "r", encoding="utf-8", errors="replace") as f:
-        text = f.read()
+    text = read_text_file(target)
+    if text is None:
+        # One message for both causes on purpose: for a text file the limit is
+        # the size on disk, for an Office document it is the text that comes out
+        # of it, and the caller cannot act differently on the two.
+        fail(f"file too large or unreadable: {target}")
 
     # Small file: whole thing. Big file with no explicit offset: start the
     # first page shortly before the matched line, so the read lands on the

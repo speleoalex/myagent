@@ -1,6 +1,6 @@
 {
   "name": "Local Search",
-  "description": "Search the offline library (local Wikipedia ZIM archives + the user's notes, documents and PDFs). PDFs are searched page by page, so a result points at the page that answers. Returns compact results: id | title | snippet. Read a full document with local_read(id).",
+  "description": "Search the offline library (local Wikipedia ZIM archives + the user's notes, documents, PDFs and Word/Excel/PowerPoint files). PDFs are searched page by page and presentations slide by slide, so a result points at what answers. Returns compact results: id | title | snippet. Read a full document with local_read(id).",
   "parameters": {
     "type": "object",
     "properties": {
@@ -19,7 +19,7 @@
       },
       "path": {
         "type": "string",
-        "description": "Alternative folder or file to search (searched recursively: *.zim, PDFs, .md/.txt/.rst). Default: the shared library"
+        "description": "Alternative folder or file to search (searched recursively: *.zim, PDFs, .docx/.xlsx/.pptx, .md/.txt/.rst). Default: the shared library"
       }
     },
     "required": [

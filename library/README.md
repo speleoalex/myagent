@@ -40,9 +40,10 @@ file live side by side:
 | **Wikipedia / ZIM archives** (`*.zim`) | full-text index built into the archive |
 | **Your notes and documents** (`.md`, `.txt`, `.rst`) | keyword scorer, one result per section |
 | **PDFs** | keyword scorer over the text layer, one result per page |
+| **Word, Excel, PowerPoint** (`.docx`, `.xlsx`, `.pptx`) | keyword scorer over the text, one result per section / sheet / slide |
 
-With an **embedding model** chosen in Settings, your documents and PDFs are also
-matched by MEANING — which is what makes an Italian question find an answer in
+With an **embedding model** chosen in Settings, all of these except the ZIM
+archives are also matched by MEANING — which is what makes an Italian question find an answer in
 an English manual. Measured on a folder of Mitsubishi service manuals: the
 query *"pressione olio motore"* returns, in second place, the English page
 titled `INSTALLATION OF OIL PRESSURE SWITCH`; keyword search alone puts *tyre*
@@ -112,6 +113,20 @@ A **scanned** PDF has no text layer, so nothing in it is searchable — OCR it
 first (`ocrmypdf`, or `document_extract`, which OCRs a scan page by page).
 `local_search` names the PDFs it had to skip for this reason when it finds
 nothing, rather than letting them look like covered ground.
+
+**Office documents are searched too** — `.docx`, `.xlsx` and `.pptx`, with no
+extra package to install: they are ZIP archives of XML, so MyAgent unzips them
+itself. A Word heading becomes the title of the section it heads, a spreadsheet
+is cited by sheet (`## Sheet: Costi 2026`) and a presentation by slide
+(`## Slide 7`), so an agent can tell you where it read something. Table rows
+stay on one line, or a table of torque figures stops saying which value belongs
+to which bolt. Dates in a spreadsheet come out as real dates rather than the
+five-digit numbers Excel stores, which is what makes *"when is the
+appointment"* answerable.
+
+The older `.doc`, `.xls` and `.ppt` (pre-2007) are a different, non-ZIP format
+and are **not** searched. Convert them once — `libreoffice --headless
+--convert-to docx *.doc` — and drop the results in.
 
 Images and audio are still not searched: convert them with the
 `document_extract` tool (ask an agent to extract the file and write the
@@ -237,7 +252,8 @@ them here would be a list of 404s, so: the source, and what to look for.
 
 Drop PDFs in as they are — they are searched page by page — but make sure they
 carry a text layer: a scan without one is invisible to every search, and a bad
-OCR layer is worse than no file, because it looks like coverage.
+OCR layer is worse than no file, because it looks like coverage. Word, Excel and
+PowerPoint files need nothing at all.
 
 ## Beyond documents
 
