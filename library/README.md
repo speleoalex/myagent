@@ -128,6 +128,11 @@ The older `.doc`, `.xls` and `.ppt` (pre-2007) are a different, non-ZIP format
 and are **not** searched. Convert them once — `libreoffice --headless
 --convert-to docx *.doc` — and drop the results in.
 
+`document_extract` reads them too, for a file you name by path instead of
+searching for — including the pictures embedded in it. The pre-2007 `.doc`,
+`.xls` and `.ppt` are the one thing it refuses, and it tells you the command to
+convert them.
+
 Images and audio are still not searched: convert them with the
 `document_extract` tool (ask an agent to extract the file and write the
 Markdown into the library), then they behave like any other note.

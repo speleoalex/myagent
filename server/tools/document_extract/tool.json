@@ -1,12 +1,12 @@
 {
   "name": "Extract Document to Markdown",
-  "description": "Read a document as Markdown: PDF, HTML, image (OCR), audio (returns the speech transcription), or a plain-text file (.md, .txt, .csv, .json, code — returned as is). Use this instead of file_read for anything that is not plain text — file_read returns garbage on binary files. Extracted images are saved as files and linked inline.",
+  "description": "Read a document as Markdown: PDF, Word/Excel/PowerPoint (.docx/.xlsx/.pptx), HTML, image (OCR), audio (returns the speech transcription), or a plain-text file (.md, .txt, .csv, .json, code — returned as is). Use this instead of file_read for anything that is not plain text — file_read returns garbage on binary files. Extracted images are saved as files and linked inline.",
   "parameters": {
     "type": "object",
     "properties": {
       "path": {
         "type": "string",
-        "description": "Path to the document (.pdf, .html, an image, an audio file, or a text file such as .md/.txt)"
+        "description": "Path to the document (.pdf, .docx, .xlsx, .pptx, .html, an image, an audio file, or a text file such as .md/.txt)"
       },
       "language": {
         "type": "string",
@@ -18,7 +18,7 @@
       },
       "from_page": {
         "type": "integer",
-        "description": "PDF only: first page to read. The output ends with the page to continue from, so a long manual is read in windows instead of always from the start.",
+        "description": "First page to read, for a PDF or an Office/text document (where a 'page' is one window of text). The output ends with the page to continue from, so a long manual is read in windows instead of always from the start.",
         "default": 1
       },
       "max_pages": {
@@ -28,7 +28,7 @@
       },
       "images": {
         "type": "boolean",
-        "description": "PDF only: also extract the page images and link them. Pass false when you only need the text.",
+        "description": "PDF and Office: also extract the embedded images and link them. Pass false when you only need the text.",
         "default": true
       },
       "ocr": {

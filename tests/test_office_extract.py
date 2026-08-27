@@ -26,8 +26,15 @@ The contract these tools depend on:
      must be the line local_read opens. Both tools are exercised through their
      own module copy, so a divergence fails here as well as in
      test_library_helpers_sync.py.
+  7. THREE copies of the extractor exist (local_search, local_read,
+     document_extract), forced by the CoW override copying one leaf folder. Only
+     the first two exchange computed ids, so only they can open the wrong
+     passage — but a fix landing in two places out of three is still a bug, so
+     the shared block is compared across all three.
 """
 
+import ast
+import importlib.util
 import io
 import os
 import sys
@@ -40,6 +47,13 @@ sys.path.insert(0, str(ROOT / "server" / "tools" / "library" / "local_read"))
 
 import search                                                  # noqa: E402
 import read                                                     # noqa: E402
+
+# document_extract holds the THIRD copy. Imported by path rather than added to
+# sys.path: `extract` is a generic name and the tool folder also holds a `run`.
+_spec = importlib.util.spec_from_file_location(
+    "doc_extract", ROOT / "server" / "tools" / "document_extract" / "extract.py")
+extract = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(extract)
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 W_STRICT = "http://purl.oclc.org/ooxml/wordprocessingml/main"
@@ -306,6 +320,155 @@ def test_office_files_are_collected_and_chunked():
     assert chunks, "an Office file must reach the semantic index"
     assert all(loc.startswith("f:p.pptx:") for loc, *_ in chunks), chunks[:3]
     assert any("Slide" in head for _loc, head, *_ in chunks), chunks[:3]
+
+
+# --------------------------------------------------------------------------- #
+# The three copies
+# --------------------------------------------------------------------------- #
+# Everything the shared Office block defines. Not derived by scanning for a
+# prefix: a name added to one copy and forgotten in the others is exactly the
+# drift this guards, so the list is written down.
+OFFICE_SHARED = [
+    "OFFICE_EXTS", "MAX_OFFICE_CHARS", "MAX_OFFICE_UNCOMPRESSED", "CELL_SEP",
+    "_XLS_EPOCH_1900", "_XLS_EPOCH_1904", "_XLS_DATE_FMT_IDS",
+    "_xml_tag", "_xml_root", "_docx_para_text", "_docx_heading_level",
+    "_docx_text", "_pptx_slide_order", "_pptx_text", "_xlsx_shared_strings",
+    "_xlsx_date_styles", "_xlsx_serial_to_date", "_xlsx_sheets",
+    "_xlsx_epoch_1904", "_xlsx_text", "_xlsx_cell_text", "office_text",
+]
+
+COPIES = {
+    "local_search": ROOT / "server/tools/library/local_search/search.py",
+    "local_read": ROOT / "server/tools/library/local_read/read.py",
+    "document_extract": ROOT / "server/tools/document_extract/extract.py",
+}
+
+
+def _strip_docstrings(node):
+    for n in ast.walk(node):
+        if not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef,
+                              ast.ClassDef, ast.Module)):
+            continue
+        body = getattr(n, "body", [])
+        if (body and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)):
+            n.body = body[1:] or [ast.Pass()]
+    return node
+
+
+def _top_level(path):
+    """{name: normalized code} for top-level defs and module constants."""
+    out = {}
+    for node in ast.parse(path.read_text(encoding="utf-8")).body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            out[node.name] = ast.unparse(_strip_docstrings(node))
+        elif isinstance(node, ast.Assign):
+            for t in node.targets:
+                if isinstance(t, ast.Name):
+                    out[t.id] = ast.unparse(node)
+    return out
+
+
+def test_all_three_copies_agree():
+    """Comments and docstrings stripped: BEHAVIOUR must not drift."""
+    parsed = {name: _top_level(path) for name, path in COPIES.items()}
+    missing = [(tool, name) for name in OFFICE_SHARED
+               for tool, defs in parsed.items() if name not in defs]
+    assert not missing, f"absent from a copy: {missing}"
+    base = parsed["local_search"]
+    for name in OFFICE_SHARED:
+        for tool in ("local_read", "document_extract"):
+            assert parsed[tool][name] == base[name], (
+                f"{name} differs between local_search and {tool}")
+
+
+def test_document_extract_reads_all_three_formats():
+    """The gap this closes: an Office path handed straight to document_extract."""
+    assert extract.detect_kind(Path(docx_fixture())) == "office"
+    assert extract.detect_kind(Path(xlsx_fixture())) == "office"
+    assert extract.detect_kind(Path(pptx_fixture())) == "office"
+    out = extract.extract_office(Path(docx_fixture()), TMP, 1, False)
+    assert out.startswith("# f-ok.docx"), out[:60]
+    assert "15-22 Nm" in out
+    # The window contract is the TEXT one, reused verbatim.
+    assert "chars]_" in out, out[:120]
+
+
+def test_document_extract_windows_office_like_text():
+    long_para = "parola " * 400
+    body = "".join(_para(f"{i} {long_para}") for i in range(40))
+    path = Path(_zip("win.docx",
+                     {"word/document.xml":
+                      f'<w:document xmlns:w="{W}"><w:body>{body}</w:body>'
+                      f'</w:document>'}))
+    first = extract.extract_office(path, TMP, 1, False)
+    assert "window 1 of" in first, first[:140]
+    assert "document_extract from_page=2" in first
+    second = extract.extract_office(path, TMP, 2, False)
+    assert "window 2 of" in second, second[:140]
+    # A window past the end must fail loudly, not return an empty document.
+    try:
+        extract.extract_office(path, TMP, 999, False)
+    except SystemExit:
+        pass
+    else:
+        raise AssertionError("from_page past the end must be an error")
+
+
+def test_document_extract_legacy_formats_name_the_conversion():
+    for ext, into in ((".doc", "docx"), (".xls", "xlsx"), (".ppt", "pptx")):
+        f = TMP / f"old{ext}"
+        f.write_bytes(b"\xd0\xcf\x11\xe0")
+        assert extract.detect_kind(f) == "office_legacy", ext
+        assert extract.OFFICE_LEGACY_EXTS[ext] == into
+    # ODF is a ZIP that could be read here one day, and .rtf already degrades to
+    # text: neither must be diverted into the "convert it" error.
+    for ext in (".odt", ".ods", ".odp", ".rtf"):
+        assert ext not in extract.OFFICE_LEGACY_EXTS, ext
+
+
+def test_document_extract_office_images_once():
+    png = (b"\x89PNG\r\n\x1a\n" + b"\x00" * 40)
+    path = Path(_zip("img.docx", {
+        "word/document.xml": f'<w:document xmlns:w="{W}"><w:body>'
+                             f'{_para("testo")}</w:body></w:document>',
+        "word/media/image1.png": png,
+        "word/media/image2.png": png + b"different",
+        # Not viewable: linking it would be a link to nothing.
+        "word/media/image3.emf": b"\x01\x00\x00\x00emf",
+    }))
+    out_dir = TMP / "imgs"
+    out_dir.mkdir(exist_ok=True)
+    md = extract.extract_office(path, out_dir, 1, True)
+    assert md.count("![") == 2, md[-300:]
+    assert ".emf" not in md
+    # Byte-identical duplicates are dropped, so a repeated logo is linked once.
+    path2 = Path(_zip("dup.docx", {
+        "word/document.xml": f'<w:document xmlns:w="{W}"><w:body>'
+                             f'{_para("testo")}</w:body></w:document>',
+        "word/media/image1.png": png,
+        "word/media/image2.png": png,
+    }))
+    # NOTE: this out_dir does not exist — office_images must create it, or every
+    # write fails and the pictures vanish without a word.
+    md2 = extract.extract_office(path2, TMP / "imgs2-fresh", 1, True)
+    assert md2.count("![") == 1, md2[-200:]
+
+
+def test_document_extract_office_media_numeric_order():
+    png = b"\x89PNG\r\n\x1a\n"
+    members = {"word/document.xml": f'<w:document xmlns:w="{W}"><w:body>'
+                                    f'{_para("t")}</w:body></w:document>'}
+    for i in (1, 2, 10):
+        members[f"word/media/image{i}.png"] = png + bytes([i])
+    path = Path(_zip("order.docx", members))
+    out_dir = TMP / "imgs3"
+    out_dir.mkdir(exist_ok=True)
+    md = extract.extract_office(path, out_dir, 1, True)
+    order = [ln.split("media-image")[1].split(".")[0]
+             for ln in md.splitlines() if "media-image" in ln]
+    assert order == ["1", "2", "10"], order
 
 
 if __name__ == "__main__":
