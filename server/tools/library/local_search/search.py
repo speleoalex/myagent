@@ -56,8 +56,45 @@ MAX_PDF_FILES = 2000
 # a note naming what it did not reach.
 PDF_BUDGET_S = 18
 PDF_CACHE_MAX_BYTES = 20_000_000
-LONG_TERM = 4                  # below this a query term is usually a function
-                               # word; see search_pdf_file
+LONG_TERM = 4                  # legacy length proxy, kept for callers that
+                               # still want it; see STOPWORDS below
+# Function words, in the two languages the UI speaks plus English. This REPLACES
+# the "shorter than 4 characters" proxy in search_pdf_file, and the reason is a
+# bug the proxy caused: length was never the property that mattered. The comment
+# it carried said so — "in a natural question they are function words ('si',
+# 'la', 'the', 'of')" — but in a technical corpus the SHORTEST token is usually
+# the most discriminative one. Measured on a folder of vehicle manuals: the
+# question "come sono collegati i tubi dell'egr nell'l300?" dropped `egr`, the
+# only term that identifies the subject, and scored on `collegati`/`tubi`/`l300`
+# instead. The answer was there — 686 occurrences of EGR as a word across 34
+# pages — and the agent reported that the folder did not contain it.
+#
+# Acronyms are exactly the case: EGR, ABS, TDC, ECU, RPM, PTO, DPF, 4WD. A
+# length rule cannot tell them from "the", a word list can. Lowercase, because
+# parse_query lowercases; and no acronym may ever be added here.
+STOPWORDS = frozenset("""
+il lo la le i gli un uno una di del dello della dei degli delle da dal dallo
+dalla dai dagli dalle in nel nello nella nei negli nelle con col coi su sul
+sullo sulla sui sugli sulle per tra fra a al allo alla ai agli alle e ed o od
+ma se anche come cosa quale quali quando dove perche che chi cui non ci vi ne
+mi ti si lui lei noi voi loro io tu esso essa questo questa questi queste
+quello quella quelli quelle sono sia essere stato stata essendo ho hai ha
+abbiamo avete hanno avere avuto fa fare fatto piu meno molto poco tutto tutti
+tutte ogni altro altra altri altre suo sua suoi sue mio mia miei mie
+the a an of to in on at by for with from and or but if as is are was were be
+been being do does did done have has had having it its this that these those
+he she they we you i me him her them us my your his their our what which who
+whom when where why how not no yes all any some each more most very can could
+should would will shall may might must about into over under than then there
+here so such only also just
+# Elided stems, because parse_query splits on the apostrophe: "dell'egr" arrives
+# as ('dell', 'egr') and "don't" as ('don', 't'). Single letters are already
+# excluded by its len>=2 rule; these are the multi-letter halves, and without
+# them a function word survives the filter and inflates the bar.
+dell nell all dall sull coll quell tutt sant cos
+don doesn isn didn wasn weren aren hasn haven hadn won couldn wouldn shouldn
+ll ve re
+""".split())
 
 _DEADLINE = time.monotonic() + PDF_BUDGET_S
 # How many ZIM archives one search may open. Was 6, which predates symlinked
@@ -622,20 +659,34 @@ def search_pdf_file(path, rel, terms, phrase, deadline=None):
     if not any(p.strip() for p in pages):
         return [], "notext"
 
-    # Short terms are dropped from BOTH the score and the bar. In a natural
-    # question they are function words ('si', 'la', 'the', 'of') and matching
-    # one says nothing about a page, but there are hundreds of pages for them
-    # to say it in: with every term counting, "come si cura la rosolia?"
-    # answered with a page of a cave-protection PDF ('sites', 'large') ahead
-    # of the Wikipedia article "Rosolia" (measured against the real library).
-    long_terms = [t for t in terms if len(t) >= LONG_TERM] or terms
+    # FUNCTION words are dropped from both the score and the bar — not short
+    # ones. Matching 'si' or 'the' says nothing about a page and there are
+    # hundreds of pages to say it in: with every term counting, "come si cura la
+    # rosolia?" answered with a page of a cave-protection PDF ('sites',
+    # 'large') ahead of the Wikipedia article "Rosolia". But length was the
+    # wrong instrument for that job: it also dropped `egr`, `abs`, `tdc` — in a
+    # service manual the short token is the SUBJECT. See STOPWORDS.
+    long_terms = [t for t in terms if t not in STOPWORDS] or terms
     pats = word_patterns(long_terms)
-    needed = max(1, (len(long_terms) + 1) // 2)
     name = os.path.basename(rel)
     # No weak fallback here, unlike search_text_file: that exists so a loose
     # query still gets something out of a handful of notes, while a folder of
     # manuals always has SOME page mentioning SOME word, and offering it
     # displaces a real answer from another source.
+    # The bar is "half the terms this FILE can match", not half the terms asked.
+    # A fixed half is unreachable whenever the question and the document are in
+    # different languages — which is the normal case for this library: an
+    # Italian question over English manuals shares only the acronym, so
+    # requiring two terms of four structurally excluded every real answer
+    # (measured: 0 qualifying pages in the EGR manual, against 52 with this).
+    # It stays a bar, not a weak fallback: a page must still match half of what
+    # is matchable HERE, so a folder of manuals cannot offer a page that merely
+    # mentions one word out of several the file does contain.
+    lowered = [p.lower() for p in pages]
+    matchable = sum(1 for _t, pat in pats
+                    if any(pat.search(low) for low in lowered))
+    needed = max(1, (matchable + 1) // 2) if matchable else len(pats) + 1
+
     strong = []
     for page_no, page in enumerate(pages, 1):
         if not page.strip():
