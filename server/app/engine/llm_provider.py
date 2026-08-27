@@ -58,6 +58,53 @@ FALLBACK_MAX_OUTPUT = 8192
 # 64000, which is the maximum allowed number of output tokens for <model>".
 _MAX_TOKENS_LIMIT_RE = re.compile(r"max_tokens:\s*(\d+)\s*>\s*(\d+)")
 
+# Context windows learned by OVERFLOWING them. Memoized like _MAX_TOKENS_CAPS and
+# for the same reason: the probe can be wrong (llama.cpp reports the per-slot
+# n_ctx, but a payload also has to fit the answer beside it) and without this
+# every turn re-pays the 400 that discovers the truth.
+_CTX_CAPS: dict[tuple[str, str], int] = {}
+
+# A context overflow NAMES both numbers, which is what makes it recoverable.
+# llama.cpp: "request (17450 tokens) exceeds the available context size (16384
+# tokens), try increasing it". OpenAI: "This model's maximum context length is
+# 8192 tokens. However, your messages resulted in 8500 tokens".
+_CTX_OVERFLOW_RES = (
+    re.compile(r"request\s*\((\d+)\s*tokens?\)\s*exceeds?\s*the\s*available\s*"
+               r"context\s*size\s*\((\d+)", re.I),
+    re.compile(r"maximum\s*context\s*length\s*is\s*(\d+)\s*tokens?.{0,80}?"
+               r"resulted\s*in\s*(\d+)\s*tokens?", re.I | re.S),
+)
+
+
+def _ctx_from_error(detail: str) -> tuple[int, int] | None:
+    """(tokens the payload really cost, the window it has to fit) or None.
+
+    The two orders are swapped between providers, so each pattern says which
+    group is which by construction: llama.cpp states used first, OpenAI the
+    limit first. A pair that doesn't actually overflow is discarded — acting on
+    it would re-send an identical payload and burn an attempt.
+    """
+    for i, rx in enumerate(_CTX_OVERFLOW_RES):
+        m = rx.search(detail)
+        if not m:
+            continue
+        a, b = int(m.group(1)), int(m.group(2))
+        used, limit = (a, b) if i == 0 else (b, a)
+        if 0 < limit < used:
+            return used, limit
+    return None
+
+
+# Appended wherever this module has to cut a tool result to fit the context. A
+# severed page reads as a finished one otherwise — the same reason every cap in
+# the library tools declares itself.
+_TRUNCATION_NOTE = ("\n\n[... this tool result was cut to fit the context window. "
+                    "Call the tool again for the rest if you need it.]")
+
+#: Below this, cutting a tool result buys less context than the note costs
+#: honesty: it would mark a complete result as partial. See _trim_tool_results.
+_MIN_TRIM_CHARS = 400
+
 
 def _clamp_from_error(detail: str, current: int) -> int | None:
     """The ceiling named in a max_tokens refusal, or None if none is stated.
@@ -175,16 +222,24 @@ class LLMProvider:
     def _sanitize_messages(messages: list[dict]) -> list[dict]:
         """Convert tool-related messages to plain text for models that
         don't support role:tool in conversation history.
-        Merges adjacent assistant(tool_calls) + tool(result) into one message."""
-        sanitized = []
+
+        The rebuilt list must have the shape the TEXT protocol already uses in
+        the executor: the CALL as an assistant message, the RESULT as the user
+        message that follows. Folding both into one assistant message produced a
+        run of consecutive assistant messages, and llama.cpp reads a trailing
+        assistant message as a prefill to continue — it refuses two of them
+        outright ("Cannot have 2 or more assistant messages at the end of the
+        list", observed 2026-08-27) and, with only one, would have had the model
+        continue its own tool-call transcript instead of answering.
+        """
+        sanitized: list[dict] = []
         i = 0
         while i < len(messages):
             m = messages[i]
             role = m.get("role")
 
             if role == "assistant" and m.get("tool_calls"):
-                # Merge with following tool result messages
-                parts = []
+                calls, results = [], []
                 for tc in m["tool_calls"]:
                     func = tc.get("function", {})
                     name = func.get("name", "unknown")
@@ -201,13 +256,14 @@ class LLMProvider:
                     # The marker is a prompts.py constant: the history matcher
                     # (is_scaffolding_message) keys on it, and a rewording here
                     # that missed the matcher would leak plumbing into history.
-                    parts.append(
-                        f"{prompts.SANITIZED_TOOL_PREFIX} '{name}' with {args}]\n"
-                        f"Result: {result}"
-                    )
+                    calls.append(f"{prompts.SANITIZED_TOOL_PREFIX} '{name}' with {args}]")
+                    results.append(f"{name}: {result}" if result else f"{name}: (no output)")
+                if m.get("content"):
+                    calls.insert(0, str(m["content"]))
+                sanitized.append({"role": "assistant", "content": "\n".join(calls)})
                 sanitized.append({
-                    "role": "assistant",
-                    "content": "\n\n".join(parts),
+                    "role": "user",
+                    "content": prompts.TOOL_RESULTS_PREFIX + "\n" + "\n\n".join(results),
                 })
                 # Skip tool result messages that follow
                 i += 1
@@ -216,11 +272,11 @@ class LLMProvider:
                 continue
 
             elif role == "tool":
-                # Orphaned tool result (no preceding assistant) — merge as assistant
-                content = m.get("content", "")
+                # Orphaned tool result (no preceding assistant call) — it is
+                # still a RESULT, so it takes the user side of the protocol.
                 sanitized.append({
-                    "role": "assistant",
-                    "content": f"[Tool result]: {content}",
+                    "role": "user",
+                    "content": prompts.TOOL_RESULTS_PREFIX + "\n" + str(m.get("content") or ""),
                 })
             else:
                 clean = {"role": role, "content": m.get("content", "")}
@@ -228,7 +284,29 @@ class LLMProvider:
                     clean["name"] = m["name"]
                 sanitized.append(clean)
             i += 1
-        return sanitized
+        return LLMProvider._merge_consecutive_assistants(sanitized)
+
+    @staticmethod
+    def _merge_consecutive_assistants(messages: list[dict]) -> list[dict]:
+        """Collapse adjacent assistant messages into one.
+
+        A backstop, not the mechanism: the caller above already alternates. But
+        the input list can arrive with two assistant turns in a row (a forced
+        synthesis appended after a stopped turn), and llama.cpp refuses that
+        outright at the end of the list — so this is cheaper than a 400 whose
+        message names nothing the caller did.
+        """
+        merged: list[dict] = []
+        for m in messages:
+            prev = merged[-1] if merged else None
+            if (prev and prev.get("role") == "assistant" and m.get("role") == "assistant"
+                    and isinstance(prev.get("content"), str)
+                    and isinstance(m.get("content"), str)):
+                merged[-1] = {**prev,
+                              "content": (prev["content"] + "\n\n" + m["content"]).strip()}
+                continue
+            merged.append(m)
+        return merged
 
     @staticmethod
     def _estimate_tokens(content) -> int:
@@ -248,11 +326,81 @@ class LLMProvider:
             return 0
         return len(content) // 4 + 1
 
-    def _truncate_messages(self, messages: list[dict], max_tokens: int) -> list[dict]:
-        """Best-effort context guard: if the estimated total exceeds max_tokens,
-        trim the LAST user message (the usual overflow source: pasted files).
-        Earlier history is already capped by the executor's sliding window."""
+    @classmethod
+    def _is_tool_scaffolding(cls, m: dict) -> bool:
+        """True for a message that carries a TOOL RESULT rather than dialogue.
+
+        Two shapes, because a result reaches the payload by two routes: role:tool
+        (native protocol) and the user message that carries it in the text
+        protocol — the executor's and _sanitize_messages' alike. Both are
+        plumbing, and both are where a long turn's overflow actually lives.
+
+        Deliberately NOT the assistant side. The only assistant scaffolding in a
+        payload is the CALL transcript, which is short and must stay intact: a
+        severed `[Called tool 'x' with {…` is malformed JSON in the history, and
+        the models this protocol exists for imitate what they read.
+        """
+        role = m.get("role")
+        if role == "tool":
+            return True
+        content = m.get("content")
+        return (role == "user" and isinstance(content, str)
+                and content.startswith(prompts.TOOL_RESULTS_PREFIX))
+
+    def _trim_tool_results(self, messages: list[dict], budget: int,
+                           total: int) -> tuple[list[dict], int]:
+        """Shrink tool results, OLDEST first, until the estimate fits `budget`.
+
+        Deliberately breaks the "tool results are never truncated" rule of the
+        executor's sliding window, and only here: at this point the alternative
+        is not a fuller context, it is a failed turn. Oldest first because the
+        model is about to reason from the most RECENT result, and the last one
+        is trimmed only if nothing else was enough. Every cut is DECLARED, or
+        the model reads a severed page as a finished one.
+        """
+        result = list(messages)
+        idx = [i for i, m in enumerate(result) if self._is_tool_scaffolding(m)]
+        if not idx:
+            return result, total
+        # The newest result goes last in line, not out of it.
+        for i in idx[:-1] + [idx[-1]]:
+            if total <= budget:
+                break
+            content = result[i].get("content")
+            if not isinstance(content, str):
+                continue
+            was = self._estimate_tokens(content)
+            keep = max(0, min(was, budget - (total - was)))
+            head = content[:keep * 4] if keep else ""
+            # A cut that saves almost nothing still DECLARES itself, which reads
+            # as "there was more" on a result that is in fact complete. Skip it
+            # and let the next (older) message carry the reduction.
+            if len(content) - len(head) < _MIN_TRIM_CHARS:
+                continue
+            trimmed = head + _TRUNCATION_NOTE
+            result[i] = {**result[i], "content": trimmed}
+            total += self._estimate_tokens(trimmed) - was
+            log.warning("Trimmed a tool result from %d to %d chars to fit the context",
+                        len(content), len(trimmed))
+        return result, total
+
+    def _truncate_messages(self, messages: list[dict], max_tokens: int,
+                           reserve: int = 0) -> list[dict]:
+        """Best-effort context guard: if the estimated total exceeds the budget,
+        trim the tool results (oldest first), then the LAST user message (the
+        other usual overflow source: pasted files). Earlier history is already
+        capped by the executor's sliding window.
+
+        `reserve` is what the payload costs BESIDE the messages — the tool
+        definitions and the room the answer needs. Without it the guard measures
+        the wrong thing: it passed a payload that the server then refused for
+        104 tokens (observed 2026-08-27, a librarian reading five PDF pages).
+        """
+        max_tokens = max(512, max_tokens - reserve)
         total = sum(self._estimate_tokens(m.get("content") or "") for m in messages)
+        if total <= max_tokens:
+            return messages
+        messages, total = self._trim_tool_results(messages, max_tokens, total)
         if total <= max_tokens:
             return messages
 
@@ -329,9 +477,6 @@ class LLMProvider:
     ) -> dict:
         remote = self.config.provider == "openai"
 
-        # Auto-truncate messages to fit the context window (probed, not guessed).
-        messages = self._truncate_messages(messages, max_ctx)
-
         payload = {
             "model": self.config.model,
             "messages": messages,
@@ -387,7 +532,24 @@ class LLMProvider:
                 value = payload.pop(key)
                 if replacement:
                     payload[replacement] = value
+
+        # Fit the context window (probed, not guessed) — LAST, so the reserve
+        # can be measured against the finished payload: the tool definitions are
+        # part of the prompt, and the answer needs room beside it.
+        learned = _CTX_CAPS.get(self._caps_key)
+        if learned:
+            max_ctx = min(max_ctx, learned)
+        payload["messages"] = self._truncate_messages(
+            payload["messages"], max_ctx, reserve=self._payload_overhead(payload))
         return payload
+
+    def _payload_overhead(self, payload: dict) -> int:
+        """What the payload costs beside the messages: tool schemas + answer room."""
+        tools = payload.get("tools") or []
+        overhead = self._estimate_tokens(json.dumps(tools)) if tools else 0
+        overhead += (payload.get("max_tokens")
+                     or payload.get("max_completion_tokens") or 0)
+        return overhead + 64  # chat-template scaffolding per message
 
     # ------------------------------------------------------------------
     # Anthropic Messages API (provider "anthropic")
@@ -511,8 +673,17 @@ class LLMProvider:
         max_out: int,
     ) -> dict:
         # Truncate BEFORE translating: the estimator understands the
-        # OpenAI-style shapes (strings, image_url parts).
-        messages = self._truncate_messages(messages, max_ctx)
+        # OpenAI-style shapes (strings, image_url parts). The reserve is the
+        # same idea as in _build_payload — the tool schemas are part of the
+        # prompt, and max_tokens is a hard output cap the input has to fit
+        # beside.
+        learned = _CTX_CAPS.get(self._caps_key)
+        if learned:
+            max_ctx = min(max_ctx, learned)
+        reserve = max_out + 64
+        if tools and self.supports_tools is not False:
+            reserve += self._estimate_tokens(json.dumps(tools))
+        messages = self._truncate_messages(messages, max_ctx, reserve=reserve)
 
         system = "\n\n".join(
             m["content"] for m in messages
@@ -713,6 +884,38 @@ class LLMProvider:
         """
         low = detail.lower()
         anthropic = self.config.provider == "anthropic"
+
+        ctx = _ctx_from_error(detail)
+        if ctx:
+            # The refusal names the real window, so learn it and re-fit — the
+            # same shape as the max_tokens cap above. This branch has to come
+            # FIRST: a context overflow says nothing about tool support, but the
+            # no-tools branch at the bottom catches every unexplained 400, so
+            # without it one long payload downgraded a tool-capable model to the
+            # text protocol process-wide, then failed anyway on the same
+            # overflow — and reported llama.cpp's complaint about the rebuilt
+            # message list instead of the real cause (observed 2026-08-27).
+            used, limit = ctx
+            _CTX_CAPS[self._caps_key] = limit
+            self._ctx_budget = limit
+            msgs = payload.get("messages") or []
+            before = sum(self._estimate_tokens(m.get("content") or "") for m in msgs)
+            # Our estimate under-counted by exactly used/before (a PDF layout
+            # dump costs far more than 4 chars per token), so scale the budget by
+            # the measured factor instead of guessing a second time.
+            ratio = max(1.0, used / max(1, before))
+            budget = int((limit - self._payload_overhead(payload)) / ratio)
+            payload["messages"] = self._truncate_messages(msgs, budget)
+            after = sum(self._estimate_tokens(m.get("content") or "")
+                        for m in payload["messages"])
+            if after < before:
+                log.warning("Model '%s' context is %d tokens (payload cost %d); "
+                            "trimmed est. %d -> %d", self.config.id, limit, used,
+                            before, after)
+                return True
+            # Nothing left to trim: surface the real error instead of trading it
+            # for a misleading one.
+            return False
 
         for key in DROPPABLE_PARAMS:
             if key not in payload or key not in low:

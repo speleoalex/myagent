@@ -37,7 +37,10 @@ ASSISTANT_MARKER_PREFIXES = (USED_TOOL_PREFIX, UNPARSED_CALL_PREFIX)
 #: Written by LLMProvider._sanitize_messages when an endpoint rejects `tools`
 #: and the in-flight payload must be flattened to plain text. Not "legacy":
 #: still produced today — but only inside a single request's payload, so the
-#: history matcher treats it like the legacy wordings below.
+#: history matcher treats it like the legacy wordings below. It marks the CALL
+#: only: the sanitizer puts the RESULT in the user message that follows, under
+#: TOOL_RESULTS_PREFIX, because a run of consecutive assistant messages is
+#: rejected by llama.cpp (and read as a prefill to continue when there is one).
 SANITIZED_TOOL_PREFIX = "[Called tool"
 
 #: Earlier assistant wordings, kept so already-stored sessions stay clean
