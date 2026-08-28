@@ -116,6 +116,17 @@ async def update_settings(new_settings: Settings, request: Request):
                         f"({why}). Indexing sends the CONTENTS of your documents "
                         "to the embedding endpoint, not just your question, so "
                         "only a local model (Ollama or llama.cpp) can be used."))
+    # The demotion threshold is a fraction of the usable window. Below 0.5 the
+    # payload is compressed on turns that fit comfortably, which throws away
+    # context for nothing; above 0.95 there is no room left to land in and the
+    # overflow it exists to prevent happens anyway.
+    at = new_settings.context_compact_at
+    if not (0.5 <= at <= 0.95):
+        raise HTTPException(
+            status_code=400,
+            detail=(f"context_compact_at must be between 0.5 and 0.95 (got {at}): "
+                    "below 0.5 it compresses turns that fit, above 0.95 there is "
+                    "no room left to land in."))
     save_settings(new_settings)
     config.settings = new_settings
     # The default model and the backend URLs are exactly what the fallback

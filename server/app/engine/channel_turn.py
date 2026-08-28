@@ -75,7 +75,7 @@ async def run_channel_turn(req: ChatRequest, named, executor) -> ChatResponse:
         record_user_turn(session, req.message,
                          [a.model_dump() for a in req.attachments], req.agent_id)
         record_turn(session, steps_from(response.trace, response.tool_results),
-                    response.reply, conv, response.reasoning)
+                    response.reply, conv, response.reasoning, response.context)
         await asyncio.to_thread(named.save_rotating, sid, session)
     schedule_compaction(executor, sid, named=named)
     return response

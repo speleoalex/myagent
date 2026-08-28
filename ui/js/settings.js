@@ -103,6 +103,16 @@ const SettingsPage = {
                             <label class="form-label">${i18n('settings.llamacppUrl')}</label>
                             <input type="text" class="form-control" id="f-llamacpp-url" value="${App.esc(settings.llamacpp_base_url || 'http://localhost:8080')}">
                         </div>
+                        <div class="mb-3">
+                            <label class="form-label" for="f-ctx-compact">${i18n('settings.contextCompact')}</label>
+                            <div class="d-flex align-items-center gap-2">
+                                <input type="range" class="form-range" id="f-ctx-compact"
+                                       min="50" max="95" step="5" style="max-width:14rem"
+                                       value="${Math.round((settings.context_compact_at ?? 0.9) * 100)}">
+                                <span class="text-secondary small" id="f-ctx-compact-val">${Math.round((settings.context_compact_at ?? 0.9) * 100)}%</span>
+                            </div>
+                            <div class="form-text">${i18n('settings.contextCompactHint')}</div>
+                        </div>
                         <div class="mb-3 form-check form-switch">
                             <input class="form-check-input" type="checkbox" id="f-debug"
                                    ${settings.debug ? 'checked' : ''}>
@@ -177,6 +187,10 @@ const SettingsPage = {
                 default_model_id: document.getElementById('f-default-model').value || null,
                 embedding_model_id: document.getElementById('f-embedding-model').value || null,
                 debug: document.getElementById('f-debug').checked,
+                // The server takes a fraction; the slider speaks percent because
+                // that is what the label reads.
+                context_compact_at:
+                    Number(document.getElementById('f-ctx-compact').value) / 100,
             };
             try {
                 await App.api('PUT', '/system/settings', data);
@@ -185,6 +199,7 @@ const SettingsPage = {
                 // state now, not on the next visit to this page.
                 settings.embedding_model_id = data.embedding_model_id;
                 settings.debug = data.debug;
+                settings.context_compact_at = data.context_compact_at;
                 this.renderDebugBox();
                 document.getElementById('index-rebuild-warn').classList.add('d-none');
                 this.renderIndexStatus();
@@ -195,6 +210,13 @@ const SettingsPage = {
 
         // Changing the embedder discards every index. Say so BEFORE the save,
         // not after hours of re-indexing.
+        const ctxSlider = document.getElementById('f-ctx-compact');
+        if (ctxSlider) {
+            ctxSlider.oninput = () => {
+                document.getElementById('f-ctx-compact-val').textContent =
+                    ctxSlider.value + '%';
+            };
+        }
         document.getElementById('f-embedding-model').onchange = (e) => {
             const prev = settings.embedding_model_id || '';
             document.getElementById('index-rebuild-warn')

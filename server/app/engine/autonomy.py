@@ -548,7 +548,8 @@ class AutonomyService:
                                 steps = steps_from(data.get("trace"), tool_events)
                                 conv = data.get("conversation")
                                 record_turn(session, steps, reply, conv,
-                                            data.get("reasoning") or reasoning_text)
+                                            data.get("reasoning") or reasoning_text,
+                                            data.get("context"))
                                 if not agent.memory_enabled:
                                     session["conversation"] = \
                                         session.get("conversation", [])[-NO_MEMORY_CONV_CAP:]

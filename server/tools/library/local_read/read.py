@@ -50,6 +50,11 @@ from html.parser import HTMLParser
 from xml.etree import ElementTree
 
 PAGE = 8000                    # chars per page, cut back to a word boundary
+# From this page on, the footer also says "stop paging, search differently".
+# 3 because two pages of a document is ordinary reading and ten is the loop this
+# exists for: paging is the cheapest next move a small model can pick, and each
+# page costs ~8000 chars that ride EVERY later iteration of the turn.
+DEEP_PAGE = 3
 MAX_TEXT_BYTES = 3_000_000     # refuse text files larger than this
 PDF_CACHE_MAX_BYTES = 20_000_000
 
@@ -344,7 +349,7 @@ def pdf_document(pages):
 # --------------------------------------------------------------------------- #
 # Paged rendering
 # --------------------------------------------------------------------------- #
-def render(rid, title, label, text, offset, note=""):
+def render(rid, title, label, text, offset, note="", start=None):
     total = len(text)
     if offset >= total and total:
         fail(f"offset {offset} is past the end of the document ({total} chars)")
@@ -375,6 +380,24 @@ def render(rid, title, label, text, offset, note=""):
         footer = (f"…more — call local_read with offset={end}; if the user "
                   f"wants the WHOLE document as a file, call again with "
                   f"export=true instead")
+        # Past DEEP_PAGE pages, ADD a line — the wording above is not touched,
+        # because it is tuned (see the two A/B results in the comment). A model
+        # once walked ten consecutive pages of a 342-page manual with this
+        # footer and then reported that the answer was not in the folder: the
+        # invitation to page is right for page 2 and wrong for page 5.
+        #
+        # Counted from `start`, i.e. from where the SEARCH pointed, not from the
+        # top of the document: `offset` is an absolute character position, so on
+        # a 342-page manual the first read already sits at offset 283643 and
+        # `offset // PAGE` says "page 36" — the nudge would fire on the very
+        # first page and mean nothing (observed, 2026-08-28). What matters is how
+        # far the model has WALKED, and that is stateless too.
+        walked = ((offset - start) // PAGE + 1) if start is not None else 1
+        if walked >= DEEP_PAGE:
+            footer += (f"\n\nNOTE: you have read {walked} consecutive pages of "
+                       f"this document. If the answer is not in them, do NOT keep "
+                       f"paging — run local_search again with different terms, or "
+                       f"in the language the documents are written in.")
     else:
         footer = "— end of document —"
     print(f"{header}\n\n{body.strip()}\n\n{footer}")
@@ -763,17 +786,19 @@ def read_pdf(root, rid, rel, page, offset, offset_given, path_given=True,
              f"OCR it instead")
 
     text, offsets = pdf_document(pages)
+    start = None
     if 1 <= page <= len(offsets):
         note = f"match on page {page}"
+        start = offsets[page - 1]
         if not offset_given:
-            offset = offsets[page - 1]
+            offset = start
     else:
         note = f"page {page} is past the end ({len(pages)} pages)"
-    render(rid, rel, f"PDF, {len(pages)} pages", text, offset, note)
+    render(rid, rel, f"PDF, {len(pages)} pages", text, offset, note, start)
 
 
 # --------------------------------------------------------------------------- #
-# Office documents (OOXML) — duplicated in ../local_read/read.py
+# Office documents (OOXML) — duplicated from ../local_search/search.py
 #
 # .docx/.xlsx/.pptx are ZIP archives of XML, so the whole extractor is stdlib.
 # That is a deliberate choice over python-docx/openpyxl/python-pptx (~7 packages
@@ -1211,12 +1236,14 @@ def read_file(root, rid, rel, line, offset, offset_given, path_given=True,
     # match instead of burning pages from the top — but never so late that
     # the page comes back nearly empty (a match in the last paragraph).
     note = ""
+    start = 0
     if len(text) > PAGE and line > 1:
         note = f"match at line {line}"
+        at = sum(len(ln) + 1 for ln in text.splitlines()[:line - 1])
+        start = max(0, min(at - 200, len(text) - PAGE))
         if not offset_given:
-            at = sum(len(ln) + 1 for ln in text.splitlines()[:line - 1])
-            offset = max(0, min(at - 200, len(text) - PAGE))
-    render(rid, rel, "", text, offset, note)
+            offset = start
+    render(rid, rel, "", text, offset, note, start)
 
 
 def main():

@@ -101,6 +101,41 @@ body {
     font-size: 0.9em;
 }
 
+/* How full the model's context got this turn. Deliberately the quietest thing in
+   the bubble — it is a fact about the machine, not about the answer — until it
+   matters: amber when the turn came close to the window, red when the executor
+   actually had to compress the oldest tool results to fit. */
+.msg-context {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    margin-top: 0.35rem;
+    font-size: 0.72rem;
+    opacity: 0.55;
+}
+.msg-context .ctx-bar {
+    display: inline-block;
+    width: 56px;
+    height: 4px;
+    border-radius: 2px;
+    background: var(--bs-border-color);
+    overflow: hidden;
+}
+.msg-context .ctx-bar i {
+    display: block;
+    height: 100%;
+    width: 0;
+    background: currentColor;
+}
+.msg-context.ctx-warn {
+    opacity: 0.8;
+    color: var(--bs-warning-text-emphasis, #997404);
+}
+.msg-context.ctx-cut {
+    opacity: 1;
+    color: var(--bs-danger-text-emphasis, #b02a37);
+}
+
 /* A thinking model's chain-of-thought: collapsed, above the tool calls. Quieter
    than a tool call (dashed, no fill) — it is context, not something that ran. */
 .msg-reasoning {

@@ -74,6 +74,38 @@ FORCE_ANSWER = (
     "Do NOT output JSON and do NOT call any tool."
 )
 
+#: Every tool call in a round was one already made this turn, and the model
+#: offered no prose beside them. The dedup drops those calls, so without this the
+#: turn ends with an EMPTY assistant message and the forced synthesis writes an
+#: apology instead of an answer — punishing the model for a decision we made.
+#: Named separately from FORCE_ANSWER because it must also license a DIFFERENT
+#: call: repeating is the wrong move, but so is giving up.
+REPEATED_CALLS = (
+    "Those tool calls were already made earlier in this turn and their results "
+    "are above — running them again would return the same thing. Either write the "
+    "final answer from what you already have, or call something DIFFERENT (other "
+    "search terms, another document). Do not repeat a call you have already made."
+)
+
+#: Appended to a tool result once the same tool has been called this many times
+#: in one turn. Not a block — the tool still runs — because "keep paging" is
+#: sometimes right; it is the model's own count that it cannot otherwise see.
+REPEATED_TOOL_NOTE = (
+    "\n\n[you have called {tool} {n} times in this turn. If the answer is not in "
+    "what came back, change approach — different search terms or a different "
+    "document — rather than continuing.]"
+)
+
+#: Shown to the USER (not the model) the first time a turn has to compress its
+#: older tool results to stay inside the window. Every cap in this codebase
+#: declares itself, and this one explains something the reader can otherwise only
+#: guess at: why the answer got thinner as the turn went on.
+CONTEXT_COMPACTED_NOTICE = (
+    "The context window ({window} tokens) filled up: the oldest tool results of "
+    "this turn were shortened to make room. The agent can re-read them if it "
+    "needs to. A larger window, or a more specific question, avoids it."
+)
+
 #: Text-protocol recovery: the reply meant to be a tool call but did not parse.
 MALFORMED_CALL = (
     "MALFORMED TOOL CALL: that JSON did not parse, so nothing ran. Send the call "

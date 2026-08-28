@@ -22,7 +22,7 @@ from app.tools import resources as resource_channel
 from app.tools.registry import ToolRegistry
 from app.storage.attachments import store_attachment
 from app.storage.memory import MemoryStore
-from app.storage.sessions import now_iso as _now_iso
+from app.storage.sessions import DELEGATION_TOOL, now_iso as _now_iso
 from app.storage.store import JsonStore
 
 log = logging.getLogger(__name__)
@@ -59,6 +59,11 @@ _FOREIGN_CONTEXT_MAX = 6000
 # the scaffolding markers in particular must have exactly one definition.
 _FORCE_ANSWER_PROMPT = prompts.FORCE_ANSWER
 _MALFORMED_CALL_PROMPT = prompts.MALFORMED_CALL
+_REPEATED_CALLS_PROMPT = prompts.REPEATED_CALLS
+#: After this many calls to the SAME tool in one turn, each further result
+#: carries prompts.REPEATED_TOOL_NOTE. 3 because two pages of a document is
+#: normal reading and ten is the loop this exists for.
+_REPEAT_TOOL_NUDGE_AT = 3
 _MAX_MALFORMED_RETRIES = 2
 
 
@@ -251,10 +256,40 @@ class AgentExecutor:
             events.append({"type": "token", "data": answer_piece})
         return events, answer, added, sep
 
-    def _synthesis_messages(self, messages: list[dict]) -> list[dict]:
+    def _synthesis_messages(self, messages: list[dict],
+                            trace_steps: list[dict] | None = None) -> list[dict]:
         """Messages for a forced, no-tool answer: drop empty/dangling turns and
-        append the instruction to answer from the tool results above."""
-        clean = [m for m in messages if (m.get("content") or m.get("tool_calls"))]
+        append the instruction to answer from the tool results above.
+
+        Tool results are RESTORED from `trace_steps`, which always holds the full
+        text (_make_step), because a turn that looped on tools is both the one
+        that triggers _fit_context and the one that needs this pass — writing the
+        final answer from our own stubs would trade an expensive correct answer
+        for a cheap vague one, in exactly the case this was built for. There is
+        room: dropping `tools` frees the whole schema reserve.
+        """
+        full = {}
+        for st in trace_steps or []:
+            if isinstance(st.get("result"), str):
+                full.setdefault(st.get("tool"), []).append(st["result"])
+        pending = {k: list(v) for k, v in full.items()}
+        clean = []
+        for m in messages:
+            if not (m.get("content") or m.get("tool_calls")):
+                continue
+            if (trace_steps and LLMProvider.is_tool_scaffolding(m)
+                    and isinstance(m.get("content"), str)
+                    and "… [cut at " in m["content"]):
+                # Restore in order: the steps were recorded in the order their
+                # results were appended, so the n-th stub of a tool maps to the
+                # n-th step of that tool.
+                tool = next((t for t in pending if t and t in m["content"]), None)
+                if tool and pending[tool]:
+                    restored = pending[tool].pop(0)
+                    prefix = (prompts.TOOL_RESULTS_PREFIX + "\n"
+                              if m.get("role") == "user" else "")
+                    m = {**m, "content": prefix + restored}
+            clean.append(m)
         return clean + [{"role": "user", "content": _FORCE_ANSWER_PROMPT}]
 
     def _synthesis_temp(self):
@@ -1074,6 +1109,173 @@ class AgentExecutor:
     _TOOL_RESULTS_CHARS = 600
     _TOOL_RESULTS_CHARS_OLDER = 180
 
+    # ------------------------------------------------------------------
+    # In-turn demotion of tool results (occupancy-triggered)
+    #
+    # A turn's tool results are appended to `messages` and re-sent on EVERY
+    # iteration, so the cost is quadratic: measured on one real turn, 12 tool
+    # calls (2 searches plus 10 local_read pages of one PDF) cost 22 model calls
+    # and ~221k input tokens, and iterations 9-13 each overflowed a 16384-token
+    # window, paid an HTTP 400, and were rescued by a trim that _build_payload
+    # then threw away.
+    #
+    # Why HERE and not in LLMProvider._trim_tool_results, which already trims at
+    # the wire: the provider sees only {role, tool_call_id, content}. It does not
+    # know WHICH tool produced a result or with what arguments, so all it can do
+    # is head-slice a blob. The executor knows both, so its stub can say "call
+    # local_read(id=…) again for the rest" — actionable instead of merely
+    # shorter. The wire trim stays as the last-resort guard.
+    # ------------------------------------------------------------------
+
+    #: Newest tool results never demoted. Measured: keeping 1 gives 3.0x fewer
+    #: tokens and keeping 2 gives 2.2x, but a `search -> read -> read(offset)`
+    #: chain routinely needs the previous page, so 2 is the honest default.
+    _CTX_KEEP_VERBATIM = 2
+    #: Head left in a stub. Deliberately _TOOL_RESULTS_CHARS_OLDER, reused: the
+    #: across-turn and within-turn recency policies must not drift apart.
+    _CTX_DEMOTE_CHARS = _TOOL_RESULTS_CHARS_OLDER
+    #: Below this saving, leave it alone — same rule as
+    #: llm_provider._MIN_TRIM_CHARS: a cut that frees nothing still DECLARES
+    #: itself, marking a complete result as partial. That is a lie for free.
+    _CTX_MIN_DEMOTE = 400
+    #: How far below the trigger one pass takes us. Hysteresis, not politeness:
+    #: without a gap the very next tool result crosses the line again and we
+    #: demote one message per iteration forever.
+    _CTX_DEMOTE_MARGIN = 0.20
+    #: Never demoted. The asymmetry is already recorded for the across-turn
+    #: window: re-running a search costs one call, re-running a DELEGATION costs
+    #: a whole sub-agent turn — and within this turn that reply exists nowhere
+    #: else in the payload (recall_delegation serves PREVIOUS turns).
+    #: DELEGATION_TOOL, not the literal "call_agent": storage.sessions owns that
+    #: name and the across-turn recall keys on it too.
+    _CTX_NEVER_DEMOTE = (DELEGATION_TOOL,)
+
+    def _tool_result_index(self, messages: list[dict],
+                           start: int) -> list[dict]:
+        """``[{i, tool, arguments, key}]`` for each tool result of THIS turn,
+        oldest first.
+
+        A `role: tool` message carries only a `tool_call_id`, so the tool name
+        and arguments are recovered from the nearest preceding assistant message
+        that requested it. In the text protocol one `role: user` message carries
+        the whole round, so it resolves to that round's calls as a group.
+        """
+        pending: dict[str, dict] = {}
+        round_calls: list[dict] = []
+        out: list[dict] = []
+        for i in range(start, len(messages)):
+            m = messages[i]
+            if m.get("role") == "assistant" and m.get("tool_calls"):
+                round_calls = list(m["tool_calls"])
+                for tc in m["tool_calls"]:
+                    pending[tc.get("id") or ""] = tc
+                continue
+            if not LLMProvider.is_tool_scaffolding(m):
+                continue
+            if m.get("role") == "tool":
+                tc = pending.get(m.get("tool_call_id") or "") or {}
+                calls = [tc] if tc else []
+            else:
+                calls = round_calls          # text protocol: one batched message
+            names, args, keys = [], {}, []
+            for tc in calls:
+                fn = tc.get("function") or {}
+                if fn.get("name"):
+                    names.append(fn["name"])
+                    keys.append(_tool_call_key(tc))
+                    if not args:
+                        args = _tool_call_args(tc) or {}
+            out.append({"i": i, "tool": ", ".join(names) or "?",
+                        "names": names, "arguments": args, "keys": keys})
+        return out
+
+    def _demote_stub(self, content: str, tool: str, arguments: dict) -> str:
+        """One demoted tool result, in the marker style of
+        _build_tool_results_section — so the model meets ONE wording for "there
+        was more of this, ask again"."""
+        flat = " ".join((content or "").split())
+        head = flat[:self._CTX_DEMOTE_CHARS].rstrip()
+        hint = ""
+        if isinstance(arguments, dict):
+            raw = (arguments.get("query") or arguments.get("id")
+                   or arguments.get("path") or "")
+            hint = " ".join(str(raw).split())[:80]
+        label = f"{tool}({hint})" if hint else str(tool)
+        return (f"{head}… [cut at {len(head)} of {len(flat)} chars — call "
+                f"{label} again for the rest]")
+
+    async def _fit_context(self, messages: list[dict], openai_tools,
+                           history_end: int, recallable: dict,
+                           pinned: set) -> dict:
+        """Demote the OLDEST tool results in place until the payload fits, and
+        return the context snapshot either way (the UI gauge wants it always).
+
+        Below the threshold NOTHING is touched — that is the point: a short turn
+        pays nothing for this.
+        """
+        state = await self.provider.context_state(messages, openai_tools)
+        fit = state["fit"]
+        try:
+            trigger = float(getattr(config.settings, "context_compact_at", 0.90))
+        except (TypeError, ValueError):
+            trigger = 0.90
+        trigger = min(0.95, max(0.5, trigger))
+        state["threshold"] = trigger
+        if state["used"] <= fit * trigger:
+            return state
+
+        target = fit * max(0.1, trigger - self._CTX_DEMOTE_MARGIN)
+        entries = self._tool_result_index(messages, history_end)
+        # The newest few are what the model is reasoning FROM, and a pinned one
+        # was just re-fetched on our own advice — demoting it again would make
+        # the pair oscillate.
+        candidates = entries[:max(0, len(entries) - self._CTX_KEEP_VERBATIM)]
+        used, demoted = state["used"], 0
+        ratio = self.provider.token_ratio()
+        for e in candidates:
+            if used <= target:
+                break
+            if any(n in self._CTX_NEVER_DEMOTE for n in e["names"]):
+                continue
+            if any(k in pinned for k in e["keys"]):
+                continue
+            m = messages[e["i"]]
+            content = m.get("content")
+            if not isinstance(content, str) or "… [cut at " in content:
+                continue
+            stub = self._demote_stub(content, e["tool"], e["arguments"])
+            # The text protocol's batched result is recognised BY ITS PREFIX
+            # (is_scaffolding_message): lose it and the stub becomes a real user
+            # turn — it leaks into the next turn's history AND the rewind
+            # endpoint miscounts user turns. Two silent failures.
+            if m.get("role") == "user":
+                stub = prompts.TOOL_RESULTS_PREFIX + "\n" + stub
+            if len(content) - len(stub) < self._CTX_MIN_DEMOTE:
+                continue
+            # Rewrite `content` ONLY. Never delete a role:tool message: the
+            # assistant turn above it carries `tool_calls`, and every
+            # OpenAI-compatible endpoint 400s on a call with no paired result.
+            messages[e["i"]] = {**m, "content": stub}
+            used -= int((self.provider._estimate_tokens(content)
+                         - self.provider._estimate_tokens(stub)) * ratio)
+            demoted += 1
+            # The stub says "call it again". The dedup would swallow exactly
+            # that call (key already in executed_calls) and, if it was the only
+            # one, end the turn mute. Grant ONE re-run per demotion: dedup
+            # exists to stop loops, and a re-fetch is only a loop if the model
+            # still HAS the answer in context — it no longer does.
+            for k in e["keys"]:
+                recallable[k] = recallable.get(k, 0) + 1
+        if demoted:
+            state["used"] = max(0, used)
+            state["demoted"] = demoted
+            self._debug_log(
+                f"  CONTEXT: demoted {demoted} tool result(s) to fit "
+                f"{state['used']}/{fit} tokens (window {state['window']})")
+            log.info("Agent '%s': demoted %d tool result(s) to fit the context",
+                     self.agent.id, demoted)
+        return state
+
     def _build_tool_results_section(self) -> str:
         """The '## What your tools returned earlier in this chat' block.
 
@@ -1363,6 +1565,17 @@ class AgentExecutor:
         max_tool_calls = self.agent.max_tool_calls  # hard limit per run
         trace_steps: list[dict] = []  # rich recursive trace (full results + sub-agents)
         executed_calls: set[tuple] = set()  # (name, args) keys already run
+        # Keys the demotion pass has granted ONE re-execution to, because their
+        # result is no longer in the payload (see _fit_context), plus the keys
+        # that already used their grant and must not be demoted again.
+        recallable: dict[tuple, int] = {}
+        pinned: set[tuple] = set()
+        ctx_state: dict = {}      # last context snapshot, for ChatResponse.context
+        ctx_peak = 0              # the turn's high-water mark, which is what we report
+        ctx_demoted = 0
+        tool_repeats: dict[str, int] = {}  # calls per tool name, this turn
+        repeat_nudged: set[str] = set()   # tools we already warned about repeating
+        dedup_nudges = 0          # bounded "you already ran those" retries
         malformed_retries = 0  # text-mode tool calls we asked the model to resend
         full_reasoning = ""  # chain-of-thought of every round, kept out of the answer
         tools_downgrade_retried = False  # one free redo when the endpoint rejects `tools` mid-run
@@ -1405,6 +1618,24 @@ class AgentExecutor:
             # narrative — which iteration, which decision, which tool result.
             self.provider.trace_label = (
                 f"agent '{self.agent.id}' iteration {iterations} depth {self.depth}")
+
+            # Fit the payload BEFORE sending it. Doing this here rather than only
+            # at the wire is the whole point: _build_payload's trim works on a
+            # COPY, so the next iteration rebuilt from the full results and
+            # overflowed again — five wasted 400s in one measured turn.
+            ctx_state = await self._fit_context(
+                messages, openai_tools, turn_start, recallable, pinned)
+            ctx_peak = max(ctx_peak, ctx_state.get("used", 0))
+            just_demoted = ctx_state.get("demoted", 0)
+            ctx_demoted += just_demoted
+            # Declare it, ONCE per turn and only at depth 0 — same rule as the
+            # default-model fallback notice: a sub-agent would emit its own
+            # identical line, and every cap in this codebase says so out loud.
+            # A compressed context is exactly what explains a thinner answer.
+            if just_demoted and ctx_demoted == just_demoted and self.depth == 0:
+                yield {"type": "notice",
+                       "data": prompts.CONTEXT_COMPACTED_NOTICE.format(
+                           window=ctx_state.get("window", 0))}
 
             # Stream LLM response token by token
             pre_tools = self.provider.supports_tools  # to detect a mid-call downgrade
@@ -1531,13 +1762,35 @@ class AgentExecutor:
                 unique = []
                 for tc in tool_calls:
                     key = _tool_call_key(tc)
-                    if key in seen or key in executed_calls:
+                    repeat = key in executed_calls
+                    if repeat and recallable.get(key):
+                        # Its result was demoted to a stub that said "call it
+                        # again": honour that once. Without this the model obeys
+                        # our own instruction and the call vanishes.
+                        recallable.pop(key, None)
+                        pinned.add(key)
+                        repeat = False
+                        self._debug_log(f"  RECALL allowed: {key[0]}({key[1][:80]})")
+                    if key in seen or repeat:
                         self._debug_log(f"  DEDUP skipped: {key[0]}({key[1][:80]})")
                         continue
                     seen.add(key)
                     unique.append(tc)
                 if len(unique) < len(tool_calls):
                     log.info("Filtered tool calls: %d -> %d", len(tool_calls), len(unique))
+                if not unique and not full_content.strip():
+                    # EVERY call was a repeat and the model said nothing else.
+                    # Falling through leaves an assistant turn with content None
+                    # and breaks out mute, which then trips the forced synthesis
+                    # — a turn that ends in an apology because we swallowed its
+                    # calls without a word. Say so instead, once, in the shape
+                    # the malformed-call retry already uses.
+                    if dedup_nudges < _MAX_MALFORMED_RETRIES:
+                        dedup_nudges += 1
+                        self._debug_log("  ALL CALLS DEDUPED -> nudging for an answer")
+                        messages.append({"role": "user",
+                                         "content": _REPEATED_CALLS_PROMPT})
+                        continue
                 tool_calls = unique or None
 
             # Check hard limit on total tool calls
@@ -1608,6 +1861,18 @@ class AgentExecutor:
                 )
 
                 executed_calls.add(_tool_call_key(tc))
+                # The model cannot count its own calls, and ten sequential
+                # local_read(offset=…) reads of one manual is the loop this
+                # exists for. The note rides the RESULT and not the tool schema,
+                # so it costs nothing until it is needed — and it goes on BEFORE
+                # _make_step, so the trace and the debug log show the model
+                # exactly what the model saw.
+                tool_repeats[func_name] = tool_repeats.get(func_name, 0) + 1
+                if (tool_repeats[func_name] >= _REPEAT_TOOL_NUDGE_AT
+                        and func_name not in repeat_nudged):
+                    repeat_nudged.add(func_name)
+                    result += prompts.REPEATED_TOOL_NOTE.format(
+                        tool=func_name, n=tool_repeats[func_name])
                 # Rich trace step (full result + nested sub-agent trace). Built
                 # here so the call_agent sub-trace queued by call_agent_handler
                 # is consumed in the same order it was produced. The SSE/
@@ -1680,7 +1945,7 @@ class AgentExecutor:
             pending_sep = "\n\n" if full_reasoning else ""
             try:
                 async for chunk in self.provider.chat_completion_stream(
-                    messages=self._synthesis_messages(messages),
+                    messages=self._synthesis_messages(messages, trace_steps),
                     tools=None,
                     temperature=self._synthesis_temp(),
                 ):
@@ -1735,5 +2000,7 @@ class AgentExecutor:
             iterations=iterations,
             tool_results=[_step_summary(s) for s in trace_steps],
             trace=self._build_trace(final_text, iterations, trace_steps),
+            context=({**ctx_state, "peak_used": ctx_peak, "demoted": ctx_demoted}
+                     if ctx_state else None),
         )
         yield {"type": "done", "data": response.model_dump()}

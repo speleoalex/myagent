@@ -333,7 +333,7 @@ const ChatPage = {
         // For the Auto-mode "via <agent>" label: user messages persist the
         // resolved agent_id of the turn they opened (record_user_turn).
         let lastAgentId = null;
-        const flushAssistant = (text, ts, reasoning) => {
+        const flushAssistant = (text, ts, reasoning, context) => {
             const msgDiv = this.createMessageDiv('assistant');
             msgDiv._md = text || '';  // raw markdown, for the copy / source view
             this.setReasoning(msgDiv, reasoning || '', false);
@@ -356,6 +356,7 @@ const ChatPage = {
             // Persisted tool messages carry the same resources/sub_trace shape
             // as trace steps, so a reloaded session shows the same strip.
             this.renderResources(msgDiv, this.collectResources(pendingTools));
+            this.setContext(msgDiv, context);
             msgDiv.appendChild(this._timeEl(ts));
             // Known cosmetic limit: a chat where Auto was toggled midway labels
             // every turn — each label still names the agent that really answered.
@@ -372,7 +373,7 @@ const ChatPage = {
             } else if (m.role === 'tool') {
                 pendingTools.push(m);
             } else if (m.role === 'assistant') {
-                flushAssistant(m.text || '', m.ts, m.reasoning);
+                flushAssistant(m.text || '', m.ts, m.reasoning, m.context);
             } else if (m.role === 'error' || m.role === 'notice') {
                 this.appendMessage(m.role, m.text || '', m.ts);
             }
@@ -659,6 +660,44 @@ const ChatPage = {
         return fresh ? box : null;  // non-null only when it just appeared
     },
 
+    // How full the model's context got during the turn. Not decoration: on a
+    // local model the window is small and the executor silently compresses the
+    // oldest tool results to stay inside it, so "this answer was written from a
+    // compressed context" is the fact that explains a vague reply. Rendered
+    // from ChatResponse.context, which is persisted on the assistant message —
+    // the trace's top-level fields are not, so a gauge fed from there would
+    // show live and vanish on reload.
+    setContext(msgDiv, ctx) {
+        if (!ctx || !ctx.window) return;
+        const used = Math.max(0, ctx.peak_used || ctx.used || 0);
+        const pct = Math.min(100, Math.round((used / ctx.window) * 100));
+        const k = (n) => (n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + 'k'
+                                    : String(n));
+        let el = msgDiv.querySelector(':scope > .msg-context');
+        if (!el) {
+            el = document.createElement('div');
+            el.className = 'msg-context';
+            el.innerHTML = '<span class="ctx-bar"><i></i></span>'
+                         + '<span class="ctx-text"></span>';
+            msgDiv.appendChild(el);
+        }
+        el.querySelector('.ctx-bar i').style.width = pct + '%';
+        // Amber past the point where the executor starts compressing, red once
+        // it actually did: the reader should be able to tell "close" from "cut".
+        el.classList.toggle('ctx-warn', pct >= 75);
+        el.classList.toggle('ctx-cut', !!ctx.demoted);
+        let text = i18n('chat.context') + ' ' + k(used) + ' / ' + k(ctx.window);
+        if (ctx.demoted) {
+            text += ' · ' + i18n('chat.contextCompacted').replace('{n}', ctx.demoted);
+        }
+        el.querySelector('.ctx-text').textContent = text;
+        el.title = i18n('chat.contextTitle')
+            .replace('{window}', ctx.window)
+            .replace('{used}', used)
+            .replace('{reserve}', ctx.reserve || 0)
+            .replace('{source}', ctx.source || '?');
+    },
+
     // Read an SSE stream into the given bubble. Shared by send and re-attach.
     // If the bubble leaves the DOM (user navigated away) it stops consuming but
     // the server keeps generating, so we can re-attach later.
@@ -810,6 +849,7 @@ const ChatPage = {
                             msgDiv._resources = this.collectResources(trace.steps);
                             this.renderResources(msgDiv, msgDiv._resources);
                         }
+                        this.setContext(msgDiv, event.data && event.data.context);
                         msgDiv.appendChild(this._timeEl());
                         // Auto mode: name the agent that actually answered.
                         // The trace carries the RESOLVED agent_id (the server

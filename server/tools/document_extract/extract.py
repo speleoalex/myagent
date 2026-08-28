@@ -145,7 +145,7 @@ def window_text(text: str, path: Path, from_page: int = 1) -> tuple[str, str, bo
 # Image extraction is deliberately kept OUT of office_text (see extract_office):
 # that is what lets this copy stay identical to the library ones.
 # --------------------------------------------------------------------------- #
-# Office documents (OOXML) — duplicated in ../local_read/read.py
+# Office documents (OOXML) — duplicated from ../library/local_search/search.py
 #
 # .docx/.xlsx/.pptx are ZIP archives of XML, so the whole extractor is stdlib.
 # That is a deliberate choice over python-docx/openpyxl/python-pptx (~7 packages

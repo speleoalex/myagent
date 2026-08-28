@@ -64,6 +64,33 @@ _MAX_TOKENS_LIMIT_RE = re.compile(r"max_tokens:\s*(\d+)\s*>\s*(\d+)")
 # every turn re-pays the 400 that discovers the truth.
 _CTX_CAPS: dict[tuple[str, str], int] = {}
 
+# How badly `len // 4` under-counts THIS model's tokenizer, learned the same way
+# and memoized beside it. A `pdftotext -layout` dump costs far more than 4 chars
+# per token (measured 1.135 on a service-manual payload), and the estimate is
+# what both the fit decision and the UI gauge are made of — an optimistic one
+# means deciding "it fits" about a payload the server then refuses.
+#
+# MONOTONE (max of what we have seen) and clamped: under-counting is the failure
+# mode, so a single anomalous refusal must not be able to shrink the budget to
+# nothing, and a payload that was once 40% off must not permanently tax an
+# all-ASCII one. 2.0 is the ceiling real content reaches (CJK, base64).
+_TOKEN_RATIOS: dict[tuple[str, str], float] = {}
+_RATIO_MAX = 2.0
+# Where a model starts before anything has been learned about it. NOT 1.0: unlike
+# _MAX_TOKENS_CAPS, which has no way to know a ceiling before being refused, the
+# under-count here is a known property of the len//4 heuristic on anything that
+# is not plain English prose. Measured on this corpus (Italian questions over
+# `pdftotext -layout` service manuals): 13303 estimated cost 19413 real, and
+# 11692 cost 17106 — a factor of 1.46 both times, with 1.17 on a lighter payload.
+#
+# The floor matters because of a feedback loop: the ratio is learned FROM an
+# overflow, and the whole point of the in-turn demotion is that overflows stop
+# happening. At 1.0 the guard would stay ~30% optimistic forever on a process
+# that never overflows — deciding "it fits" against a number it had no reason to
+# believe. 1.15 is deliberately below every value observed: too high wastes
+# context, and being wrong in that direction is not self-correcting.
+_RATIO_FLOOR = 1.15
+
 # A context overflow NAMES both numbers, which is what makes it recoverable.
 # llama.cpp: "request (17450 tokens) exceeds the available context size (16384
 # tokens), try increasing it". OpenAI: "This model's maximum context length is
@@ -327,7 +354,7 @@ class LLMProvider:
         return len(content) // 4 + 1
 
     @classmethod
-    def _is_tool_scaffolding(cls, m: dict) -> bool:
+    def is_tool_scaffolding(cls, m: dict) -> bool:
         """True for a message that carries a TOOL RESULT rather than dialogue.
 
         Two shapes, because a result reaches the payload by two routes: role:tool
@@ -359,7 +386,7 @@ class LLMProvider:
         the model reads a severed page as a finished one.
         """
         result = list(messages)
-        idx = [i for i, m in enumerate(result) if self._is_tool_scaffolding(m)]
+        idx = [i for i, m in enumerate(result) if self.is_tool_scaffolding(m)]
         if not idx:
             return result, total
         # The newest result goes last in line, not out of it.
@@ -550,6 +577,71 @@ class LLMProvider:
         overhead += (payload.get("max_tokens")
                      or payload.get("max_completion_tokens") or 0)
         return overhead + 64  # chat-template scaffolding per message
+
+    # ------------------------------------------------------------------
+    # How full is the context — ONE definition, three readers: the executor's
+    # in-turn demotion, the last-resort trim below, and the UI gauge.
+    # ------------------------------------------------------------------
+    def token_ratio(self) -> float:
+        """The correction for this model's tokenizer: learned if we have been
+        refused once, else the conservative floor (see _RATIO_FLOOR)."""
+        return _TOKEN_RATIOS.get(self._caps_key, _RATIO_FLOOR)
+
+    def _learn_ratio(self, used: int, estimated: int) -> float:
+        """Record what the endpoint says a payload we estimated at `estimated`
+        actually cost, and return the ratio now in force.
+
+        `estimated` MUST already include the tool schemas: `used` is the whole
+        request, and dividing it by a messages-only estimate conflates the
+        per-character under-count with the overhead — which is then subtracted a
+        second time by the caller. On the measured turn that produced 1.39
+        against a true 1.135, i.e. it threw away ~1900 tokens of usable window.
+        """
+        if estimated > 0 and used > 0:
+            ratio = min(_RATIO_MAX, max(1.0, used / estimated))
+            _TOKEN_RATIOS[self._caps_key] = max(
+                _TOKEN_RATIOS.get(self._caps_key, _RATIO_FLOOR), ratio)
+        return self.token_ratio()
+
+    def estimate_payload_tokens(self, messages: list[dict],
+                                tools: list[dict] | None = None) -> int:
+        """Ratio-corrected estimate of what `messages` (+ `tools`) will cost."""
+        est = sum(self._estimate_tokens(m.get("content") or "") for m in messages)
+        if tools:
+            est += self._estimate_tokens(json.dumps(tools))
+        return int(est * self.token_ratio())
+
+    async def context_state(self, messages: list[dict],
+                            tools: list[dict] | None = None) -> dict:
+        """``{window, used, reserve, fit, source, ratio}`` — how full we are.
+
+        `window` applies the _CTX_CAPS clamp, which `_context_budget()` alone
+        does NOT: that clamp lives in _build_payload, so a caller asking the
+        probe directly would decide "we fit" against a window this provider is
+        about to shrink — and the 400-then-trim dance would come straight back.
+
+        `fit` is what the MESSAGES may cost, i.e. the window minus the tool
+        schemas and the room the answer needs. Deciding against the raw window
+        is the bug `reserve=` was added to fix.
+        """
+        window = await self._context_budget()
+        learned = _CTX_CAPS.get(self._caps_key)
+        source = "served"
+        if learned and learned < window:
+            window, source = learned, "learned"
+        max_out = self.config.options.get("max_tokens")
+        if max_out is None:
+            max_out = 0 if self.config.provider == "openai" else 2048
+        reserve = (self._estimate_tokens(json.dumps(tools)) if tools else 0)
+        reserve += int(max_out or 0) + 64
+        return {
+            "window": window,
+            "used": self.estimate_payload_tokens(messages, tools),
+            "reserve": reserve,
+            "fit": max(512, window - reserve),
+            "source": source,
+            "ratio": round(self.token_ratio(), 3),
+        }
 
     # ------------------------------------------------------------------
     # Anthropic Messages API (provider "anthropic")
@@ -900,10 +992,11 @@ class LLMProvider:
             self._ctx_budget = limit
             msgs = payload.get("messages") or []
             before = sum(self._estimate_tokens(m.get("content") or "") for m in msgs)
-            # Our estimate under-counted by exactly used/before (a PDF layout
-            # dump costs far more than 4 chars per token), so scale the budget by
-            # the measured factor instead of guessing a second time.
-            ratio = max(1.0, used / max(1, before))
+            # Learn how far off the estimate is, against the WHOLE payload — see
+            # _learn_ratio: dividing `used` by a messages-only figure double-counts
+            # the overhead and over-trims by ~14% of the window, for good.
+            ratio = self._learn_ratio(
+                used, before + self._estimate_tokens(json.dumps(payload.get("tools") or [])))
             budget = int((limit - self._payload_overhead(payload)) / ratio)
             payload["messages"] = self._truncate_messages(msgs, budget)
             after = sum(self._estimate_tokens(m.get("content") or "")

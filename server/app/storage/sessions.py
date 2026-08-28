@@ -214,18 +214,26 @@ def tool_history(session: dict, limit: int | None = None) -> list[dict]:
 
 
 def record_turn(session: dict, steps: list[dict], reply: str, conversation,
-                reasoning: str = "") -> None:
+                reasoning: str = "", context: dict | None = None) -> None:
     """Append the tool calls (recursive trace) and assistant reply, and update
     the compact LLM history.
 
     `reasoning` is a thinking model's chain-of-thought: kept on the display
     message (the chat shows it collapsed) and deliberately absent from
-    `conversation`, which is what goes back to the model next turn."""
+    `conversation`, which is what goes back to the model next turn.
+
+    `context` is how full the model's window got (window/used/peak/demoted). It
+    rides the display message for the same reason and by the same route: the
+    trace's top-level fields are NOT persisted — steps_from() keeps only
+    trace["steps"] — so a gauge fed from there would show live and vanish on
+    reload."""
     for step in steps:
         session["messages"].append(tool_message_from_step(step))
     msg = {"role": "assistant", "text": reply, "ts": now_iso()}
     if reasoning:
         msg["reasoning"] = reasoning
+    if context:
+        msg["context"] = context
     session["messages"].append(msg)
     if conversation is not None:
         session["conversation"] = [

@@ -442,6 +442,16 @@ class ChatResponse(BaseModel):
     # sub_trace is itself a trace (a called agent's own run), so the whole
     # multi-agent flow is captured recursively.
     trace: dict | None = None
+    # How full the model's context got during this turn:
+    # {window, used, reserve, fit, source, ratio, peak_used, demoted}.
+    # Deliberately HERE and not inside `trace`: steps_from() persists only
+    # trace["steps"], so a trace field reaches the live `done` event and then
+    # vanishes on reload. Same three-file shape as `reasoning` above.
+    #
+    # `peak_used` and not the last call's `used`: the final iteration is the one
+    # AFTER any demotion (and the forced synthesis carries no tool schemas at
+    # all), so it systematically understates how close the turn came.
+    context: dict | None = None
 
 
 class Settings(BaseModel):
@@ -462,6 +472,19 @@ class Settings(BaseModel):
     embedding_model_id: str | None = None
     ollama_base_url: str = "http://localhost:11434"
     llamacpp_base_url: str = "http://localhost:8080"
+    # How full the context may get before the executor starts DEMOTING the
+    # oldest tool results of the turn to a one-line stub (see
+    # AgentExecutor._fit_context). A fraction of what the messages may cost —
+    # the model's window minus the tool schemas minus the room for the answer —
+    # and NOT of the raw window: deciding against the raw window is the bug the
+    # `reserve=` parameter was added to fix.
+    #
+    # Below the threshold nothing is touched, which is the point: a short turn
+    # pays nothing for this. Global rather than per-agent because the number it
+    # is a fraction OF is already per-model (probed, not typed), so one setting
+    # adapts by itself; and an agent-level knob nobody understands makes a turn
+    # worse in silence.
+    context_compact_at: float = 0.90
     # Verbose executor tracing, and the ONLY place it is switched: writes the
     # COMPLETE prompt, tool schemas and tool results of every iteration to
     # ~/myagent/logs/debug.log — full chat content on disk — so it is off by

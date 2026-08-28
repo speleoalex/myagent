@@ -152,7 +152,8 @@ async def chat(req: ChatRequest, request: Request) -> ChatResponse:
 
     conv = [m.model_dump(exclude_none=True) for m in response.conversation]
     steps = steps_from(response.trace, response.tool_results)
-    record_turn(session, steps, response.reply, conv, response.reasoning)
+    record_turn(session, steps, response.reply, conv, response.reasoning,
+                response.context)
     # persist(), not save_current(): the user may have opened another chat
     # while this run was in flight — never clobber the new current.json.
     await asyncio.to_thread(session_store.persist, session)
@@ -217,7 +218,8 @@ def _make_drive(executor, message, prior, attachments, session, session_store, l
                     # partial-answer path below on top of it.
                     record_turn(session, steps, data.get("reply") or reply_text,
                                 data.get("conversation"),
-                                data.get("reasoning") or reasoning_text)
+                                data.get("reasoning") or reasoning_text,
+                                data.get("context"))
                     recorded = True
                     await asyncio.shield(asyncio.to_thread(session_store.persist, session))
                     schedule_compaction(executor, session["id"],
