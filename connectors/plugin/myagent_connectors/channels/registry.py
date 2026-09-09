@@ -5,7 +5,8 @@ the module it names:
 
     channels/<type>/
         channel.json     {"type","label","module","class","hints":{…},"labels":{…},
-                          "handle":{…},"url":{…},"device":{…}}
+                          "handle":{…},"url":{…},"device":{…},"settings":[…],
+                          "sections":[…]}
         channel.py       a BaseConnector subclass
         requirements.txt optional, installed by connectors/install.sh
 
@@ -64,6 +65,23 @@ class Channel:
     # true}). A flag rather than a form schema: the UI renders whatever the
     # device's own answer contains, so no channel type is named anywhere.
     device: dict = field(default_factory=dict)
+    # Extra, NON-secret, per-binding settings the channel needs and the shared
+    # form knows nothing about (a mail server and port, a protocol choice). A
+    # list of field descriptors — {"key","type","label","hint","default",
+    # "options","section","when","required"} — that the UI renders
+    # generically and stores as Binding.settings; the connector reads them
+    # back. `section` files the field under one of `sections` below, `when`
+    # ({"protocol": "imap"}) hides it unless another field has that value,
+    # `required` is enforced by the form on visible fields only. The secret
+    # still goes in Binding.token, so the manager's "enabled and has a token"
+    # gate holds.
+    settings: list = field(default_factory=list)
+    # How the settings form is GROUPED: [{"id","label","hint","tests":[{"id",
+    # "label"}]}]. Each section is a titled fieldset; its `tests` become
+    # buttons that call verify(check=<id>) — so a mail channel can prove its
+    # incoming and its outgoing server one at a time, next to their fields.
+    # Absent = one untitled group and the single generic Test button.
+    sections: list = field(default_factory=list)
     connector: type[BaseConnector] | None = None
     error: str = ""
 
@@ -85,6 +103,8 @@ class Channel:
             # and an empty JS object is truthy.
             "url": self.url or None,
             "device": self.device or None,
+            "settings": self.settings or None,
+            "sections": self.sections or None,
             "loaded": self.loaded,
             "error": self.error,
         }
@@ -114,6 +134,8 @@ def _load_one(directory: Path) -> Channel:
         handle=meta.get("handle") or {},
         url=meta.get("url") or {},
         device=meta.get("device") or {},
+        settings=meta.get("settings") or [],
+        sections=meta.get("sections") or [],
     )
     try:
         entry = directory / (meta.get("module") or "channel.py")

@@ -199,6 +199,7 @@ const ChatPage = {
             // source = connector type ("telegram"), channel = the external chat key.
             const src = sourceLabel(s);
             const srcIcon = s.source === 'telegram' ? 'bi-telegram'
+                : s.source === 'mail' ? 'bi-envelope'
                 : s.source === 'autonomous' ? 'bi-robot' : 'bi-broadcast-pin';
             const srcBadge = src ? `
                             · <span class="hi-source" title="${App.escAttr(s.channel || '')}">

@@ -1,0 +1,3 @@
+# The mail channel uses only the standard library (imaplib, poplib, smtplib,
+# email). Nothing to install: this file exists so install.sh finds the same
+# layout in every channel folder.

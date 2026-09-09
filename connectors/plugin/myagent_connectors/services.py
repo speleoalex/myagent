@@ -47,10 +47,12 @@ class Recipient:
 
 
 def _looks_like_handle(value: str) -> bool:
-    """A raw identifier rather than a person's name: digits (Telegram/phone) or
-    an @username. Lets the caller pass an id straight through."""
+    """A raw identifier rather than a person's name: digits (Telegram/phone),
+    an @username or an email address. Lets the caller pass an id straight
+    through."""
     v = (value or "").strip()
-    return bool(v) and (v.startswith(("@", "+")) or v.lstrip("-").isdigit())
+    return bool(v) and (v.startswith(("@", "+")) or v.lstrip("-").isdigit()
+                        or ("@" in v[1:] and " " not in v))
 
 
 def _name_matches(query: str, name: str) -> bool:

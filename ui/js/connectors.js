@@ -163,6 +163,7 @@ const ConnectorsPage = {
             token: '', url: '', access_mode: 'allowlist', allowed_ids: [],
             allowed_usernames: [], password: '', session_prefix: '',
             welcome: '', help_text: '', disclose_ai: true, ai_disclosure: '',
+            settings: {},
         };
         if (isEdit) {
             try {
@@ -231,11 +232,23 @@ const ConnectorsPage = {
                     </div>
                 </div>
 
-                <div class="mb-3">
+                <!-- The secret. A password field (browsers' own password managers
+                     are kept out with autocomplete=new-password: one of them
+                     silently overwriting the token is not a bug we can see), with
+                     an eye to reveal it. _renderSettings moves this block INTO the
+                     first section, right after its first field, when the channel
+                     declares sections: the mailbox password beside the mailbox
+                     login (see _placeToken). -->
+                <div class="mb-3" id="block-token">
                     <label class="form-label" for="f-token" id="token-label"
                            >${i18n(this._label('token', 'connectors.token', b.type))}</label>
                     <div class="input-group">
-                        <input type="text" class="form-control font-monospace" id="f-token" value="${App.escAttr(b.token)}">
+                        <input type="password" class="form-control font-monospace" id="f-token"
+                               autocomplete="new-password" spellcheck="false" value="${App.escAttr(b.token)}">
+                        <button type="button" class="btn btn-outline-secondary" id="btn-token-eye"
+                                title="${i18n('connectors.tokenShow')}" aria-label="${i18n('connectors.tokenShow')}">
+                            <i class="bi bi-eye"></i>
+                        </button>
                         <button type="button" class="btn btn-outline-info" id="btn-test">
                             <i class="bi bi-plug"></i> ${i18n('connectors.test')}
                         </button>
@@ -243,6 +256,10 @@ const ConnectorsPage = {
                     <div class="form-text" id="token-hint">${i18n(this._hint('token', 'connectors.tokenHint', b.type))}</div>
                     <div id="test-result" class="mt-2"></div>
                 </div>
+
+                <!-- Per-channel settings: fieldsets driven by the manifest
+                     (sections / settings), rendered by _renderSettings(). -->
+                <div class="mb-3 d-none" id="block-settings"></div>
 
                 <div class="mb-3 ${this._channel(b.type).url ? '' : 'd-none'}" id="block-url">
                     <label class="form-label" for="f-url">${i18n('connectors.url')}</label>
@@ -323,7 +340,16 @@ const ConnectorsPage = {
         </div></div>`;
 
         if (!isEdit) App.autoId('f-name', 'f-id');
+        this._form = { isEdit, id: b.id };
         this._contacts = contacts;
+        document.getElementById('btn-token-eye').onclick = e => {
+            const inp = document.getElementById('f-token');
+            const show = inp.type === 'password';
+            inp.type = show ? 'text' : 'password';
+            e.currentTarget.querySelector('i').className = show ? 'bi bi-eye-slash' : 'bi bi-eye';
+        };
+        this._renderSettings(b.settings || {}, !isEdit);
+        this._syncTestButton();
         this._syncAccess();
         this._renderChips();
         document.getElementById('f-access').onchange = () => this._syncAccess();
@@ -344,12 +370,17 @@ const ConnectorsPage = {
             document.getElementById('f-url').placeholder = urlSpec?.example || '';
             const uh = document.getElementById('url-hint');
             if (uh) uh.textContent = i18n(this._hint('url', 'connectors.urlHint'));
+            // Channel settings are per manifest too: a stored binding's values
+            // only make sense for its own type, so switching type starts fresh.
+            this._renderSettings(b.type === this._channelType() ? (b.settings || {}) : {}, true);
+            this._syncTestButton();
             this._syncAccess();
             this._renderChips();
             this._loadDevice(isEdit ? b.id : '');
         };
         document.getElementById('f-allowed').oninput = () => this._renderChips();
-        document.getElementById('btn-test').onclick = (e) => this._testToken(e.currentTarget, isEdit, b.id);
+        document.getElementById('btn-test').onclick = (e) =>
+            this._runTest(e.currentTarget, document.getElementById('test-result'), '');
         document.getElementById('binding-form').onsubmit = (e) => this._save(e, isEdit, bindingId);
         const del = document.getElementById('btn-delete');
         if (del) del.onclick = () => this._delete(bindingId);
@@ -560,6 +591,178 @@ const ConnectorsPage = {
         }
     },
 
+    /** Per-channel settings, rendered from the manifest so this file never
+     * names a channel type. `settings` descriptors ({key, type, label, hint,
+     * default, placeholder, options, section, when, required}) are
+     * stored as Binding.settings and handed back to the connector as-is.
+     *
+     * - `sections` (optional, ordered) turns the flat grid into titled
+     *   fieldsets; a descriptor whose `section` is missing or unknown lands in
+     *   a final untitled group, which is the look channels without sections
+     *   always had. A section may declare `tests`: one button each, calling
+     *   verify(check=<id>) on the server with the result shown inline under
+     *   that section — the mail channel proves IMAP and SMTP separately.
+     * - `when: {key: value | [values]}` hides a cell unless every listed
+     *   setting currently holds one of the values (see _applyWhen).
+     * - `required` is checked client-side on VISIBLE fields only (_validateSettings). */
+    _renderSettings(values, isNew) {
+        const box = document.getElementById('block-settings');
+        if (!box) return;
+        const ch = this._channel();
+        const fields = ch.settings || [];
+        box.classList.toggle('d-none', !fields.length);
+        this._placeToken(null);
+        if (!fields.length) { box.innerHTML = ''; return; }
+        const current = { ...(values || {}) };
+        const cell = f => {
+            const id = `f-set-${f.key}`;
+            const v = current[f.key] ?? f.default ?? '';
+            const label = App.esc(i18n(f.label || f.key))
+                        + (f.required ? ' <span class="text-danger">*</span>' : '');
+            const hint = f.hint ? `<div class="form-text">${App.esc(i18n(f.hint))}</div>` : '';
+            const attrs = `id="${id}" data-setting="${App.escAttr(f.key)}" ${f.required ? 'required' : ''}`;
+            const wrap = `<div class="col-12 col-md-6" data-field="${App.escAttr(f.key)}">`;
+            let control;
+            if (f.type === 'checkbox') {
+                return `${wrap}
+                    <div class="form-check mt-md-4">
+                        <input class="form-check-input" type="checkbox" ${attrs} ${v ? 'checked' : ''}>
+                        <label class="form-check-label" for="${id}">${label}</label>
+                    </div>${hint}</div>`;
+            } else if (f.type === 'select') {
+                const opts = (f.options || []).map(o =>
+                    `<option value="${App.escAttr(o.value)}" ${String(o.value) === String(v) ? 'selected' : ''}>${App.esc(i18n(o.label || o.value))}</option>`).join('');
+                control = `<select class="form-select" ${attrs}>${opts}</select>`;
+            } else {
+                control = `<input type="${f.type === 'number' ? 'number' : 'text'}" class="form-control" ${attrs}
+                    value="${App.escAttr(String(v))}" placeholder="${App.escAttr(f.placeholder || '')}"
+                    ${f.type === 'number' ? 'min="0"' : ''}>`;
+            }
+            return `${wrap}<label class="form-label" for="${id}">${label}</label>${control}${hint}</div>`;
+        };
+        const sections = ch.sections || [];
+        const known = new Set(sections.map(s => s.id));
+        const groups = sections.map(s => ({ ...s, fields: fields.filter(f => f.section === s.id) }));
+        groups.push({ id: '', fields: fields.filter(f => !known.has(f.section)) });
+        box.innerHTML = groups.filter(g => g.fields.length).map(g => {
+            const rows = `<div class="row g-3">${g.fields.map(cell).join('')}</div>`;
+            if (!g.id) return `<div class="mb-3">${rows}</div>`;
+            const tests = (g.tests || []).length ? `
+                <div class="mt-3 d-flex flex-wrap gap-2">${g.tests.map(t =>
+                    `<button type="button" class="btn btn-outline-info btn-sm" data-check="${App.escAttr(t.id)}">
+                        <i class="bi bi-plug"></i> ${App.esc(i18n(t.label || t.id))}</button>`).join('')}
+                </div>
+                <div class="mt-2" data-test-result="${App.escAttr(g.id)}"></div>` : '';
+            // Bootstrap 5 resets <legend> to a full-width block: float-none
+            // w-auto gives back the classic title-on-the-border look.
+            return `<fieldset class="border rounded p-3 mb-3" data-section="${App.escAttr(g.id)}">
+                <legend class="float-none w-auto px-2 fs-6 fw-semibold mb-0">${App.esc(i18n(g.label || g.id))}</legend>
+                ${rows}${tests}</fieldset>`;
+        }).join('');
+        this._placeToken(box.querySelector('fieldset .row'));
+
+        box.querySelectorAll('[data-check]').forEach(btn => {
+            const out = box.querySelector(`[data-test-result="${btn.closest('fieldset')?.dataset.section || ''}"]`);
+            btn.onclick = () => this._runTest(btn, out || document.getElementById('test-result'), btn.dataset.check);
+        });
+        // Bubbling listeners: any edit may change what `when` shows.
+        box.oninput = () => this._applyWhen();
+        box.onchange = () => this._applyWhen();
+        this._applyWhen();
+    },
+
+    /** Where the secret lives in the form. With sections it is the SECOND
+     * cell of the first one — right after the first field, i.e. login then
+     * password, the order anyone reads an account in; a user who sees
+     * "Account" looks for the password there, not above the box. Without
+     * sections, its classic place above the settings. The node is MOVED,
+     * never re-created: its listeners and whatever was typed survive a type
+     * switch. */
+    _placeToken(row) {
+        const block = document.getElementById('block-token');
+        const box = document.getElementById('block-settings');
+        if (!block || !box) return;
+        if (row) {
+            block.classList.remove('mb-3');
+            block.classList.add('col-12', 'col-md-6');
+            const first = row.firstElementChild;
+            if (first) first.after(block); else row.prepend(block);
+        } else if (block.parentNode !== box.parentNode) {
+            block.classList.add('mb-3');
+            block.classList.remove('col-12', 'col-md-6');
+            box.parentNode.insertBefore(block, box);
+        }
+    },
+
+    /** The per-section test buttons a channel declares — sections[].tests
+     * flattened with their section id. Empty for channels without sections. */
+    _tests(type) {
+        const out = [];
+        for (const sec of this._channel(type).sections || []) {
+            for (const t of sec.tests || []) out.push({ ...t, section: sec.id });
+        }
+        return out;
+    },
+
+    /** A channel with per-section tests hides the generic Test button next to
+     * the token: each server gets its own button. */
+    _syncTestButton() {
+        const btn = document.getElementById('btn-test');
+        if (btn) btn.classList.toggle('d-none', this._tests().length > 0);
+    },
+
+    /** Applies the descriptors' `when` clauses. Hidden fields are still read
+     * and saved by _readSettings(): switching IMAP → POP3 → IMAP keeps the
+     * folder, and the connector ignores what does not apply anyway. */
+    _applyWhen() {
+        const box = document.getElementById('block-settings');
+        if (!box) return;
+        const value = k => {
+            const el = document.getElementById(`f-set-${k}`);
+            if (!el) return '';
+            return el.type === 'checkbox' ? String(el.checked) : String(el.value);
+        };
+        for (const f of this._channel().settings || []) {
+            if (!f.when) continue;
+            const cell = box.querySelector(`[data-field="${CSS.escape(f.key)}"]`);
+            if (!cell) continue;
+            const show = Object.entries(f.when).every(([k, want]) =>
+                (Array.isArray(want) ? want : [want]).map(String).includes(value(k)));
+            cell.classList.toggle('d-none', !show);
+        }
+    },
+
+    /** The first `required` setting that is visible and empty, marked
+     * is-invalid; null when everything needed is filled in. */
+    _validateSettings() {
+        const box = document.getElementById('block-settings');
+        let missing = null;
+        for (const f of this._channel().settings || []) {
+            const el = document.getElementById(`f-set-${f.key}`);
+            if (!el) continue;
+            el.classList.remove('is-invalid');
+            if (missing || !f.required || f.type === 'checkbox') continue;
+            const cell = box?.querySelector(`[data-field="${CSS.escape(f.key)}"]`);
+            if (cell?.classList.contains('d-none')) continue;
+            if (!String(el.value).trim()) { el.classList.add('is-invalid'); missing = f; }
+        }
+        return missing;
+    },
+
+    _readSettings() {
+        const out = {};
+        for (const f of this._channel().settings || []) {
+            const el = document.getElementById(`f-set-${f.key}`);
+            if (!el) continue;
+            if (f.type === 'checkbox') out[f.key] = el.checked;
+            else if (f.type === 'number') {
+                const n = parseInt(el.value, 10);
+                out[f.key] = Number.isFinite(n) ? n : (f.default ?? 0);
+            } else out[f.key] = el.value.trim();
+        }
+        return out;
+    },
+
     _syncAccess() {
         // A device channel (satellite) authenticates with the binding token and
         // never runs the user-facing pipeline: access modes and the welcome
@@ -684,34 +887,52 @@ const ConnectorsPage = {
             help_text: document.getElementById('f-help').value,
             disclose_ai: document.getElementById('f-disclose').checked,
             ai_disclosure: document.getElementById('f-ai-disclosure').value,
+            settings: this._readSettings(),
         };
     },
 
-    async _testToken(btn, isEdit, savedId) {
+    /** Runs one verification on the server and shows the outcome in `out`.
+     * `check` is a section test id (see _renderSettings) or '' for the
+     * channel's whole verify(); `btn` is the button that asked, so it can
+     * spin. The UI only ever sees the token mask, so it cannot send the real
+     * token back: for a saved binding with the mask (or nothing) in the field,
+     * the server tests what it stored. */
+    async _runTest(btn, out, check) {
+        const { isEdit, id: savedId } = this._form || {};
+        const fail = html => { out.innerHTML = `<div class="alert alert-danger mb-0">${html}</div>`; };
+        const missing = this._validateSettings();
+        if (missing) {
+            return fail(i18n('connectors.settingRequired', { field: App.esc(i18n(missing.label || missing.key)) }));
+        }
         const token = document.getElementById('f-token').value.trim();
-        const out = document.getElementById('test-result');
+        const stored = isEdit && (token === '********' || !token);
+        if (!stored && !token) return fail(i18n('connectors.tokenRequired'));
         const original = btn.innerHTML;
         btn.disabled = true;
         btn.innerHTML = `<span class="spinner-border spinner-border-sm"></span> ${i18n('mcp.testing')}`;
         try {
-            // The UI only ever sees the mask, so it cannot send the real token
-            // back: for a saved binding, ask the server to test what it stored.
-            const res = (isEdit && (token === '********' || !token))
-                ? await App.api('POST', `/connectors/bindings/${encodeURIComponent(savedId)}/test`)
+            const res = stored
+                ? await App.api('POST', `/connectors/bindings/${encodeURIComponent(savedId)}/test`,
+                                { check: check || '' })
                 : await App.api('POST', '/connectors/bindings/test',
                                 { type: document.getElementById('f-type').value, token,
-                                  url: document.getElementById('f-url').value.trim() });
-            // A bot answers with its @handle; a device (satellite) only has a name.
-            const okMsg = res.bot
-                ? i18n('connectors.testOk', { bot: App.esc(res.bot), name: App.esc(res.name || '') })
-                : i18n('connectors.testOkDevice', { name: App.esc(res.name || '?') });
-            out.innerHTML = `<div class="alert alert-success mb-0">${okMsg}</div>`;
+                                  url: document.getElementById('f-url').value.trim(),
+                                  settings: this._readSettings(), check: check || '' });
+            out.innerHTML = `<div class="alert alert-success mb-0">${this._testResultHtml(res)}</div>`;
         } catch (err) {
-            out.innerHTML = `<div class="alert alert-danger mb-0">${App.esc(err.message)}</div>`;
+            fail(App.esc(err.message));
         } finally {
             btn.disabled = false;
             btn.innerHTML = original;
         }
+    },
+
+    /** A bot answers with its @handle; an account (mailbox) with its address
+     * and what was checked; a device (satellite) only has a name. */
+    _testResultHtml(res) {
+        if (res.bot) return i18n('connectors.testOk', { bot: App.esc(res.bot), name: App.esc(res.name || '') });
+        if (res.account) return i18n('connectors.testOkAccount', { name: App.esc(res.account), detail: App.esc(res.detail || '') });
+        return i18n('connectors.testOkDevice', { name: App.esc(res.name || '?') });
     },
 
     async _save(event, isEdit, bindingId) {
@@ -719,6 +940,10 @@ const ConnectorsPage = {
         const data = this._readForm();
         if (!data.id) return App.toast(i18n('connectors.idRequired'), 'danger');
         if (!data.agent_id) return App.toast(i18n('connectors.agentRequired'), 'danger');
+        const missing = this._validateSettings();
+        if (missing) {
+            return App.toast(i18n('connectors.settingRequired', { field: i18n(missing.label || missing.key) }), 'danger');
+        }
         try {
             if (isEdit) {
                 await App.api('PUT', `/connectors/bindings/${encodeURIComponent(bindingId)}`, data);

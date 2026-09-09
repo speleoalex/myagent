@@ -1,6 +1,6 @@
 {
   "name": "Notify User",
-  "description": "Send a message to an entry in the address book: a person on their messaging channel (e.g. Telegram), or a device that speaks it out loud (e.g. a voice satellite). Use it to tell someone something proactively - when you run autonomously your normal reply text is NOT delivered anywhere. To reach a recipient, pass 'to' with its name and optionally 'channel': the name is looked up in the address book. Every listed name is reachable, devices included. NEVER invent a numeric id.",
+  "description": "Send a message to an entry in the address book: a person on their messaging channel (e.g. Telegram or email), or a device that speaks it out loud (e.g. a voice satellite). Use it to tell someone something proactively - when you run autonomously your normal reply text is NOT delivered anywhere. To reach a recipient, pass 'to' with its name and optionally 'channel': the name is looked up in the address book. Every listed name is reachable, devices included. NEVER invent a numeric id. A subject goes in 'subject' (never inside 'text'); files go in 'attachments' as paths (never pasted into 'text').",
   "internal": true,
   "parameters": {
     "type": "object",
@@ -8,6 +8,17 @@
       "text": {
         "type": "string",
         "description": "The message to send"
+      },
+      "subject": {
+        "type": "string",
+        "description": "Optional subject line. On email it is the Subject header (and starts a new thread); on chat channels it becomes the first line of the message. Do NOT write the subject inside 'text'."
+      },
+      "attachments": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Optional files to send along, as paths in the workspace (relative to it, or the absolute path a tool printed when it created the file). Max 5 files, 15 MB each. Email attaches them; Telegram sends each as a photo or document; a voice device cannot carry files and the result says so."
       },
       "to": {
         "type": "string",

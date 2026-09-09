@@ -49,9 +49,14 @@ agent needs more.
 - **`manage_tasks`** — it schedules, reviews and cancels its own work
   ("check the backup log every morning").
 - **`notify_user`** — it reaches you through the
-  [connectors plugin](../connectors/README.md): a Telegram message, or a
-  sentence spoken by a voice satellite. Recipients are contacts addressed by
-  **name**, and the agent's autonomy settings hold the default one.
+  [connectors plugin](../connectors/README.md): a Telegram message, an email,
+  or a sentence spoken by a voice satellite. Recipients are contacts addressed
+  by **name**, and the agent's autonomy settings hold the default one. Besides
+  the text it takes an optional **subject** and **attachments** (files from the
+  workspace, such as a report the agent just wrote): on email they become the
+  Subject header and real attachments, on Telegram the first line and one
+  upload per file; a voice device speaks the text and the tool result tells the
+  agent which files could not be delivered (max 5 files, 15 MB each).
 - **Memory** (`memory_enabled`) — so it remembers what it did across wakes.
 - **`POST /api/tasks`** — trigger one from a script or a webhook. A task with
   no schedule is due immediately and runs once, which makes it a clean external

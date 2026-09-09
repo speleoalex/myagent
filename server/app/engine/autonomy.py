@@ -190,8 +190,9 @@ def build_wake_prompt(agent: Agent, tasks: list[dict],
         lines.append(f"\nNext scheduled: {next_task.get('next_at') or '?'} — "
                      f"{_short(next_task.get('prompt') or '', 120)}")
     if "notify_user" in granted:
-        lines.append("\nTo contact the user, use the notify_user tool. "
-                     "Your reply text is only logged.")
+        lines.append("\nTo contact the user, use the notify_user tool "
+                     "(it takes a subject and file attachments as separate "
+                     "parameters). Your reply text is only logged.")
     if "manage_tasks" in granted:
         line = ("You can schedule future work for yourself, and review or "
                 "cancel what is already scheduled, with the manage_tasks tool.")

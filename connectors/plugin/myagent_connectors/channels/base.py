@@ -158,14 +158,50 @@ class BaseConnector:
         best-effort contract as send()."""
         return False
 
-    async def verify(self) -> dict:
+    async def notify(self, chat_id, text: str, subject: str = "",
+                     files: list[tuple[str, bytes, str]] | None = None,
+                     ) -> tuple[bool, list[str]]:
+        """Deliver an unsolicited message (``notify_user``): text, optionally a
+        subject and files, as ONE notification. Returns ``(delivered,
+        failed_file_names)``.
+
+        The default is the composition every chat-like transport wants and
+        needs no override: a channel has no subject line, so the subject
+        becomes the first line of the text, and each file follows through
+        ``send_file`` — a transport that does not carry files (a voice
+        satellite) answers ``False`` there and the names come back to the
+        caller, which reports them to the agent instead of pretending they
+        arrived. Mail overrides this: a subject IS a header there, and text +
+        attachments are one message, not one message per file.
+
+        ``files`` are ``(name, bytes, mime)`` — bytes, not paths: the core owns
+        the workspace and has already checked containment and size; the
+        transport only needs something to upload."""
+        if subject and subject.strip():
+            text = f"{subject.strip()}\n\n{text or ''}".rstrip()
+        if not await self.send(chat_id, text):
+            return False, [name for name, _, _ in (files or [])]
+        failed = []
+        for name, data, mime in (files or []):
+            if not await self.send_file(chat_id, name, data, mime, name):
+                failed.append(name)
+        return True, failed
+
+    async def verify(self, check: str | None = None) -> dict:
         """Check the binding's credentials and describe the account they open.
 
         Returns a small dict for the UI (Telegram: ``{"bot": …, "name": …}``) or
         raises with a readable reason. Lives here so the router can offer "test
         this token" without importing a channel class and refusing every other
         type — the registry promises that adding a channel needs no changes
-        elsewhere, and this is what makes that true."""
+        elsewhere, and this is what makes that true.
+
+        ``check`` names ONE of the tests the manifest declares under
+        ``sections[].tests`` (a mail channel: "receive" or "send"); ``None``
+        means everything, which is what the single Test button asks. The router
+        only passes ``check`` when one was requested, so a channel that declares
+        no tests may keep a parameterless ``verify(self)``. Unknown id →
+        ``ValueError`` (reported verbatim, not as bad credentials)."""
         raise NotImplementedError(
             f"the '{self.type}' channel does not support testing credentials"
         )

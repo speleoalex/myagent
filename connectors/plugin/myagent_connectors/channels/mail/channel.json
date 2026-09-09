@@ -1,0 +1,58 @@
+{
+  "type": "mail",
+  "label": "Email",
+  "module": "channel.py",
+  "class": "MailConnector",
+  "labels": {
+    "token": "connectors.mail.tokenLabel"
+  },
+  "hints": {
+    "token": "connectors.mail.tokenHint",
+    "allowed": "connectors.mail.allowedHint"
+  },
+  "handle": {
+    "label": "connectors.mail.handleLabel",
+    "example": "nome@example.com"
+  },
+  "sections": [
+    {"id": "account", "label": "connectors.mail.secAccount"},
+    {"id": "incoming", "label": "connectors.mail.secIncoming",
+     "tests": [{"id": "receive", "label": "connectors.mail.testReceive"}]},
+    {"id": "outgoing", "label": "connectors.mail.secOutgoing",
+     "tests": [{"id": "send", "label": "connectors.mail.testSend"}]},
+    {"id": "polling", "label": "connectors.mail.secPolling"}
+  ],
+  "settings": [
+    {"key": "username", "section": "account", "type": "text", "label": "connectors.mail.username",
+     "hint": "connectors.mail.usernameHint", "placeholder": "nome@example.com", "default": "",
+     "required": true},
+    {"key": "from_addr", "section": "account", "type": "text", "label": "connectors.mail.fromAddr",
+     "hint": "connectors.mail.fromAddrHint", "default": "", "placeholder": "nome@example.com"},
+
+    {"key": "protocol", "section": "incoming", "type": "select", "label": "connectors.mail.protocol",
+     "default": "imap",
+     "options": [{"value": "imap", "label": "IMAP"}, {"value": "pop3", "label": "POP3"}]},
+    {"key": "host", "section": "incoming", "type": "text", "label": "connectors.mail.host",
+     "default": "", "placeholder": "imap.example.com", "required": true},
+    {"key": "port", "section": "incoming", "type": "number", "label": "connectors.mail.port",
+     "default": 993, "required": true},
+    {"key": "ssl", "section": "incoming", "type": "checkbox", "label": "connectors.mail.ssl",
+     "default": true},
+    {"key": "folder", "section": "incoming", "type": "text", "label": "connectors.mail.folder",
+     "hint": "connectors.mail.folderHint", "default": "INBOX", "when": {"protocol": "imap"}},
+    {"key": "pop_delete", "section": "incoming", "type": "checkbox", "label": "connectors.mail.popDelete",
+     "hint": "connectors.mail.popDeleteHint", "default": false, "when": {"protocol": "pop3"}},
+
+    {"key": "smtp_host", "section": "outgoing", "type": "text", "label": "connectors.mail.smtpHost",
+     "hint": "connectors.mail.smtpHostHint", "default": "", "placeholder": "smtp.example.com"},
+    {"key": "smtp_port", "section": "outgoing", "type": "number", "label": "connectors.mail.smtpPort",
+     "default": 587},
+    {"key": "smtp_security", "section": "outgoing", "type": "select",
+     "label": "connectors.mail.smtpSecurity", "default": "starttls",
+     "options": [{"value": "starttls", "label": "STARTTLS"}, {"value": "ssl", "label": "SSL/TLS"},
+                 {"value": "none", "label": "connectors.mail.smtpNone"}]},
+
+    {"key": "poll_seconds", "section": "polling", "type": "number", "label": "connectors.mail.pollSeconds",
+     "hint": "connectors.mail.pollSecondsHint", "default": 60}
+  ]
+}

@@ -412,6 +412,7 @@ const App = {
         const quickAgents = agents.filter(a => a.enabled !== false).slice(0, 6);
         const recent = sessions.slice(0, 5);
         const srcIcon = (s) => s.source === 'telegram' ? 'bi-telegram'
+            : s.source === 'mail' ? 'bi-envelope'
             : s.source === 'autonomous' ? 'bi-robot'
             : s.channel ? 'bi-broadcast-pin' : 'bi-chat-left-text';
 

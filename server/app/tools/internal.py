@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import mimetypes
 import re
 from datetime import datetime, timedelta
+from pathlib import Path
 
 # Module-level on purpose (no import cycle: executor -> registry, and neither
 # imports this module; main.py wires the handlers after both are loaded).
+from app import config as app_config
 from app.engine import cron as cron_parser
 from app.engine.executor import AgentExecutor
 from app.models import Task
@@ -382,12 +385,125 @@ def _resolve_configured(state, raw, channel: str, binding_id: str):
     return binding_id, targets, "; ".join(notes), ""
 
 
+# Caps on what one notification may carry. Same numbers as the connectors
+# plugin applies to the files a turn delivers in a reply (MAX_FILES_PER_REPLY /
+# MAX_FILE_BYTES in channels/base.py): the two live on opposite sides of the
+# plugin boundary, so neither can import the other's constant.
+MAX_NOTIFY_FILES = 5
+MAX_NOTIFY_FILE_BYTES = 15 * 1024 * 1024
+
+
+def _split_paths(raw) -> list[str]:
+    """The ``attachments`` argument as a list of path strings.
+
+    A JSON array is the schema; a small model writing a text-based tool call
+    also produces one string with newlines or commas, and the file names it
+    quotes come straight from file_write's output — so whitespace INSIDE a path
+    is kept (no split on spaces, unlike _split_chat_ids)."""
+    if raw is None:
+        return []
+    if isinstance(raw, (list, tuple)):
+        items = [str(x) for x in raw]
+    else:
+        text = str(raw).strip()
+        if text.startswith("[") and text.endswith("]"):
+            text = text[1:-1]
+        items = re.split(r"[\n,;]+", text)
+    out, seen = [], set()
+    for one in items:
+        one = one.strip().strip("\"'")
+        if one and one.lower() not in _PLACEHOLDER_ARGS and one not in seen:
+            seen.add(one)
+            out.append(one)
+    return out
+
+
+def _notify_roots(executor) -> list[Path]:
+    """Where a notification may take its files from: the shared workspace
+    (the resource channel's one root) and, if the agent has one, its own
+    folder. Nothing else — the argument is model-written, and a path that
+    escapes these is a way to mail anything the server can read."""
+    roots = [app_config.WORKSPACE_DIR]
+    folder = getattr(getattr(executor, "agent", None), "folder", None)
+    if folder is not None and getattr(folder, "path", ""):
+        roots.append(Path(folder.path).expanduser())
+    return [r.resolve() for r in roots]
+
+
+def _resolve_notify_files(raw, executor) -> tuple[list[tuple[str, bytes, str]], list[str]]:
+    """Turn the ``attachments`` argument into ``(name, bytes, mime)`` triples.
+
+    Returns ``(files, problems)``: what can be sent, and one sentence per path
+    that cannot, NAMED — the reader is a model that must tell the user "the
+    report was not attached", and a silently shorter list would have it say the
+    opposite. Relative paths resolve against the workspace (the tools' cwd, so
+    the model's relative paths mean the same thing here as there); absolute
+    paths and ``~`` are accepted as file_write prints them, provided they
+    resolve inside one of :func:`_notify_roots`."""
+    files, problems = [], []
+    roots = _notify_roots(executor)
+    for one in _split_paths(raw):
+        if len(files) >= MAX_NOTIFY_FILES:
+            problems.append(f"'{one}' not attached: at most {MAX_NOTIFY_FILES} files per notification")
+            continue
+        candidate = Path(one).expanduser()
+        if not candidate.is_absolute():
+            candidate = roots[0] / candidate
+        try:
+            target = candidate.resolve()
+            inside = any(target.is_relative_to(r) for r in roots)
+            if not inside:
+                problems.append(f"'{one}' not attached: outside the workspace")
+                continue
+            if not target.is_file():
+                problems.append(f"'{one}' not attached: no such file")
+                continue
+            if target.stat().st_size > MAX_NOTIFY_FILE_BYTES:
+                problems.append(f"'{one}' not attached: larger than "
+                                f"{MAX_NOTIFY_FILE_BYTES // (1024 * 1024)} MB")
+                continue
+            data = target.read_bytes()
+        except OSError as e:
+            problems.append(f"'{one}' not attached: {type(e).__name__}")
+            continue
+        mime = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+        files.append((target.name, data, mime))
+    return files, problems
+
+
+async def _deliver(connector, chat_id, text: str, subject: str,
+                   files: list[tuple[str, bytes, str]]) -> tuple[bool, list[str]]:
+    """One notification through one connector: ``(delivered, failed_files)``.
+
+    ``notify`` is the connector hook that composes subject, text and files the
+    way its transport wants (mail: one message with a Subject header and
+    attachments). A plugin predating it — core and plugin are installed
+    separately — still has ``send``, so the subject is folded into the text
+    here and the files are reported as not delivered rather than dropped."""
+    notify = getattr(connector, "notify", None)
+    if notify is not None:
+        return await notify(chat_id, text, subject=subject, files=files)
+    if subject:
+        text = f"{subject}\n\n{text}"
+    ok = await connector.send(chat_id, text)
+    return ok, [name for name, _, _ in files]
+
+
 async def notify_user_handler(
     text: str = "", binding_id: str = "", chat_id: str = "",
-    to: str = "", channel: str = "",
+    to: str = "", channel: str = "", subject: str = "", attachments=None,
     executor=None, _named=None, _state=None, **kwargs,
 ) -> str:
     """Push a message to a person through a messaging channel.
+
+    Besides ``text`` a notification may carry a ``subject`` and ``attachments``
+    (files from the workspace or the agent's folder). Both were born from one
+    live turn: asked for "a mail with subject ciao", the model wrote
+    "Oggetto: ciao" as the first line of the body, because the body was the only
+    parameter there was. How they render is the CONNECTOR's call (``notify``):
+    a Subject header and MIME attachments on mail, a first line and one upload
+    per file on Telegram, a first line and nothing else on a voice satellite —
+    which is why the files that did NOT arrive are listed in the result.
 
     Three ways to say where it goes, in this order of precedence:
 
@@ -411,6 +527,16 @@ async def notify_user_handler(
     call time, so the plugin can be registered after this handler is bound."""
     if not (text or "").strip():
         return "ERROR: 'text' is required"
+    subject = " ".join(str(subject or "").split())
+    if subject.lower() in _PLACEHOLDER_ARGS:
+        subject = ""
+    # Files first: a path that does not exist is the ONE error the model can fix
+    # on its own, and nothing should reach the recipient before it is settled —
+    # with several attachments and one bad path, the good ones are still sent
+    # and the bad one is named in the result.
+    files, file_problems = _resolve_notify_files(attachments, executor)
+    if file_problems and not files and _split_paths(attachments):
+        return "ERROR: " + "; ".join(file_problems)
     cfg = getattr(getattr(executor, "agent", None), "autonomous", None)
     binding_id = _or_configured(binding_id, cfg and cfg.notify_binding_id)
     to = _or_configured(to, "")
@@ -450,13 +576,13 @@ async def notify_user_handler(
     # Telegram ACCEPTS "123456789,987654321", parses the leading digits,
     # delivers to the first chat only and returns ok:true. No error, no warning,
     # second recipient silently dropped (verified against the live API).
-    sent, failed = [], []
+    sent, failed, undelivered = [], [], []
     for one, display in targets:
         try:
             # A connector's send() is best-effort for inbound replies, so it
             # REPORTS failure instead of raising. Ignoring that return told the
             # agent "message sent" over a dead token.
-            delivered = await connector.send(one, text)
+            delivered, lost = await _deliver(connector, one, text, subject, files)
         except Exception as e:
             # Detail to the log, not to the model: a transport error can quote a
             # URL that embeds the bot token.
@@ -466,18 +592,33 @@ async def notify_user_handler(
         if delivered is False:
             failed.append(f"{display} (the channel rejected it — see the server log)")
             continue
+        if lost:
+            undelivered.append(f"{display}: {', '.join(lost)}")
+        arrived = [name for name, _, _ in files if name not in set(lost)]
         # The session key is asked of the connector: it derives from the
         # binding's session_prefix, and that connector is the only thing that
         # knows how to build it.
         logged = await _log_to_channel(
-            connector.session_id_for(one), text, executor, _named)
+            connector.session_id_for(one), _as_said(text, subject, arrived),
+            executor, _named)
         sent.append(display if logged else f"{display} (not added to its history)")
 
     if not sent:
         return f"ERROR: nothing was sent via binding '{binding_id}': {'; '.join(failed)}"
     out = f"Message sent via binding '{binding_id}' to: {', '.join(sent)}."
+    if subject:
+        out += f" Subject: {subject}."
+    if files:
+        out += f" Attached: {', '.join(name for name, _, _ in files)}."
     if failed:
         out += f" FAILED for: {'; '.join(failed)}."
+    # Files the transport could not carry, per recipient: a voice satellite
+    # speaks the text and has nowhere to put a PDF. Said here, or the agent tells
+    # the user "I sent you the report" about a report that never left.
+    if undelivered:
+        out += f" NOT delivered (the channel cannot carry files): {'; '.join(undelivered)}."
+    if file_problems:
+        out += f" Skipped: {'; '.join(file_problems)}."
     # Who the address book could NOT reach on this channel. Last, and never folded
     # into the sent list: "everyone was told" is exactly the sentence this prevents.
     if note:
@@ -509,6 +650,19 @@ async def notify_agent_owner(agent, text: str, named=None, state=None) -> str:
     """
     return await notify_user_handler(
         text=text, executor=_AgentOnly(agent), _named=named, _state=state)
+
+
+def _as_said(text: str, subject: str, attached: list[str]) -> str:
+    """What goes into the chat's history for a notification: the text, with the
+    subject as its first line and the files that arrived named at the end. The
+    history is what the model replays next turn, so it has to record the whole
+    thing that was said — a subject the agent cannot see again is one it repeats
+    with different words, and a file it does not remember sending is one it
+    sends twice."""
+    out = f"{subject}\n\n{text}" if subject else text
+    if attached:
+        out += f"\n\n[attached: {', '.join(attached)}]"
+    return out
 
 
 async def _log_to_channel(sid: str, text: str, executor, named) -> bool:

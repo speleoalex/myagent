@@ -81,7 +81,10 @@ how `notify_user` turns *"message Alessandro on Telegram"* into a chat id: the
 connectors plugin exposes `resolve_recipients(name, channel)` and the tool calls
 it when given a name instead of an id. Keep such a seam a plain method returning
 `(results, error)` — an error the caller can read and correct beats an exception,
-because the caller here is a language model.
+because the caller here is a language model. The same tool then calls the
+connector's `notify(chat_id, text, subject, files)` — optional, looked up with
+`getattr`, so a plugin that predates it still works through `send` — and reads
+the names of the files the transport could not carry from its return value.
 
 These are internal APIs, not a frozen surface: a plugin that imports them is
 choosing to follow the core. Keep the list short and stated, so a core

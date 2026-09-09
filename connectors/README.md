@@ -1,7 +1,7 @@
 # MyAgent Connectors
 
-Bridge between messaging services (Telegram today, others tomorrow) and your
-agents. It is an **optional plugin**: not part of the core install, because the
+Bridge between messaging services (Telegram, email, a voice satellite — others
+tomorrow) and your agents. It is an **optional plugin**: not part of the core install, because the
 core works offline and this is the part that needs the internet.
 
 Installed, it runs **inside** myagent's process — one service, one port, one UI.
@@ -22,8 +22,10 @@ Each **binding** links one bot ↔ one agent: *"messages on THIS bot are answere
 by THIS agent, for THESE users only."* The agent can also be **Auto**: every
 message is then classified and routed to the best-suited agent, with follow-ups
 ("try again", "more detail") staying with whoever just answered — the same
-option the web chat's agent selector offers. Configure them at
-`http://127.0.0.1:8888/#/connectors`.
+option the web chat's agent selector offers. Configure them under **Channels**
+in the UI (`http://127.0.0.1:8888/#/connectors`). The menu says *Channels*, not
+*Connectors*: the word "connector" is what Claude and other assistants call an
+MCP server, which is a different thing (MyAgent has those too, under *MCP*).
 
 ## What it does
 
@@ -56,7 +58,17 @@ option the web chat's agent selector offers. Configure them at
   one instead of inventing an id.
 - **Outbound push** — the `notify_user` tool lets an agent (typically an
   autonomous one) start a conversation. It both delivers the message and appends
-  it to that chat's own history, so the agent remembers having said it.
+  it to that chat's own history, so the agent remembers having said it. A
+  notification can carry a **subject** and **attachments** (files from the
+  workspace, max 5 of 15 MB): each channel renders them its own way — Telegram
+  puts the subject on the first line and uploads each file (photos inline,
+  anything else as a document), email sends **one** mail with that Subject and
+  the files attached, a voice satellite speaks the text and reports the files
+  as not delivered. The agent is told exactly what did not arrive.
+- **Email** — give the agent a mailbox of its own: it polls it over **IMAP** or
+  **POP3**, answers every message it receives with **one reply mail** over SMTP
+  (threaded under the original, attachments included). Any IMAP/POP3 mailbox
+  with plain login over TLS. See [Email](#email) below.
 
 ## Requirements
 
@@ -80,8 +92,8 @@ two pollers on one bot token means Telegram delivers each message to only one of
 them, at random, with no error on either side.
 
 Then, in the UI under `#/connectors` (`http://127.0.0.1:8888/#/connectors` on
-the default port): **New bot** → paste the token →
-**Test token** → pick the agent → list the authorized user ids → Save. The bot
+the default port): **New channel** → type *Telegram* → paste the token →
+**Test** → pick the agent → list the authorized user ids → Save. The bot
 starts polling immediately, no restart needed. To find your numeric id, message
 [@userinfobot](https://t.me/userinfobot).
 
@@ -101,6 +113,65 @@ them back. To reclaim the transcription dependency too (~380 MB):
 ```bash
 <install>/server/.venv/bin/pip uninstall -y faster-whisper ctranslate2 onnxruntime
 ```
+
+## Email
+
+The `mail` channel turns a mailbox into a conversation channel: every sender
+address is a chat, each mail is a message, and the answer comes back by mail.
+
+It works with any **generic IMAP/POP3 mailbox**: authentication is a plain
+login over TLS (IMAP LOGIN, POP3 USER/PASS, SMTP AUTH) with the mailbox
+password in the *password* field. There is no provider preset and no OAuth.
+
+1. In the channel form (**New channel** → type *Email*) type the address as
+   *mailbox login* and its password.
+2. *Incoming server*: host, port and SSL (IMAP 993 or POP3 995 with SSL are
+   the norm). Press **Test receiving**: it logs in and reports how many mails
+   are waiting.
+3. *Outgoing server*: SMTP host defaults to the incoming host, port 587 with
+   STARTTLS (or 465 with SSL). Press **Test sending**: it logs in to SMTP.
+   Each button proves its own server, so a wrong SMTP port does not hide a
+   working mailbox.
+
+The *From* address defaults to the username, so most setups need three fields.
+The IMAP folder is shown only with IMAP, *delete after reading* only with POP3.
+Providers that refuse the account password for mail clients (Gmail,
+Outlook.com) want an **app password** generated in the account's security
+settings; with Gmail that also requires 2-Step Verification.
+
+**IMAP or POP3?** IMAP is the default and the better choice: unread mails are
+fetched and marked read, the mailbox is left intact and you can watch what the
+agent received from any mail client. POP3 exists for providers that offer
+nothing else; the bot downloads new mails by UIDL and, only if you tick
+*delete after download*, removes them from the server.
+
+Worth knowing:
+
+- **First start answers nothing.** The bot takes a baseline of what is already
+  in the mailbox and only answers mails that arrive *after* it. Otherwise
+  turning it on over a year-old inbox would send hundreds of replies.
+- **Access control is by address**: the allowlist takes email addresses (the
+  address book stores them as the person's `mail` handle), so only the people
+  you name get an answer; everybody else is ignored silently, on purpose — an
+  auto-reply to strangers is how a mailbox becomes a spam relay.
+- **Loop guard.** Mails from the bot's own address, from `no-reply`/
+  `mailer-daemon`-like senders, bounces, mailing lists and anything flagged
+  `Auto-Submitted` are dropped, and every reply carries
+  `Auto-Submitted: auto-replied`, so two bots — or a bot and an out-of-office
+  — cannot ping-pong forever.
+- The reply quotes nothing: the sender's mail is threaded (`In-Reply-To`), so
+  their client shows the context. Quoted text and signatures are stripped from
+  what the agent reads; the subject is prepended to the first message of a
+  thread.
+- Attachments work both ways: images, text, PDF/Office and audio (transcribed)
+  reach the agent; files the agent produces come back attached (max 5).
+- A `notify_user` **with a subject** is a new mail under exactly that Subject,
+  files attached, deliberately **not** threaded onto an earlier question (an
+  `In-Reply-To` would file "today's report" under last week's thread). Without
+  a subject it is a reply in the known thread, or — while the agent is still
+  answering an inbound mail — part of that single reply.
+- The poll interval is per bot (default 60 s, minimum 15). Network timeouts
+  are `MYAGENT_MAIL_TIMEOUT` seconds (default 30).
 
 ## Voice notes: size and first run
 
@@ -129,6 +200,7 @@ with `~/myagent/config`.
 |---|---|---|
 | `MYAGENT_CONNECTORS_DIR` | `~/myagent/connectors` | state directory |
 | `MYAGENT_TELEGRAM_POLL_TIMEOUT` | `30` | long-poll seconds (Telegram channel) |
+| `MYAGENT_MAIL_TIMEOUT` | `30` | socket timeout for IMAP/POP3/SMTP (mail channel) |
 | `MYAGENT_CHAT_TIMEOUT` | `180` | wall clock for one agent turn |
 | `MYAGENT_CONNECTORS_CONCURRENCY` | `2` | inbound turns running at once, all bots |
 | `MYAGENT_CONNECTORS_MAX_ERRORS` | `10` | consecutive failures before self-pausing |
@@ -165,16 +237,38 @@ names a transport:
 
 ```text
 plugin/myagent_connectors/channels/<type>/
-├── channel.json        # type, label, UI hint keys, shape of a person's handle
+├── channel.json        # type, label, UI hint keys, shape of a person's handle,
+│                       # optional `settings` + `sections` (the form the channel gets)
 ├── channel.py          # a BaseConnector subclass: receive, send, verify
 └── requirements.txt     # optional, installed by install.sh
 ```
 
 Everything above the transport is already shared: access control, `/help` and
 `/reset`, session keys, the agent call with its timeout and concurrency limit, the
-address book, the bot CRUD and the UI (the channel picker and its hints are fed by
-`channel.json`). Only three methods are yours: `start`, `stop`, `send` — plus
-`verify` if the channel can check its own credentials.
+address book, the bot CRUD and the UI. Only three methods are yours: `start`,
+`stop`, `send` — plus `verify` if the channel can check its own credentials.
+
+The **form** a channel gets is described by its manifest, so the shared UI never
+names a transport:
+
+- `labels` / `hints` rename the token field and its help (a "shared key", an
+  "App Password"); `handle` says what a person's identifier looks like, and gives
+  the address book one field per installed channel.
+- `settings` lists the non-secret fields — `{key, type: text|number|select|checkbox,
+  label, hint, default, placeholder, options}`, labels being i18n keys added to
+  **both** `ui/js/i18n/en.js` and `it.js`. `required: true` is checked in the browser before
+  Save and before a test; `when: {"protocol": "imap"}` shows the field only while
+  another setting holds one of the listed values (hidden fields are still saved).
+  The values travel opaquely in `Binding.settings`; the secret stays in
+  `Binding.token`.
+- `sections` (optional, ordered) groups the settings into titled fieldsets via
+  each descriptor's `section`. A section may declare `tests`:
+  `[{"id": "receive", "label": "connectors.mail.testReceive"}]` renders one
+  button per entry under that section, and the server calls
+  `verify(check="receive")`. A channel without `tests` keeps the single **Test**
+  button next to the token and a parameterless `verify()` — the router passes
+  `check` only when one was requested. An unknown id should raise `ValueError`,
+  which reaches the form as a 400 with your message.
 
 Two conventions worth knowing. A folder whose name starts with `.`/`_` or ends in
 `.disabled` is skipped, so parking a channel is a `mv`. And a channel that fails
@@ -187,5 +281,5 @@ The plugin contract itself is documented in
 
 ## Security note
 
-Bindings hold bot tokens. Keep myagent bound to `127.0.0.1` (the default) or set
+Bindings hold bot tokens and mailbox passwords. Keep myagent bound to `127.0.0.1` (the default) or set
 `MYAGENT_API_KEY` before exposing it on a network.

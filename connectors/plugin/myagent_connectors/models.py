@@ -92,6 +92,12 @@ class Binding(BaseModel):
     # are English-only, so this doubles as the way to disclose in the language
     # the bot actually speaks.
     ai_disclosure: str = ""
+    # Channel-specific, NON-secret settings, shaped by the channel manifest's
+    # ``settings`` descriptors (see channels/registry.py). Opaque here on
+    # purpose: naming a channel's keys in the shared model is what this plugin
+    # promises never to do. Secrets do not belong in it — they go in ``token``
+    # (masked by the router) and nothing else.
+    settings: dict = {}
 
     @field_validator("id")
     @classmethod

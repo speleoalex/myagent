@@ -125,20 +125,33 @@ class TestReq(BaseModel):
     type: str = "telegram"
     token: str = ""
     url: str = ""    # device URL, for channels verified by probing the device
+    settings: dict = {}  # channel settings (mail server, protocol…), same shape as Binding.settings
+    check: str = ""      # one of the manifest's sections[].tests[].id; "" = everything
 
 
-async def _verify(binding: Binding, request: Request) -> dict:
+class CheckReq(BaseModel):
+    check: str = ""
+
+
+async def _verify(binding: Binding, request: Request, check: str = "") -> dict:
     """Build the binding's connector from the registry and ask it to check its
     own credentials. No channel type is named here: an unknown type fails in
-    create_connector, and a channel without a verify() says so itself."""
+    create_connector, and a channel without a verify() says so itself.
+
+    `check` is forwarded ONLY when set: a channel that declares no per-section
+    tests keeps a parameterless verify(), and handing it a kwarg would turn the
+    generic Test button into a TypeError."""
     svc = services(request)
     try:
         connector = create_connector(binding, svc.core, svc.grants)
     except ValueError as e:
         raise HTTPException(400, str(e))
     try:
-        return {"ok": True, **(await connector.verify() or {})}
-    except NotImplementedError as e:
+        result = await (connector.verify(check=check) if check else connector.verify())
+        return {"ok": True, **(result or {})}
+    except (NotImplementedError, ValueError) as e:
+        # ValueError = an unknown check id: a bug in the form or the manifest,
+        # not bad credentials, so the message goes through as it is.
         raise HTTPException(400, str(e))
     except Unreachable as e:
         # Verbatim: it already names the address that was tried. Prefixing this
@@ -155,15 +168,16 @@ async def test_token(req: TestReq, request: Request):
     if req.token in ("", SECRET_MASK):
         raise HTTPException(400, "Provide a token to test")
     return await _verify(Binding(id="probe", type=req.type, token=req.token,
-                                 url=req.url), request)
+                                 url=req.url, settings=req.settings or {}), request, req.check)
 
 
 @router.post("/{binding_id}/test")
-async def test_binding(binding_id: str, request: Request):
+async def test_binding(binding_id: str, request: Request, req: CheckReq | None = None):
     """Validate the STORED credentials: the UI only ever sees the mask, so it
-    cannot send the token back for a plain /test."""
+    cannot send the token back for a plain /test. The body is optional (the
+    old no-body POST still works); it only carries `check`."""
     data = get_or_404(services(request).bindings, binding_id, "Binding")
-    return await _verify(Binding(**data), request)
+    return await _verify(Binding(**data), request, req.check if req else "")
 
 
 # ------------------------------------------------------- device configuration

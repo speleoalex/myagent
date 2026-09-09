@@ -525,7 +525,15 @@ stays idle whether it is live or not.
   configured binding/chat is the fallback for when no name is given — in that
   order, so a named recipient is never overridden by the default. Best-effort, and
   a clear error when the plugin is not installed. The reply text of a wake is only
-  logged.
+  logged. A notification may also carry a ``subject`` and ``attachments``: the
+  core resolves the paths (workspace or the agent's folder, containment
+  re-checked, 5 files of 15 MB at most) and reads the bytes; the connector's
+  ``notify(chat_id, text, subject, files)`` decides how they render (the base
+  class folds the subject into the first line and uploads each file through
+  ``send_file``; mail overrides it with a Subject header and MIME attachments).
+  Files a transport cannot carry come back by name and are reported to the
+  agent, never silently dropped. Without the hook (an older plugin) the core
+  falls back to ``send`` with the subject folded in.
 - **Scheduling for OTHER agents** (opt-in, ``Agent.schedule_others``, default
   off) — with the flag, the executor injects an optional ``agent_id`` into
   ``manage_tasks`` and ``autonomy_control``, pinned by an ``enum`` to the agents
@@ -563,7 +571,8 @@ trigger, also the main testing lever), `POST /api/autonomy/{id}/stop`,
 (long-term memory is deliberately kept).
 
 `notify_user` both sends and appends the sent text to the target chat's own
-conversation, so an unsolicited message is part of the history the agent replays
+conversation — subject as its first line, the names of the files that arrived at
+the end — so an unsolicited message is part of the history the agent replays
 next turn (otherwise "repeat that" repeats the turn before it). The session key is
 asked of the connector (`session_id_for`): it derives from the binding's
 `session_prefix`, so nothing else can compute it. A wake receives no chat history
