@@ -232,7 +232,12 @@ class AutonomousConfig(BaseModel):
     # that needs more can be told to call memory_search in its instructions.
     #
     # The full conversation is still written to the session file either way: this
-    # governs only what goes back INTO the prompt. Raise it if you have a reason.
+    # governs only what goes back INTO the prompt — and it governs ALL of it,
+    # the "## Agent findings" and "## What your tools returned earlier" blocks
+    # included. Those two are built from the session file rather than from the
+    # message window, so until 2026-09-04 they ignored this knob and fed the
+    # previous wakes back in regardless; that is the loop described above,
+    # reached through a side door. Raise it if you have a reason.
     history_messages: int = 0
 
     @model_validator(mode="before")

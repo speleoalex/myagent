@@ -219,19 +219,61 @@ async def test_cancellation():
 def test_call_sites():
     """Four turn paths own a session; each must hand the history in AND cancel
     a running compaction. A forgotten kwarg fails nowhere at runtime: the
-    findings section would just be empty forever."""
+    findings section would just be empty forever.
+
+    The autonomy path is the exception, and deliberately so: a wake quotes the
+    previous wakes only as far as AutonomousConfig.history_messages allows (see
+    test_wake_findings_follow_the_history_window), so it holds the call in a
+    local instead of inlining it. It still has to pass the kwarg.
+    """
     for rel, runs in (("server/app/routers/chat.py", 2),
-                      ("server/app/engine/channel_turn.py", 1),
-                      ("server/app/engine/autonomy.py", 1)):
+                      ("server/app/engine/channel_turn.py", 1)):
         src = (_ROOT / rel).read_text()
         assert len(re.findall(r"delegations=delegation_history\(session\)", src)) == runs, rel
         assert len(re.findall(r"cancel_compaction\(", src)) == runs, rel
+
+    auto = (_ROOT / "server/app/engine/autonomy.py").read_text()
+    assert re.search(r"delegations=\w+", auto), auto[-2000:]
+    assert len(re.findall(r"cancel_compaction\(", auto)) == 1
 
     # A sub-agent starts empty: between agents only message/reply travel.
     sub_src = (_ROOT / "server/app/tools/internal.py").read_text()
     call = sub_src[sub_src.index("sub_executor.run("):]
     assert "delegations" not in call[:400], call[:400]
     print("ok: all four turn paths pass the history and cancel compaction")
+
+
+def test_wake_findings_follow_the_history_window():
+    """On an autonomous wake the two blocks obey AutonomousConfig.history_messages.
+
+    They restore exactly what is_scaffolding_message strips out of the message
+    window, so they have to share its bound. Built from the whole session file
+    instead, they let the previous wakes back in through a side door: a recurring
+    task is self-similar, so the newest entries are always the SAME task's last
+    run, and "## Agent findings" then offers yesterday's answer under a note that
+    says to answer from it rather than admit no information. Observed
+    2026-08-29..09-04 on a daily weather task: a forecast for a date four days
+    stale, re-sent to two people every morning.
+    """
+    s = _session_with(3)
+
+    # The trap the call site has to work around: limit=0 is FALSY, so asking for
+    # "no history" through the limit argument returns ALL of it.
+    assert len(delegation_history(s, 0)) == 3
+    assert len(delegation_history(s, 2)) == 2
+
+    auto = (_ROOT / "server/app/engine/autonomy.py").read_text()
+    assert "delegation_history(session, hist) if hist > 0 else []" in auto, auto
+    assert "tool_history(session, hist) if hist > 0 else []" in auto, auto
+    assert "hist = cfg.history_messages" in auto, auto
+
+    # The interactive paths are NOT windowed: there the history is the chat the
+    # user can see, and dropping it is the bug this whole file is about.
+    for rel in ("server/app/routers/chat.py", "server/app/engine/channel_turn.py"):
+        src = (_ROOT / rel).read_text()
+        assert "delegation_history(session)" in src, rel
+        assert "history_messages" not in src, rel
+    print("ok: a wake quotes previous wakes only within history_messages")
 
 
 if __name__ == "__main__":
@@ -241,4 +283,5 @@ if __name__ == "__main__":
     asyncio.run(test_recall_tool())
     asyncio.run(test_cancellation())
     test_call_sites()
+    test_wake_findings_follow_the_history_window()
     print("all tests passed")

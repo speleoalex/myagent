@@ -26,7 +26,11 @@ tool results verbatim on the SYSTEM prompt. Cases:
   5. nothing reaches `conversation[]`: it rides on the system suffix, so
      is_scaffolding_message and the rewind endpoint are untouched;
   6. no tool history -> no section at all, i.e. today's prompt exactly;
-  7. all four turn paths actually pass it (a dropped kwarg is silent).
+  7. all four turn paths actually pass it (a dropped kwarg is silent), and the
+     autonomous one passes a WINDOWED copy (see NON_FACT_TOOLS below and
+     AutonomousConfig.history_messages);
+  8. NON_FACT_TOOLS are excluded: a result that expires or that is a receipt for
+     something DONE is not a fact to answer from later.
 """
 
 import asyncio
@@ -42,7 +46,7 @@ _tmp = tempfile.TemporaryDirectory()
 os.environ["MYAGENT_HOME"] = _tmp.name
 
 from app.engine.executor import AgentExecutor, Stores     # noqa: E402
-from app.storage.sessions import tool_history             # noqa: E402
+from app.storage.sessions import NON_FACT_TOOLS, tool_history  # noqa: E402
 from app.storage.store import JsonStore                   # noqa: E402
 from app.tools.registry import ToolRegistry               # noqa: E402
 
@@ -72,6 +76,12 @@ session = {"messages": [
      "result": "ERROR: file not found"},
     {"role": "tool", "tool": "local_search", "arguments": {"query": "referto"},
      "result": LONG},
+    # 8. Neither of these is a fact to answer from later: the date EXPIRES, and
+    #    the notify_user result is a receipt for something already done.
+    {"role": "tool", "tool": "get_current_time", "arguments": {},
+     "result": "2026-09-03 10:05:31"},
+    {"role": "tool", "tool": "notify_user", "arguments": {"message": "buongiorno"},
+     "result": "Message sent via binding 'master-it' to: Alessandro"},
 ]}
 
 failures = []
@@ -92,6 +102,21 @@ check("call_agent is excluded — delegation_history owns it",
 check("a failed call is kept", any("ERROR" in h["result"] for h in hist))
 check("the limit keeps the NEWEST, with their original ids",
       [h["id"] for h in tool_history(session, limit=2)] == ["t2", "t3"])
+
+# 8. A result that expires, or that reports what the agent DID, is dropped —
+#    quoted as a standing fact the stale date was worse than absent: the agent
+#    asked a sub-agent for YESTERDAY's weather forecast and relayed it
+#    (observed 2026-08-29..09-04). The excluded names take no id either.
+check("get_current_time is excluded — its answer expires",
+      all(h["tool"] != "get_current_time" for h in hist))
+check("notify_user is excluded — a receipt is not a finding",
+      all(h["tool"] != "notify_user" for h in hist))
+check("an excluded tool consumes no id, so the ids of the others hold",
+      [h["id"] for h in hist] == ["t1", "t2", "t3"])
+check("the readers of a memory are NOT excluded — they retrieve facts",
+      not {"memory_read", "memory_search"} & NON_FACT_TOOLS)
+check("recall_delegation is excluded — the findings block already owns it",
+      "recall_delegation" in NON_FACT_TOOLS)
 
 
 async def main():
@@ -145,11 +170,17 @@ asyncio.run(main())
 
 # 7. every turn path passes it — a dropped kwarg fails silently, so check the
 #    source the way test_voice_transcribed_flag does.
-for f in ("server/app/routers/chat.py", "server/app/engine/channel_turn.py",
-          "server/app/engine/autonomy.py"):
+for f in ("server/app/routers/chat.py", "server/app/engine/channel_turn.py"):
     src = (ROOT / f).read_text(encoding="utf-8")
     check(f"{Path(f).name} passes tool_results",
           "tool_results=tool_history(session)" in src)
+# The autonomous path passes it too, but WINDOWED: an unbounded copy fed the
+# previous wakes back into the prompt regardless of history_messages. Pinned in
+# test_recall_delegation.test_wake_findings_follow_the_history_window.
+src = (ROOT / "server/app/engine/autonomy.py").read_text(encoding="utf-8")
+check("autonomy.py passes tool_results, windowed by history_messages",
+      "tool_results=prior_tools" in src
+      and "tool_history(session, hist) if hist > 0 else []" in src)
 src = (ROOT / "server/app/tools/internal.py").read_text(encoding="utf-8")
 check("a sub-agent is NOT given the parent's tool history",
       "tool_results=" not in src)

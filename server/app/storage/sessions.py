@@ -140,6 +140,35 @@ def steps_from(trace, tool_events: list[dict] | None) -> list[dict]:
 # every session file — web, channel and autonomous alike — already has it.
 DELEGATION_TOOL = "call_agent"
 
+#: Tools :func:`tool_history` never quotes, because their result is not a FACT
+#: the agent can answer from later. Two kinds, one rule:
+#:
+#:  * ``get_current_time`` EXPIRES. Quoted as a standing fact it is worse than
+#:    absent: on a recurring autonomous wake the block offered YESTERDAY's date
+#:    ("[t214] get_current_time: 2026-09-03 10:05:31") and the agent asked a
+#:    sub-agent for yesterday's weather forecast, then relayed it to the user
+#:    — four wakes running, observed 2026-08-29..09-04.
+#:  * ``notify_user``, ``manage_tasks``, ``autonomy_control`` and
+#:    ``memory_note`` answer "what I DID", not "what I found": their result is
+#:    a receipt ("Message sent via binding 'master-it' to: …", "Saved as
+#:    s-000016."). In that same wake three notify_user receipts held three of
+#:    the window's four slots, so the one slot left was the stale date. Their
+#:    readers stay: ``memory_read`` and ``memory_search`` retrieve facts.
+#:  * ``recall_delegation`` serves the findings block. Quoting it here would
+#:    show the same text through a second channel, free to disagree with it.
+#:
+#: Not a ``tool.json`` flag: this says how the PROMPT quotes a result, which a
+#: tool author neither knows nor controls. Add a name when re-running the tool
+#: is the only correct way to learn its answer again.
+NON_FACT_TOOLS = frozenset({
+    "get_current_time",
+    "notify_user",
+    "manage_tasks",
+    "autonomy_control",
+    "memory_note",
+    "recall_delegation",
+})
+
 
 def delegation_history(session: dict, limit: int | None = None) -> list[dict]:
     """The sub-agent replies recorded in this session, oldest first.
@@ -187,6 +216,8 @@ def tool_history(session: dict, limit: int | None = None) -> list[dict]:
     ``call_agent`` is excluded: :func:`delegation_history` already covers it,
     verbatim and with its own recall tool. Quoting a delegation twice would
     double its cost and let the two blocks disagree about where it was cut.
+    :data:`NON_FACT_TOOLS` is excluded for the opposite reason — those results
+    are not a fact to answer from at all.
 
     Ids are ``t<N>`` from the OLDEST, like ``d<N>``: stable as the chat grows.
     Nothing extra is persisted — every session file already keeps the whole
@@ -196,7 +227,7 @@ def tool_history(session: dict, limit: int | None = None) -> list[dict]:
     for m in session.get("messages") or []:
         if m.get("role") != "tool" or m.get("tool") == DELEGATION_TOOL:
             continue
-        if not m.get("tool"):
+        if not m.get("tool") or m.get("tool") in NON_FACT_TOOLS:
             continue
         args = m.get("arguments") if isinstance(m.get("arguments"), dict) else {}
         out.append({

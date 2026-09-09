@@ -512,6 +512,25 @@ class AutonomyService:
                 else:
                     stored = []
                 prior = [ChatMessage(**m) for m in stored]
+                # The findings / tool-results blocks restore exactly what
+                # is_scaffolding_message strips out of `stored` above, so they
+                # follow the SAME window — they used to be built from the whole
+                # session file, which let the previous wakes back in through a
+                # side door and reopened the feedback loop history_messages
+                # exists to close (see AutonomousConfig.history_messages).
+                # A recurring task is self-similar, so the newest entries are
+                # always the SAME task's last run: "## Agent findings" offered
+                # yesterday's answer under a note that says to answer from it
+                # rather than say you have no information, and the model did
+                # (observed 2026-08-29..09-04: a weather forecast re-sent for a
+                # date four days stale). At the default 0 they are not injected
+                # at all: with no history quoted there is no scaffolding to
+                # restore. Nothing is lost WITHIN the wake — both blocks only
+                # ever hold PREVIOUS turns (see AgentExecutor.delegations), and
+                # this turn's own tool results ride the message list.
+                hist = cfg.history_messages
+                prior_delegations = delegation_history(session, hist) if hist > 0 else []
+                prior_tools = tool_history(session, hist) if hist > 0 else []
                 tool_events: list[dict] = []
                 reply_text = ""
                 reasoning_text = ""
@@ -520,8 +539,8 @@ class AutonomyService:
                     cancel_compaction(sid)  # do not race this wake for the model
                     async for event in executor.run_stream(
                             prompt, prior, None, memory_context(session),
-                            delegations=delegation_history(session),
-                            tool_results=tool_history(session)):
+                            delegations=prior_delegations,
+                            tool_results=prior_tools):
                         et = event.get("type")
                         if et == "tool_result":
                             tool_events.append(event.get("data", {}))
