@@ -1655,7 +1655,13 @@ class AgentExecutor:
                     tools=openai_tools,
                     temperature=current_temp,
                 ):
-                    delta = chunk.get("choices", [{}])[0].get("delta", {})
+                    # `or [{}]`, not a .get default: some endpoints (NVIDIA
+                    # among them) close the stream with a usage-only chunk
+                    # whose "choices" is PRESENT but empty, and [0] on it
+                    # raised IndexError after the tool call had already
+                    # arrived — the whole turn died as "list index out of
+                    # range". Same guard as _accumulate in llm_provider.
+                    delta = (chunk.get("choices") or [{}])[0].get("delta") or {}
                     events, full_content, added, pending_sep = self._reasoning_events(
                         splitter.feed(delta), full_content, pending_sep)
                     full_reasoning += added
@@ -1949,7 +1955,8 @@ class AgentExecutor:
                     tools=None,
                     temperature=self._synthesis_temp(),
                 ):
-                    delta = chunk.get("choices", [{}])[0].get("delta", {})
+                    # See the main loop above: usage-only chunks have choices=[].
+                    delta = (chunk.get("choices") or [{}])[0].get("delta") or {}
                     events, forced, added, pending_sep = self._reasoning_events(
                         splitter.feed(delta), forced, pending_sep)
                     full_reasoning += added
