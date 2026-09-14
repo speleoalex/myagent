@@ -79,6 +79,7 @@ Extra environment variables, both optional:
 |---|---|---|
 | `MYAGENT_EMBED_CACHE` | `$MYAGENT_CACHE/embed-models` | where the in-process embedder keeps its model files |
 | `MYAGENT_EMBED_LOCAL` | unset | passed to the tools by the server; set by hand only to run `semindex.py` from a terminal. A model name, or `1` for the default |
+| `MYAGENT_EMBED_KEY` | unset | Bearer token sent to `MYAGENT_EMBED_URL`, for an embedding endpoint that requires one |
 
 
 ## Debug trace
@@ -161,6 +162,7 @@ runtime state (read by `install.sh`; default `$MYAGENT_HOME/bin`, or
 | Variable | Default | Meaning |
 |---|---|---|
 | `MYAGENT_OLLAMA_DEFAULT_CTX` | `4096` | assumed context window of an Ollama model when not probed |
+| `MYAGENT_MAX_OUTPUT_CEILING` | `32768` | cap on the `max_tokens` derived from a probed model; an explicit `max_tokens` in the model options bypasses it |
 | `MYAGENT_CHANNEL_ROTATE_BYTES` | `2 MiB` | size at which a channel session is archived and restarted |
 | `MYAGENT_MCP_SHUTDOWN_TIMEOUT` | `10` | seconds shutdown waits for MCP servers to close |
 | `MYAGENT_DEBUG_FILE` | `~/myagent/logs/debug.log` | trace file location |

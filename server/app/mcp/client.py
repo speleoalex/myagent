@@ -44,7 +44,7 @@ STREAM_LIMIT = 8 * 1024 * 1024
 
 # Never handed to an MCP server subprocess: it inherits our environment so that
 # `npx`/`uvx` keep working, but not the credentials protecting this API.
-_STRIPPED_ENV = {"MYAGENT_API_KEY", "MYAGENT_API_TOKEN"}
+_STRIPPED_ENV = {"MYAGENT_API_KEY"}
 
 
 class McpError(Exception):

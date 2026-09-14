@@ -21,7 +21,6 @@ import asyncio
 import logging
 import time
 from datetime import datetime, timezone
-from pathlib import Path
 
 from pydantic import ValidationError
 
@@ -49,10 +48,9 @@ def _err_msg(e: Exception) -> str:
 
 
 class McpManager:
-    def __init__(self, store: JsonStore, cache_store: JsonStore, workspace: Path):
+    def __init__(self, store: JsonStore, cache_store: JsonStore):
         self._store = store
         self._cache = cache_store
-        self._workspace = workspace
 
         self._servers: dict[str, McpServer] = {}
         self._invalid: dict[str, str] = {}  # sid -> why the stored config is unusable
@@ -606,7 +604,6 @@ class McpManager:
             return result.flatten(
                 raw,
                 max_output=int(info.get("max_output") or cfg.max_output or 10000),
-                workspace=self._workspace,
                 label=remote or "mcp",
             )
         except Exception as e:

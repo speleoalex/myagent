@@ -129,10 +129,6 @@ def session_id_for(agent_id: str) -> str:
     return f"{AUTONOMOUS_PREFIX}{agent_id}"
 
 
-def is_autonomous_session(session_id: str) -> bool:
-    return (session_id or "").startswith(AUTONOMOUS_PREFIX)
-
-
 def _short(text: str, limit: int = 200) -> str:
     text = " ".join((text or "").split())
     return text if len(text) <= limit else text[:limit].rstrip() + "…"
@@ -301,9 +297,6 @@ class AutonomyService:
         path = self._state_path(agent_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         write_json(path, st)
-
-    def _agent_mtime(self, agent_id: str) -> float:
-        return self.stores.agents.mtime(agent_id)
 
     # ------------------------------------------------------------- main loop
     async def _loop(self) -> None:

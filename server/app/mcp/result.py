@@ -17,14 +17,12 @@ reference indefinitely while ``_attachments`` is pruned at 24h.
 from __future__ import annotations
 
 import base64
-import hashlib
 import json
 import logging
 import mimetypes
 import os
-import re
-from pathlib import Path
 
+from app.storage.attachments import store_resource
 from app.tools import resources as resource_channel
 
 log = logging.getLogger(__name__)
@@ -48,7 +46,7 @@ _EXT_BY_MIME = {
 }
 
 
-def flatten(result: object, *, max_output: int, workspace: Path, label: str) -> str:
+def flatten(result: object, *, max_output: int, label: str) -> str:
     """Flatten a tools/call result dict into a model-facing string."""
     if not isinstance(result, dict):
         return "ERROR: MCP server returned a malformed result"
@@ -60,7 +58,7 @@ def flatten(result: object, *, max_output: int, workspace: Path, label: str) -> 
         for block in blocks[:MAX_BLOCKS]:
             if not isinstance(block, dict):
                 continue
-            _render_block(block, body, notes, workspace=workspace, label=label)
+            _render_block(block, body, notes, label=label)
         if len(blocks) > MAX_BLOCKS:
             notes.append(f"[{len(blocks) - MAX_BLOCKS} more content blocks omitted]")
 
@@ -100,7 +98,7 @@ def flatten(result: object, *, max_output: int, workspace: Path, label: str) -> 
 # ----------------------------------------------------------------------
 
 def _render_block(block: dict, body: list[str], notes: list[str], *,
-                  workspace: Path, label: str) -> None:
+                  label: str) -> None:
     btype = block.get("type")
 
     if btype == "text":
@@ -111,7 +109,7 @@ def _render_block(block: dict, body: list[str], notes: list[str], *,
 
     if btype in ("image", "audio"):
         mime = block.get("mimeType") or ("image/png" if btype == "image" else "audio/mpeg")
-        notes.append(_store(block.get("data"), mime, btype, workspace, label))
+        notes.append(_store(block.get("data"), mime, btype, label))
         return
 
     if btype == "resource":
@@ -127,7 +125,7 @@ def _render_block(block: dict, body: list[str], notes: list[str], *,
         if blob:
             mime = resource.get("mimeType") or "application/octet-stream"
             stem = _stem_from_uri(uri) or label
-            notes.append(_store(blob, mime, "resource", workspace, stem, uri=uri))
+            notes.append(_store(blob, mime, "resource", stem, uri=uri))
         return
 
     if btype == "resource_link":
@@ -141,8 +139,7 @@ def _render_block(block: dict, body: list[str], notes: list[str], *,
     notes.append(f"[unsupported content type: {btype}]")
 
 
-def _store(data: object, mime: object, kind: str, workspace: Path, label: str,
-           uri: str = "") -> str:
+def _store(data: object, mime: object, kind: str, label: str, uri: str = "") -> str:
     """Write base64 *data* under the workspace; return the note for the model."""
     # A server can put anything in mimeType; an unhashable value would blow up
     # the lookup below and take the whole chat turn with it.
@@ -156,23 +153,17 @@ def _store(data: object, mime: object, kind: str, workspace: Path, label: str,
         return f"[{kind} ({mime}) omitted: undecodable data: {e}]"
 
     size = _human_size(len(raw))
-    try:
-        target_dir = workspace / "_resources"
-        target_dir.mkdir(parents=True, exist_ok=True)
-        stem, ext = os.path.splitext(label or kind)
-        if not ext:
-            ext = _EXT_BY_MIME.get(mime) or mimetypes.guess_extension(mime) or ".bin"
-        safe = re.sub(r"[^A-Za-z0-9_.-]", "_", stem)[:40] or kind
-        fname = f"{safe}-{hashlib.md5(raw).hexdigest()[:8]}{ext}"
-        dest = target_dir / fname
-        if not dest.exists():
-            dest.write_bytes(raw)
-    except OSError as e:
-        log.warning("cannot store MCP %s content: %s", kind, e)
-        return f"[{kind} ({mime}, {size}) could not be saved: {e}]"
+    stem, ext = os.path.splitext(label or kind)
+    if not ext:
+        ext = _EXT_BY_MIME.get(mime) or mimetypes.guess_extension(mime) or ".bin"
+    # Same writer as user attachments: sanitized name, content-addressed, and
+    # a bad label from the server degrades to a note instead of raising.
+    rel = store_resource(raw, stem + ext, kind)
+    if not rel:
+        return f"[{kind} ({mime}, {size}) could not be saved]"
 
     title = f"{kind} from {uri}" if uri else (label or kind)
-    return resource_channel.marker(f"_resources/{fname}", mime, title)
+    return resource_channel.marker(rel, mime, title)
 
 
 def _stem_from_uri(uri: object) -> str:

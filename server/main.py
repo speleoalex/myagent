@@ -210,7 +210,7 @@ tool_registry.register_internal("memory_note", memory_note_handler)
 # that actually reference their tools (see ToolRegistry.ensure_mcp). The
 # manager OWNS its config store (save_config/delete_config reload the cache),
 # so the store is not exposed on app.state — the router goes through the manager.
-mcp_manager = McpManager(JsonStore(MCP_DIR), JsonStore(MCP_CACHE_DIR), WORKSPACE_DIR)
+mcp_manager = McpManager(JsonStore(MCP_DIR), JsonStore(MCP_CACHE_DIR))
 tool_registry.mcp_manager = mcp_manager
 if mcp_manager.server_ids():
     log.info("MCP servers configured: %s", ", ".join(sorted(mcp_manager.server_ids())))

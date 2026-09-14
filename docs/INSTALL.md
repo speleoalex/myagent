@@ -100,7 +100,8 @@ across logouts and reboots: `loginctl enable-linger $USER` (may need sudo —
 myagent`, `journalctl --user -u myagent -f`.
 
 **Service account (sudo, default).** `install.sh` creates a system account
-`myagent` (no login shell) and runs the service as it. This is the OS-level
+`myagent` (no login shell) and runs the service as it; `--service-user [NAME]`
+picks this mode without the prompt (and, with `NAME`, another account). This is the OS-level
 boundary for a shared machine: the agents' shell and file tools cannot reach
 any real user's files. The admin who ran the install is added to group
 `myagent`, and the state tree is group-writable (with `UMask=0002` in the
