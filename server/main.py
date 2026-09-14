@@ -324,8 +324,32 @@ if app.state.plugins:
 # manifest served as text/plain.
 mimetypes.add_type("application/manifest+json", ".webmanifest")
 STATIC_DIR = PROJECT_ROOT / "ui"
+
+
+class _ShellStaticFiles(StaticFiles):
+    """StaticFiles that tells the browser how long the PWA entry points live.
+
+    Without Cache-Control the browser applies heuristic freshness (a share of
+    the time since Last-Modified, which rsync preserves from the checkout), so
+    after an update a client could keep loading the OLD index.html — and with
+    it the old ?v= stamps — for days, defeating sw.js's network-first design.
+    Everything else in ui/ is versioned by its ?v= and needs no header."""
+    _CACHE_CONTROL = {
+        "sw.js": "no-store",
+        "index.html": "no-cache",
+        "manifest.webmanifest": "no-cache",
+    }
+
+    def file_response(self, full_path, stat_result, scope, status_code=200):
+        response = super().file_response(full_path, stat_result, scope, status_code)
+        policy = self._CACHE_CONTROL.get(os.path.basename(full_path))
+        if policy:
+            response.headers["Cache-Control"] = policy
+        return response
+
+
 if STATIC_DIR.is_dir():
-    app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
+    app.mount("/", _ShellStaticFiles(directory=STATIC_DIR, html=True), name="static")
 else:
     # Deliberately NOT mkdir'd. An empty directory mounts happily and then
     # answers 404 for every page, which reads as "the UI is broken" when what

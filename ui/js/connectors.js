@@ -191,33 +191,79 @@ const ConnectorsPage = {
             ...(b.allowed_usernames || []).map(u => '@' + u),
         ].join(', ');
 
+        // One card per installed channel instead of a <select>: the type is the
+        // FIRST decision and everything below follows it, so it deserves more
+        // than a dropdown row. The hidden #f-type keeps the value for the code
+        // that reads the form (_channelType, _readForm).
+        const typeCards = this._types.map(t => `
+            <button type="button" class="btn type-card ${t.type === b.type ? 'active' : ''}"
+                    data-type="${App.escAttr(t.type)}" aria-pressed="${t.type === b.type}">
+                <i class="bi ${App.escAttr(t.icon || 'bi-plug')}"></i>
+                <span>${App.esc(t.label || t.type)}</span>
+            </button>`).join('');
+
+        // The form reads as numbered steps (CSS counters on .setup-step, so a
+        // step hidden for a device channel does not leave a gap): channel →
+        // credentials → agent → who can write → messages. That is the order in
+        // which someone actually sets a bot up, and the channel's own guide
+        // sits under the type cards, right where the person has just chosen it.
         App.container.innerHTML = `
         <div class="row"><div class="col-lg-8 mx-auto">
             <h3 class="mb-3">${isEdit ? i18n('connectors.editTitle') : i18n('connectors.newTitle')}</h3>
-            <form id="binding-form" novalidate>
-                <div class="row g-3 mb-3">
-                    <div class="col-12 col-md-6">
-                        <label class="form-label" for="f-name">${i18n('common.name')}</label>
-                        <input type="text" class="form-control" id="f-name" value="${App.escAttr(b.name)}">
-                    </div>
-                    <div class="col-12 col-md-6">
-                        <label class="form-label" for="f-id">${i18n('common.id')}</label>
-                        <input type="text" class="form-control" id="f-id" value="${App.escAttr(b.id)}"
-                               ${isEdit ? 'readonly' : ''} required pattern="[A-Za-z0-9][A-Za-z0-9._\\-]*">
-                        <div class="form-text">${i18n('connectors.idHint')}</div>
-                    </div>
-                </div>
+            <form id="binding-form" class="setup-steps" novalidate>
 
-                <div class="row g-3 mb-3">
-                    <div class="col-12 col-md-6">
-                        <label class="form-label" for="f-type">${i18n('connectors.type')}</label>
-                        <select class="form-select" id="f-type">
-                            ${this._types.map(t =>
-                                `<option value="${App.escAttr(t.type)}" ${t.type === b.type ? 'selected' : ''}>${App.esc(t.label || t.type)}</option>`
-                            ).join('')}
-                        </select>
+                <section class="setup-step" id="step-channel">
+                    <h5 class="setup-step-title">${i18n('connectors.stepChannel')}</h5>
+                    <input type="hidden" id="f-type" value="${App.escAttr(b.type)}">
+                    <div class="type-cards" role="group" aria-label="${App.escAttr(i18n('connectors.type'))}">${typeCards}</div>
+                    <div id="block-guide"></div>
+                </section>
+
+                <section class="setup-step" id="step-credentials">
+                    <h5 class="setup-step-title">${i18n('connectors.stepCredentials')}</h5>
+
+                    <!-- The secret. A password field (browsers' own password managers
+                         are kept out with autocomplete=new-password: one of them
+                         silently overwriting the token is not a bug we can see), with
+                         an eye to reveal it. _renderSettings moves this block INTO the
+                         first section, right after its first field, when the channel
+                         declares sections: the mailbox password beside the mailbox
+                         login (see _placeToken). -->
+                    <div class="mb-3" id="block-token">
+                        <label class="form-label" for="f-token" id="token-label"
+                               >${i18n(this._label('token', 'connectors.token', b.type))}</label>
+                        <div class="input-group">
+                            <input type="password" class="form-control font-monospace" id="f-token"
+                                   autocomplete="new-password" spellcheck="false" value="${App.escAttr(b.token)}">
+                            <button type="button" class="btn btn-outline-secondary" id="btn-token-eye"
+                                    title="${i18n('connectors.tokenShow')}" aria-label="${i18n('connectors.tokenShow')}">
+                                <i class="bi bi-eye"></i>
+                            </button>
+                            <button type="button" class="btn btn-outline-info" id="btn-test">
+                                <i class="bi bi-plug"></i> ${i18n('connectors.test')}
+                            </button>
+                        </div>
+                        <div class="form-text" id="token-hint">${i18n(this._hint('token', 'connectors.tokenHint', b.type))}</div>
+                        <div id="test-result" class="mt-2"></div>
                     </div>
-                    <div class="col-12 col-md-6">
+
+                    <!-- Per-channel settings: fieldsets driven by the manifest
+                         (sections / settings), rendered by _renderSettings(). -->
+                    <div class="mb-3 d-none" id="block-settings"></div>
+
+                    <div class="mb-3 ${this._channel(b.type).url ? '' : 'd-none'}" id="block-url">
+                        <label class="form-label" for="f-url">${i18n('connectors.url')}</label>
+                        <input type="text" class="form-control" id="f-url" value="${App.escAttr(b.url || '')}"
+                               placeholder="${App.escAttr(this._channel(b.type).url?.example || '')}">
+                        <div class="form-text" id="url-hint">${i18n(this._hint('url', 'connectors.urlHint', b.type))}</div>
+                    </div>
+
+                    <div class="mb-3 d-none" id="block-device"></div>
+                </section>
+
+                <section class="setup-step" id="step-agent">
+                    <h5 class="setup-step-title">${i18n('connectors.stepAgent')}</h5>
+                    <div class="mb-3">
                         <label class="form-label" for="f-agent">${i18n('connectors.agent')}</label>
                         <select class="form-select" id="f-agent">
                             <option value="">${i18n('connectors.agentNone')}</option>
@@ -229,102 +275,90 @@ const ConnectorsPage = {
                                 ? `<option value="${App.escAttr(b.agent_id)}" selected>${App.esc(b.agent_id)} — ${i18n('agents.bindingMissing')}</option>`
                                 : ''}
                         </select>
+                        <div class="form-text">${i18n('connectors.agentHint')}</div>
                     </div>
-                </div>
-
-                <!-- The secret. A password field (browsers' own password managers
-                     are kept out with autocomplete=new-password: one of them
-                     silently overwriting the token is not a bug we can see), with
-                     an eye to reveal it. _renderSettings moves this block INTO the
-                     first section, right after its first field, when the channel
-                     declares sections: the mailbox password beside the mailbox
-                     login (see _placeToken). -->
-                <div class="mb-3" id="block-token">
-                    <label class="form-label" for="f-token" id="token-label"
-                           >${i18n(this._label('token', 'connectors.token', b.type))}</label>
-                    <div class="input-group">
-                        <input type="password" class="form-control font-monospace" id="f-token"
-                               autocomplete="new-password" spellcheck="false" value="${App.escAttr(b.token)}">
-                        <button type="button" class="btn btn-outline-secondary" id="btn-token-eye"
-                                title="${i18n('connectors.tokenShow')}" aria-label="${i18n('connectors.tokenShow')}">
-                            <i class="bi bi-eye"></i>
-                        </button>
-                        <button type="button" class="btn btn-outline-info" id="btn-test">
-                            <i class="bi bi-plug"></i> ${i18n('connectors.test')}
-                        </button>
+                    <div class="row g-3 mb-3">
+                        <div class="col-12 col-md-6">
+                            <label class="form-label" for="f-name">${i18n('common.name')}</label>
+                            <input type="text" class="form-control" id="f-name" value="${App.escAttr(b.name)}"
+                                   placeholder="${App.escAttr(i18n('connectors.namePlaceholder'))}">
+                            <div class="form-text">${i18n('connectors.nameHint')}</div>
+                        </div>
+                        <div class="col-12 col-md-6">
+                            <label class="form-label" for="f-id">${i18n('common.id')}</label>
+                            <input type="text" class="form-control" id="f-id" value="${App.escAttr(b.id)}"
+                                   ${isEdit ? 'readonly' : ''} required pattern="[A-Za-z0-9][A-Za-z0-9._\\-]*">
+                            <div class="form-text">${i18n('connectors.idHint')}</div>
+                        </div>
                     </div>
-                    <div class="form-text" id="token-hint">${i18n(this._hint('token', 'connectors.tokenHint', b.type))}</div>
-                    <div id="test-result" class="mt-2"></div>
-                </div>
+                </section>
 
-                <!-- Per-channel settings: fieldsets driven by the manifest
-                     (sections / settings), rendered by _renderSettings(). -->
-                <div class="mb-3 d-none" id="block-settings"></div>
-
-                <div class="mb-3 ${this._channel(b.type).url ? '' : 'd-none'}" id="block-url">
-                    <label class="form-label" for="f-url">${i18n('connectors.url')}</label>
-                    <input type="text" class="form-control" id="f-url" value="${App.escAttr(b.url || '')}"
-                           placeholder="${App.escAttr(this._channel(b.type).url?.example || '')}">
-                    <div class="form-text" id="url-hint">${i18n(this._hint('url', 'connectors.urlHint', b.type))}</div>
-                </div>
-
-                <div class="mb-4 d-none" id="block-device"></div>
-
-                <div class="row g-3 mb-3">
-                    <div class="col-12 col-md-6" id="block-access">
+                <section class="setup-step" id="step-access">
+                    <h5 class="setup-step-title">${i18n('connectors.stepAccess')}</h5>
+                    <div class="mb-3" id="block-access">
                         <label class="form-label" for="f-access">${i18n('connectors.access')}</label>
                         <select class="form-select" id="f-access">
                             <option value="allowlist" ${b.access_mode === 'allowlist' ? 'selected' : ''}>${i18n('connectors.accessAllowlist')}</option>
                             <option value="password" ${b.access_mode === 'password' ? 'selected' : ''}>${i18n('connectors.accessPassword')}</option>
                             <option value="open" ${b.access_mode === 'open' ? 'selected' : ''}>${i18n('connectors.accessOpen')}</option>
                         </select>
+                        <div class="form-text" id="access-hint"></div>
                     </div>
-                    <div class="col-12 col-md-6">
+
+                    <div class="mb-3" id="block-allowed">
+                        <label class="form-label" for="f-allowed">${i18n('connectors.allowed')}</label>
+                        <input type="text" class="form-control" id="f-allowed" value="${App.escAttr(allowed)}">
+                        <div class="form-text" id="allowed-hint">${i18n(this._hint('allowed', 'connectors.allowedHint', b.type))}</div>
+                        <div id="allowed-chips" class="d-flex flex-wrap gap-2 mt-2"></div>
+                    </div>
+
+                    <div class="mb-3" id="block-password">
+                        <label class="form-label" for="f-password">${i18n('connectors.password')}</label>
+                        <input type="text" class="form-control" id="f-password" value="${App.escAttr(b.password)}">
+                        <div class="form-text">${i18n('connectors.passwordHint')}</div>
+                    </div>
+                </section>
+
+                <section class="setup-step" id="step-messages">
+                    <h5 class="setup-step-title">${i18n('connectors.stepMessages')}</h5>
+                    <div class="mb-3" id="block-welcome">
+                        <label class="form-label" for="f-welcome">${i18n('connectors.welcome')}</label>
+                        <textarea class="form-control" id="f-welcome" rows="2">${App.esc(b.welcome)}</textarea>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label" for="f-help">${i18n('connectors.help')}</label>
+                        <textarea class="form-control" id="f-help" rows="2">${App.esc(b.help_text)}</textarea>
+                    </div>
+
+                    <div class="mb-3" id="block-disclosure">
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" id="f-disclose"
+                                   ${b.disclose_ai ? 'checked' : ''}>
+                            <label class="form-check-label" for="f-disclose">
+                                ${i18n('connectors.discloseAi')}
+                            </label>
+                        </div>
+                        <div class="form-text mb-2">${i18n('connectors.discloseAiHint')}</div>
+                        <textarea class="form-control" id="f-ai-disclosure" rows="2"
+                                  placeholder="${App.escAttr(i18n('connectors.aiDisclosurePlaceholder'))}"
+                                  >${App.esc(b.ai_disclosure)}</textarea>
+                        <div class="form-text">${i18n('connectors.aiDisclosureHint')}</div>
+                    </div>
+                </section>
+
+                <!-- Rarely touched: folded so the five steps above stay the whole
+                     story for a first setup. -->
+                <details class="setup-advanced mb-4" id="block-advanced" ${b.session_prefix ? 'open' : ''}>
+                    <summary>${i18n('connectors.advanced')}</summary>
+                    <div class="mt-3">
                         <label class="form-label" for="f-prefix">${i18n('connectors.prefix')}</label>
                         <input type="text" class="form-control" id="f-prefix" value="${App.escAttr(b.session_prefix)}">
                         <div class="form-text">${i18n('connectors.prefixHint')}</div>
                     </div>
-                </div>
+                </details>
 
-                <div class="mb-3" id="block-allowed">
-                    <label class="form-label" for="f-allowed">${i18n('connectors.allowed')}</label>
-                    <input type="text" class="form-control" id="f-allowed" value="${App.escAttr(allowed)}">
-                    <div class="form-text" id="allowed-hint">${i18n(this._hint('allowed', 'connectors.allowedHint', b.type))}</div>
-                    <div id="allowed-chips" class="d-flex flex-wrap gap-2 mt-2"></div>
-                </div>
-
-                <div class="mb-3" id="block-password">
-                    <label class="form-label" for="f-password">${i18n('connectors.password')}</label>
-                    <input type="text" class="form-control" id="f-password" value="${App.escAttr(b.password)}">
-                    <div class="form-text">${i18n('connectors.passwordHint')}</div>
-                </div>
-
-                <div class="mb-3" id="block-welcome">
-                    <label class="form-label" for="f-welcome">${i18n('connectors.welcome')}</label>
-                    <textarea class="form-control" id="f-welcome" rows="2">${App.esc(b.welcome)}</textarea>
-                </div>
-                <div class="mb-3">
-                    <label class="form-label" for="f-help">${i18n('connectors.help')}</label>
-                    <textarea class="form-control" id="f-help" rows="2">${App.esc(b.help_text)}</textarea>
-                </div>
-
-                <div class="mb-3" id="block-disclosure">
-                    <div class="form-check">
-                        <input class="form-check-input" type="checkbox" id="f-disclose"
-                               ${b.disclose_ai ? 'checked' : ''}>
-                        <label class="form-check-label" for="f-disclose">
-                            ${i18n('connectors.discloseAi')}
-                        </label>
-                    </div>
-                    <div class="form-text mb-2">${i18n('connectors.discloseAiHint')}</div>
-                    <textarea class="form-control" id="f-ai-disclosure" rows="2"
-                              placeholder="${App.escAttr(i18n('connectors.aiDisclosurePlaceholder'))}"
-                              >${App.esc(b.ai_disclosure)}</textarea>
-                    <div class="form-text">${i18n('connectors.aiDisclosureHint')}</div>
-                </div>
-
-                <div class="form-check mb-4">
-                    <input class="form-check-input" type="checkbox" id="f-enabled" ${b.enabled ? 'checked' : ''}>
+                <div class="form-check form-switch mb-4">
+                    <input class="form-check-input" type="checkbox" role="switch" id="f-enabled" ${b.enabled ? 'checked' : ''}>
                     <label class="form-check-label" for="f-enabled">${i18n('connectors.enabled')}</label>
                 </div>
 
@@ -348,15 +382,22 @@ const ConnectorsPage = {
             inp.type = show ? 'text' : 'password';
             e.currentTarget.querySelector('i').className = show ? 'bi bi-eye-slash' : 'bi bi-eye';
         };
+        this._renderGuide(!isEdit);
         this._renderSettings(b.settings || {}, !isEdit);
         this._syncTestButton();
         this._syncAccess();
         this._renderChips();
         document.getElementById('f-access').onchange = () => this._syncAccess();
-        document.getElementById('f-type').onchange = () => {
-            // Labels, hints and address-book chips are per channel: they follow
-            // the type. A "bot token" and a device's shared key are not the same
-            // credential, and calling both "bot token" mislabels the satellite.
+        // Labels, hints, guide and address-book chips are per channel: they
+        // follow the type. A "bot token" and a device's shared key are not the
+        // same credential, and calling both "bot token" mislabels the satellite.
+        const selectType = (type) => {
+            document.getElementById('f-type').value = type;
+            document.querySelectorAll('.type-card').forEach(card => {
+                const on = card.dataset.type === type;
+                card.classList.toggle('active', on);
+                card.setAttribute('aria-pressed', String(on));
+            });
             const tokLabel = document.getElementById('token-label');
             if (tokLabel) tokLabel.textContent = i18n(this._label('token', 'connectors.token'));
             const tok = document.getElementById('token-hint');
@@ -370,14 +411,20 @@ const ConnectorsPage = {
             document.getElementById('f-url').placeholder = urlSpec?.example || '';
             const uh = document.getElementById('url-hint');
             if (uh) uh.textContent = i18n(this._hint('url', 'connectors.urlHint'));
+            // A test result belongs to the credential it checked: clear it.
+            document.getElementById('test-result').innerHTML = '';
             // Channel settings are per manifest too: a stored binding's values
             // only make sense for its own type, so switching type starts fresh.
+            this._renderGuide(!isEdit);
             this._renderSettings(b.type === this._channelType() ? (b.settings || {}) : {}, true);
             this._syncTestButton();
             this._syncAccess();
             this._renderChips();
             this._loadDevice(isEdit ? b.id : '');
         };
+        document.querySelectorAll('.type-card').forEach(card => {
+            card.onclick = () => selectType(card.dataset.type);
+        });
         document.getElementById('f-allowed').oninput = () => this._renderChips();
         document.getElementById('btn-test').onclick = (e) =>
             this._runTest(e.currentTarget, document.getElementById('test-result'), '');
@@ -385,6 +432,28 @@ const ConnectorsPage = {
         const del = document.getElementById('btn-delete');
         if (del) del.onclick = () => this._delete(bindingId);
         this._loadDevice(isEdit ? b.id : '');
+    },
+
+    /** The channel's step-by-step setup, from its manifest (`guide`: title,
+     * steps, links — all i18n keys but the URLs). Open while creating, folded
+     * while editing: the person has done it already. Each `{Name}` in a step
+     * becomes a link to `links[Name]`, so the translations carry no URLs and
+     * the form still names no channel. Nothing is rendered for a channel
+     * without a guide. */
+    _renderGuide(open) {
+        const box = document.getElementById('block-guide');
+        if (!box) return;
+        const g = this._channel().guide;
+        const steps = g?.steps || [];
+        if (!steps.length) { box.innerHTML = ''; return; }
+        const links = {};
+        for (const [name, url] of Object.entries(g.links || {})) {
+            links[name] = `<a href="${App.escAttr(url)}" target="_blank" rel="noopener">${App.esc(name)}</a>`;
+        }
+        box.innerHTML = `<details class="setup-guide mt-3" ${open ? 'open' : ''}>
+            <summary><i class="bi bi-info-circle"></i> ${i18n(g.title || 'connectors.guideTitle')}</summary>
+            <ol class="mb-0 mt-2">${steps.map(k => `<li>${i18n(k, links)}</li>`).join('')}</ol>
+        </details>`;
     },
 
     // ------------------------------------------------------------- device box
@@ -765,20 +834,23 @@ const ConnectorsPage = {
 
     _syncAccess() {
         // A device channel (satellite) authenticates with the binding token and
-        // never runs the user-facing pipeline: access modes and the welcome
-        // message would be dead controls there, so they are hidden — a user who
-        // sets "password" on a device would believe it protects something.
+        // never runs the user-facing pipeline: access modes, the welcome
+        // message and the AI disclosure would be dead controls there (a device
+        // connector answers through its own ask() path and never runs
+        // process_message — and the owner installed the speaker, which is the
+        // Act's "obvious from the context" case). Both steps are hidden whole,
+        // and the CSS counter renumbers the rest. A user who could set
+        // "password" on a device would believe it protects something.
         const device = !!this._channel().device;
         const mode = document.getElementById('f-access').value;
-        document.getElementById('block-access').classList.toggle('d-none', device);
-        document.getElementById('block-welcome').classList.toggle('d-none', device);
-        // Same reason as the welcome message: a device connector answers through
-        // its own ask() path and never runs process_message, so the disclosure
-        // would never fire. It is also the case where the Act's "obvious from
-        // the context" exception applies — the owner installed the speaker.
-        document.getElementById('block-disclosure').classList.toggle('d-none', device);
-        document.getElementById('block-allowed').classList.toggle('d-none', device || mode !== 'allowlist');
-        document.getElementById('block-password').classList.toggle('d-none', device || mode !== 'password');
+        document.getElementById('step-access').classList.toggle('d-none', device);
+        document.getElementById('step-messages').classList.toggle('d-none', device);
+        document.getElementById('block-allowed').classList.toggle('d-none', mode !== 'allowlist');
+        document.getElementById('block-password').classList.toggle('d-none', mode !== 'password');
+        const hint = document.getElementById('access-hint');
+        if (hint) hint.textContent = i18n({ allowlist: 'connectors.accessAllowlistHint',
+                                            password: 'connectors.accessPasswordHint',
+                                            open: 'connectors.accessOpenHint' }[mode] || 'connectors.accessAllowlistHint');
     },
 
     // Address-book chips over the free-text field. The text field stays the
@@ -919,6 +991,14 @@ const ConnectorsPage = {
                                   url: document.getElementById('f-url').value.trim(),
                                   settings: this._readSettings(), check: check || '' });
             out.innerHTML = `<div class="alert alert-success mb-0">${this._testResultHtml(res)}</div>`;
+            // What the far end calls itself is a fine default for the channel's
+            // own name — only while creating, only into an empty field, and
+            // through the input event so the id follows (App.autoId).
+            const nameEl = document.getElementById('f-name');
+            if (!isEdit && res.name && nameEl && !nameEl.value.trim()) {
+                nameEl.value = res.name;
+                nameEl.dispatchEvent(new Event('input'));
+            }
         } catch (err) {
             fail(App.esc(err.message));
         } finally {

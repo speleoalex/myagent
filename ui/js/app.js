@@ -386,20 +386,16 @@ const App = {
     async renderHome() {
         // Each call caught on its own: the dashboard degrades panel by panel
         // (an older server without /tasks must not blank the whole page).
-        const [agents, models, tools, tasks, sessions, ready] = await Promise.all([
+        const [agents, models, tools, tasks, ready] = await Promise.all([
             this.api('GET', '/agents').catch(() => []),
             this.api('GET', '/models').catch(() => []),
             this.api('GET', '/tools').catch(() => []),
             this.api('GET', '/tasks').catch(() => []),
-            this.api('GET', '/sessions').catch(() => []),
             // Whether a message would actually get an answer. The counters
             // are non-zero even on a completely broken install (everything
             // is seeded), so they cannot carry this signal themselves.
             this.api('GET', '/system/ready').catch(() => null),
         ]);
-
-        const agentById = {};
-        agents.forEach(a => { agentById[a.id] = a; });
 
         // "N live" under the agents counter, next due run under the tasks one:
         // the two bits of runtime state worth surfacing on the landing page.
@@ -407,38 +403,6 @@ const App = {
         const nextRun = tasks.filter(t => t.enabled !== false && t.next_at)
             .map(t => t.next_at).sort()[0];
         const activeTasks = tasks.filter(t => t.enabled !== false).length;
-
-        // Direct chat entrypoints: the same agents the chat picker offers.
-        const quickAgents = agents.filter(a => a.enabled !== false).slice(0, 6);
-        const recent = sessions.slice(0, 5);
-        const srcIcon = (s) => s.source === 'telegram' ? 'bi-telegram'
-            : s.source === 'mail' ? 'bi-envelope'
-            : s.source === 'autonomous' ? 'bi-robot'
-            : s.channel ? 'bi-broadcast-pin' : 'bi-chat-left-text';
-
-        const agentRows = quickAgents.map(a => `
-            <a href="#/chat/${this.escAttr(a.id)}" class="list-group-item list-group-item-action d-flex align-items-center gap-2">
-                <i class="bi bi-cpu text-secondary"></i>
-                <div class="flex-grow-1 overflow-hidden">
-                    <div class="fw-semibold text-truncate">${this.esc(a.name)}
-                        ${a.live ? `<span class="badge text-bg-success ms-1">${this.esc(i18n('agents.liveBadge'))}</span>` : ''}
-                    </div>
-                    ${a.description ? `<div class="small text-secondary text-truncate">${this.esc(a.description)}</div>` : ''}
-                </div>
-                <i class="bi bi-chat-dots text-secondary"></i>
-            </a>`).join('')
-            || `<div class="list-group-item text-secondary small">${this.esc(i18n('home.noAgentsEnabled'))}</div>`;
-
-        const recentRows = recent.map(s => `
-            <a href="#/chat/session/${this.escAttr(s.id)}" class="list-group-item list-group-item-action d-flex align-items-center gap-2">
-                <i class="bi ${srcIcon(s)} text-secondary"></i>
-                <div class="flex-grow-1 overflow-hidden">
-                    <div class="text-truncate">${this.esc(s.title || i18n('chat.untitled'))}</div>
-                    <div class="small text-secondary text-truncate">${this.esc(agentById[s.agent_id]?.name || s.agent_id || '')}</div>
-                </div>
-                <span class="small text-secondary text-nowrap">${this.esc(this.fmtWhen(s.updated_at))}</span>
-            </a>`).join('')
-            || `<div class="list-group-item text-secondary small">${this.esc(i18n('home.noRecent'))}</div>`;
 
         this.container.innerHTML = `
             <div class="home-wrap mx-auto mt-4">
@@ -457,26 +421,6 @@ const App = {
                     ${this.statCard('#/tools', 'bi-tools', tools.length, i18n('home.tools'), '')}
                     ${this.statCard('#/tasks', 'bi-alarm', activeTasks, i18n('nav.tasks'),
                         nextRun ? this.esc(i18n('home.nextRun', { when: this.fmtWhen(nextRun) })) : '')}
-                </div>
-                <div class="row mt-4 g-3">
-                    <div class="col-lg-6">
-                        <div class="card h-100">
-                            <div class="card-header d-flex justify-content-between align-items-center">
-                                <span><i class="bi bi-chat-dots"></i> ${this.esc(i18n('home.quickChat'))}</span>
-                                <a href="#/agents" class="small">${this.esc(i18n('home.allAgents'))}</a>
-                            </div>
-                            <div class="list-group list-group-flush">${agentRows}</div>
-                        </div>
-                    </div>
-                    <div class="col-lg-6">
-                        <div class="card h-100">
-                            <div class="card-header d-flex justify-content-between align-items-center">
-                                <span><i class="bi bi-clock-history"></i> ${this.esc(i18n('home.recentChats'))}</span>
-                                <a href="#/chat" class="small">${this.esc(i18n('nav.chat'))}</a>
-                            </div>
-                            <div class="list-group list-group-flush">${recentRows}</div>
-                        </div>
-                    </div>
                 </div>
             </div>`;
     },

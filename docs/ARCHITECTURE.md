@@ -831,8 +831,14 @@ Three properties of the service worker are load-bearing:
 - **The precache list is derived from `index.html`**, not written out in
   `sw.js`. Duplicating the `?v=N` stamps across two files means one of them
   rots. Each navigation re-derives the list from the HTML it just fetched,
-  caches what is missing and deletes superseded `?v=` copies, so a version bump
-  needs no worker change.
+  caches what is missing and deletes superseded `?v=` copies.
+
+The worker takes over as soon as it installs, so an open page keeps running the
+old scripts under the new worker; `pwa.js` watches for that hand-over and shows
+a toast asking to reload, never reloading by itself (a turn may be streaming).
+The browser only installs a new worker when `sw.js` itself changed, which is
+why every release bumps the `CACHE` constant in it, even when only `?v=` stamps
+moved.
 
 Install and worker both require a **secure context**: `localhost` qualifies,
 a plain-http LAN address does not, and browsers offer neither without saying

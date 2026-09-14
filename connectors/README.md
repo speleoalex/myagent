@@ -237,8 +237,9 @@ names a transport:
 
 ```text
 plugin/myagent_connectors/channels/<type>/
-├── channel.json        # type, label, UI hint keys, shape of a person's handle,
-│                       # optional `settings` + `sections` (the form the channel gets)
+├── channel.json        # type, label, icon, UI hint keys, shape of a person's handle,
+│                       # optional `settings` + `sections` (the form the channel gets),
+│                       # optional `guide` (the setup steps shown in that form)
 ├── channel.py          # a BaseConnector subclass: receive, send, verify
 └── requirements.txt     # optional, installed by install.sh
 ```
@@ -254,6 +255,12 @@ names a transport:
 - `labels` / `hints` rename the token field and its help (a "shared key", an
   "App Password"); `handle` says what a person's identifier looks like, and gives
   the address book one field per installed channel.
+- `icon` is the Bootstrap-icon class on the channel's card in the form
+  (`bi-telegram`); `guide` is the step-by-step setup shown under that card while
+  a binding is being created — `{"title": key, "steps": [keys], "links":
+  {"@BotFather": "https://t.me/BotFather"}}`, where a `{@BotFather}` in a step's
+  text becomes a link. Titles and steps are i18n keys, so the URLs live in the
+  manifest and the translations stay text.
 - `settings` lists the non-secret fields — `{key, type: text|number|select|checkbox,
   label, hint, default, placeholder, options}`, labels being i18n keys added to
   **both** `ui/js/i18n/en.js` and `it.js`. `required: true` is checked in the browser before

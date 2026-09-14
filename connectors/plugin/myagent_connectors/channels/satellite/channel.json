@@ -1,6 +1,7 @@
 {
   "type": "satellite",
   "label": "Satellite",
+  "icon": "bi-mic",
   "module": "channel.py",
   "class": "SatelliteConnector",
   "labels": {

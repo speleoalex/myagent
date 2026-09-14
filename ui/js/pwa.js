@@ -50,6 +50,14 @@ const PWA = {
             this._changed();
         });
         if (!this.supported) return;
+        // sw.js takes over immediately (skipWaiting + claim), so a deploy
+        // leaves this page running the OLD scripts under the NEW worker until
+        // it is reloaded. Say so instead of reloading: a turn may be streaming.
+        // No controller at startup means first install, not an update.
+        const wasControlled = !!navigator.serviceWorker.controller;
+        navigator.serviceWorker.addEventListener('controllerchange', () => {
+            if (wasControlled) App.toast(i18n('pwa.updated'), 'info');
+        });
         // After load: the worker's install step refetches index.html and its
         // assets, which must not compete with the page's own first paint.
         window.addEventListener('load', () => {

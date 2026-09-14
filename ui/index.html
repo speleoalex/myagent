@@ -28,11 +28,11 @@
          leading slash would only resolve at the root of a vhost. -->
     <link href="vendor/bootstrap/bootstrap.min.css" rel="stylesheet">
     <link href="vendor/bootstrap-icons/bootstrap-icons.min.css" rel="stylesheet">
-    <link href="css/style.css?v=21" rel="stylesheet">
+    <link href="css/style.css?v=22" rel="stylesheet">
     <!-- Theme manager: load early to prevent a flash of the wrong theme -->
     <script src="js/theme.js?v=2"></script>
     <!-- PWA: in <head> because beforeinstallprompt fires once and early -->
-    <script src="js/pwa.js?v=1"></script>
+    <script src="js/pwa.js?v=2"></script>
 </head>
 <body>
     <nav class="navbar navbar-expand-lg bg-dark border-bottom" data-bs-theme="dark">
@@ -45,20 +45,22 @@
             </button>
             <div class="collapse navbar-collapse" id="navMenu">
                 <ul class="navbar-nav me-auto">
+                    <!-- Everyday entries first (chat, agents, tasks), then the
+                         configuration screens (tools, models, channels, settings). -->
+                    <li class="nav-item">
+                        <a class="nav-link" href="#/chat"><i class="bi bi-chat-dots"></i> <span data-i18n="nav.chat">Chat</span></a>
+                    </li>
                     <li class="nav-item">
                         <a class="nav-link" href="#/agents"><i class="bi bi-cpu"></i> <span data-i18n="nav.agents">Agents</span></a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="#/tasks"><i class="bi bi-alarm"></i> <span data-i18n="nav.tasks">Tasks</span></a>
                     </li>
                     <li class="nav-item">
                         <a class="nav-link" href="#/tools"><i class="bi bi-tools"></i> <span data-i18n="nav.tools">Tools</span></a>
                     </li>
                     <li class="nav-item">
                         <a class="nav-link" href="#/models"><i class="bi bi-box"></i> <span data-i18n="nav.models">Models</span></a>
-                    </li>
-                    <li class="nav-item">
-                        <a class="nav-link" href="#/chat"><i class="bi bi-chat-dots"></i> <span data-i18n="nav.chat">Chat</span></a>
-                    </li>
-                    <li class="nav-item">
-                        <a class="nav-link" href="#/tasks"><i class="bi bi-alarm"></i> <span data-i18n="nav.tasks">Tasks</span></a>
                     </li>
                     <!-- Shown only when the connectors plugin is installed:
                          App.pluginsReady() drops the d-none after probing

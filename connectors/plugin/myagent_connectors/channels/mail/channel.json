@@ -1,6 +1,7 @@
 {
   "type": "mail",
   "label": "Email",
+  "icon": "bi-envelope",
   "module": "channel.py",
   "class": "MailConnector",
   "labels": {

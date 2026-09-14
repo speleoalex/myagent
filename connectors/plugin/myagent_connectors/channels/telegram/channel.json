@@ -1,6 +1,21 @@
 {
   "type": "telegram",
   "label": "Telegram",
+  "icon": "bi-telegram",
+  "guide": {
+    "title": "connectors.telegram.guideTitle",
+    "steps": [
+      "connectors.telegram.guide1",
+      "connectors.telegram.guide2",
+      "connectors.telegram.guide3",
+      "connectors.telegram.guide4",
+      "connectors.telegram.guide5"
+    ],
+    "links": {
+      "@BotFather": "https://t.me/BotFather",
+      "@userinfobot": "https://t.me/userinfobot"
+    }
+  },
   "module": "channel.py",
   "class": "TelegramConnector",
   "labels": {

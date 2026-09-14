@@ -20,7 +20,10 @@
  *    degrades to runtime caching, so the parse failing is not fatal.
  */
 
-const CACHE = 'myagent-shell-v1';
+// Bump at every release, even when only ?v= stamps moved: a changed sw.js is
+// what makes the browser install a new worker, and that installation is the
+// only signal the page has to tell the user a new version is in (js/pwa.js).
+const CACHE = 'myagent-shell-v2';
 
 // Referenced from CSS or the manifest rather than the markup, so the parser
 // above cannot see them.

@@ -6,7 +6,7 @@ the module it names:
     channels/<type>/
         channel.json     {"type","label","module","class","hints":{…},"labels":{…},
                           "handle":{…},"url":{…},"device":{…},"settings":[…],
-                          "sections":[…]}
+                          "sections":[…],"icon":"bi-…","guide":{…}}
         channel.py       a BaseConnector subclass
         requirements.txt optional, installed by connectors/install.sh
 
@@ -82,6 +82,16 @@ class Channel:
     # incoming and its outgoing server one at a time, next to their fields.
     # Absent = one untitled group and the single generic Test button.
     sections: list = field(default_factory=list)
+    # Bootstrap-icon class shown on the channel's type card in the form
+    # ("bi-telegram"). Cosmetic: the UI falls back to a generic plug.
+    icon: str = ""
+    # Step-by-step setup instructions rendered ABOVE the credential fields when
+    # a binding is being created: {"title": i18n key, "steps": [i18n keys],
+    # "links": {"BotFather": "https://t.me/BotFather"}}. Each step text may
+    # embed "{BotFather}" and gets it back as a link. Kept in the manifest
+    # because the steps are the transport's business — the shared form knows
+    # nothing about BotFather, and a channel without a guide shows none.
+    guide: dict = field(default_factory=dict)
     connector: type[BaseConnector] | None = None
     error: str = ""
 
@@ -105,6 +115,8 @@ class Channel:
             "device": self.device or None,
             "settings": self.settings or None,
             "sections": self.sections or None,
+            "icon": self.icon,
+            "guide": self.guide or None,
             "loaded": self.loaded,
             "error": self.error,
         }
@@ -136,6 +148,8 @@ def _load_one(directory: Path) -> Channel:
         device=meta.get("device") or {},
         settings=meta.get("settings") or [],
         sections=meta.get("sections") or [],
+        icon=meta.get("icon", ""),
+        guide=meta.get("guide") or {},
     )
     try:
         entry = directory / (meta.get("module") or "channel.py")
