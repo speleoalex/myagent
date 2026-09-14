@@ -861,8 +861,16 @@ const AgentsPage = {
         // nothing is kept as its own selected option instead: the reference is
         // dangling, and silently rewriting it to "default" on the next save would
         // hide that (same reasoning as the preserved orphan tool rows).
+        // Only chat models: the store also holds image generators, and electing
+        // one here would fail on the agent's first message with a 404 from a
+        // /v1/chat/completions that was never there. An agent already pointing
+        // at one therefore falls into the dangling-reference branch below, which
+        // is the honest outcome — it keeps the id visible and flags it.
+        // `|| 'chat'` because a model registered before the field existed has no
+        // kind, and it has always been a chat model.
+        const chatModels = models.filter(m => (m.kind || 'chat') !== 'image');
         const modelMissing = !!agent.model_id && agent.model_id !== 'default'
-            && !models.some(m => m.id === agent.model_id);
+            && !chatModels.some(m => m.id === agent.model_id);
         const modelIsDefault = !agent.model_id || agent.model_id === 'default';
 
         // Delegation is the call_agent grant itself, read straight off the stored
@@ -972,7 +980,7 @@ const AgentsPage = {
                                          either — there is nothing invalid left to pick. -->
                                     <select class="form-select" id="f-model">
                                         <option value="default" ${modelIsDefault ? 'selected' : ''}>${i18n('agents.defaultModel')}</option>
-                                        ${models.map(m => `<option value="${App.escAttr(m.id)}" ${m.id === agent.model_id ? 'selected' : ''}>${App.esc(m.name)} (${App.esc(m.provider)})</option>`).join('')}
+                                        ${chatModels.map(m => `<option value="${App.escAttr(m.id)}" ${m.id === agent.model_id ? 'selected' : ''}>${App.esc(m.name)} (${App.esc(m.provider)})</option>`).join('')}
                                         ${modelMissing ? `<option value="${App.escAttr(agent.model_id)}" selected>${App.esc(agent.model_id)} — ${i18n('agents.modelMissing')}</option>` : ''}
                                     </select>
                                     ${modelMissing ? `<div class="form-text text-warning-emphasis"><i class="bi bi-exclamation-triangle"></i> ${i18n('agents.modelMissingHint')}</div>` : ''}

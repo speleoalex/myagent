@@ -7,6 +7,11 @@ const SettingsPage = {
         try { models = await App.api('GET', '/models'); } catch (e) { /* empty */ }
         // Only a LOCAL model can embed — see the select below for why.
         const localModels = models.filter(m => m.provider === 'ollama' || m.provider === 'llamacpp');
+        // The store holds models of two KINDS and each select wants exactly
+        // one of them. `|| 'chat'` because a config written before the field
+        // existed has no kind, and it has always been a chat model.
+        const chatModels = models.filter(m => (m.kind || 'chat') !== 'image');
+        const imageModels = models.filter(m => m.kind === 'image');
         // Whether the in-process embedder can be offered at all. Asked here
         // rather than in renderIndexStatus because the answer decides whether
         // an <option> exists: offering one that can only answer 400 is the
@@ -61,7 +66,7 @@ const SettingsPage = {
                             <label class="form-label">${i18n('settings.defaultModel')}</label>
                             <select class="form-select" id="f-default-model">
                                 <option value="">${i18n('settings.noDefaultModel')}</option>
-                                ${models.map(m => `<option value="${App.escAttr(m.id)}" ${m.id === settings.default_model_id ? 'selected' : ''}>${App.esc(m.name)} (${App.esc(m.provider)})</option>`).join('')}
+                                ${chatModels.map(m => `<option value="${App.escAttr(m.id)}" ${m.id === settings.default_model_id ? 'selected' : ''}>${App.esc(m.name)} (${App.esc(m.provider)})</option>`).join('')}
                             </select>
                             <small class="text-secondary">${i18n('settings.defaultModelHint')}</small>
                         </div>
@@ -94,6 +99,22 @@ const SettingsPage = {
                                 <code>ollama pull embeddinggemma:300m</code>
                             </div>`}
                             <div id="index-status" class="mt-2"></div>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">${i18n('settings.imageModel')}</label>
+                            <!-- Unlike the embedder above, a REMOTE one is
+                                 allowed: what leaves the machine is a sentence
+                                 the user wrote to be turned into a picture, not
+                                 their documents. So this lists every kind=image
+                                 model, wherever it lives. -->
+                            <select class="form-select" id="f-image-model">
+                                <option value="">${i18n('settings.noImageModel')}</option>
+                                ${imageModels.map(m => `<option value="${App.escAttr(m.id)}" ${m.id === settings.image_model_id ? 'selected' : ''}>${App.esc(m.name)} (${App.esc(m.provider)})</option>`).join('')}
+                            </select>
+                            <small class="text-secondary">${i18n('settings.imageModelHint')}</small>
+                            ${imageModels.length ? '' : `<div class="form-text">
+                                <i class="bi bi-info-circle"></i> ${i18n('settings.noImageModelHint')}
+                            </div>`}
                         </div>
                         <div class="mb-3">
                             <label class="form-label">${i18n('settings.ollamaUrl')}</label>
@@ -186,6 +207,7 @@ const SettingsPage = {
                 llamacpp_base_url: document.getElementById('f-llamacpp-url').value.trim(),
                 default_model_id: document.getElementById('f-default-model').value || null,
                 embedding_model_id: document.getElementById('f-embedding-model').value || null,
+                image_model_id: document.getElementById('f-image-model').value || null,
                 debug: document.getElementById('f-debug').checked,
                 // The server takes a fraction; the slider speaks percent because
                 // that is what the label reads.

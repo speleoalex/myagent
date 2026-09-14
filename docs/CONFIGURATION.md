@@ -37,6 +37,29 @@ The library is deliberately left out: it is large, and it is re-downloadable
 with [`library/fetch.py`](../library/README.md).
 
 
+## Image generation (optional)
+
+Registering a model of kind **Image** under *Models* and picking it in
+Settings → *Image generation* gives every agent that has the `generate_image`
+tool a way to draw. Two endpoint shapes are understood:
+
+| Provider | Endpoint | Typical backend |
+|---|---|---|
+| `a1111` | `POST /sdapi/v1/txt2img` | stable-diffusion.cpp's `sd-server`, AUTOMATIC1111 |
+| `openai` | `POST /v1/images/generations` | OpenAI Images API, or any server that speaks it |
+
+- **Image models never show up as chat models.** The chat picker, the agent
+  form and the default-model fallback all skip kind *Image*, and the server
+  refuses one wherever a chat model is expected — it cannot answer a
+  conversation.
+- **A remote provider is allowed here**, unlike the embedder below: only the
+  prompt the agent wrote leaves the machine, never your documents.
+- **Defaults live on the model**, in its *Options* (`width`, `height`, `steps`,
+  `cfg_scale`, `sampler`); the tool's own parameters override them per call.
+  Pictures land in `~/myagent/workspace/` and are shown in the chat.
+- **Nothing is picked for you.** Without a choice in Settings the tool fails
+  with a clear message and everything else works as before.
+
 ## Semantic search (optional)
 
 Choosing an *embedding model* in Settings turns on vector search over your own

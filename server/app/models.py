@@ -17,11 +17,41 @@ MCP_ID_MAX_LEN = 24
 _VALID_MCP_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,%d}$" % (MCP_ID_MAX_LEN - 1))
 
 
+# What a registered model is FOR. A model store that only ever held chat models
+# now also holds image generators, and almost every consumer wants exactly one
+# of the two: the agent form and the default-model resolver must never offer an
+# image generator, and the image tool must never be pointed at an LLM. One field
+# answers that, and "chat" is the default so every config written before this
+# existed keeps meaning what it meant.
+CHAT_KIND = "chat"
+IMAGE_KIND = "image"
+MODEL_KINDS = (CHAT_KIND, IMAGE_KIND)
+
+# Providers whose config may carry an api_key. The complement is not "not local"
+# but the LOCAL_PROVIDERS pair (ollama, llamacpp) specifically: an a1111 or
+# openai-compatible IMAGE endpoint usually sits on localhost yet may be behind
+# an auth proxy, so the key is kept for it and simply left empty when there is
+# none. Single definition — routers/llm_models.py enforces it on save.
+KEYED_PROVIDERS = ("openai", "anthropic", "a1111")
+
+
 class ModelConfig(BaseModel):
     id: str
     name: str
-    # "ollama" | "llamacpp" | "openai" (generic OpenAI-compatible API) |
-    # "anthropic" (native Messages API, translated in LLMProvider)
+    # What this model is FOR: CHAT_KIND (an LLM — the only thing that existed
+    # before) or IMAGE_KIND (a text-to-image generator, used by the
+    # generate_image tool and never by the executor).
+    kind: str = CHAT_KIND
+    # kind=chat:  "ollama" | "llamacpp" | "openai" (generic OpenAI-compatible
+    #             API) | "anthropic" (native Messages API, translated in
+    #             LLMProvider)
+    # kind=image: "openai" (POST /v1/images/generations — OpenAI itself and
+    #             every server that copies it, stable-diffusion.cpp's sd-server
+    #             included) | "a1111" (POST /sdapi/v1/txt2img — Automatic1111,
+    #             Forge, SwarmUI, sd-server again). Two wire formats cover the
+    #             whole field, and the transport is plain HTTP either way —
+    #             which is what makes "local or remote" a matter of base_url
+    #             alone, with no second mechanism for a local generator.
     provider: str = "ollama"
     model: str = ""
     base_url: str = "http://localhost:11434"
@@ -56,6 +86,15 @@ class ModelConfig(BaseModel):
     @classmethod
     def validate_id(cls, v: str) -> str:
         return _check_id(v)
+
+    @field_validator("kind")
+    @classmethod
+    def validate_kind(cls, v: str) -> str:
+        # Unknown or empty degrades to "chat" rather than raising: the field is
+        # new, so every config written before it exists arrives here as absent,
+        # and it has always described a chat model.
+        v = (v or "").strip().lower()
+        return v if v in MODEL_KINDS else CHAT_KIND
 
     @field_validator("context_window")
     @classmethod
@@ -475,6 +514,16 @@ class Settings(BaseModel):
     # on an app whose whole point is working offline. "local" needs no such
     # policing: it cannot reach a network.
     embedding_model_id: str | None = None
+    # Which registered model the generate_image tool uses. Mirrors
+    # embedding_model_id — a model chosen for a purpose that is not the chat —
+    # with the opposite policy on where it may live: a REMOTE one is fine here.
+    # The embedder rule exists because indexing ships the CONTENT of the user's
+    # documents off the machine; an image generator receives a sentence the user
+    # deliberately wrote to be turned into a picture, so refusing a remote one
+    # would protect nothing and would rule out the only backend some machines
+    # can run. See app.engine.imagegen, which is a separate module from
+    # app.engine.embedding for exactly this reason.
+    image_model_id: str | None = None
     ollama_base_url: str = "http://localhost:11434"
     llamacpp_base_url: str = "http://localhost:8080"
     # How full the context may get before the executor starts DEMOTING the

@@ -10,7 +10,14 @@ const ModelsPage = {
         try { models = await App.api('GET', '/models'); } catch (e) { /* empty */ }
 
         const providerBadge = (p) =>
-            ({ ollama: 'success', llamacpp: 'primary', openai: 'info', anthropic: 'warning' }[p] || 'secondary');
+            ({ ollama: 'success', llamacpp: 'primary', openai: 'info', anthropic: 'warning', a1111: 'danger' }[p] || 'secondary');
+
+        // No extra column for the kind: an icon in front of the name says it in
+        // the width a phone has, and "chat" needs no marking — it is what every
+        // model in this table was until image generators joined it.
+        const kindIcon = (m) => m.kind === 'image'
+            ? `<i class="bi bi-image text-secondary me-1" title="${App.escAttr(i18n('models.kindImage'))}"></i>`
+            : '';
 
         App.container.innerHTML = `
             <div class="d-flex flex-wrap gap-2 justify-content-between align-items-center mb-3">
@@ -29,7 +36,7 @@ const ModelsPage = {
                         ${models.map(m => `
                             <tr>
                                 <td><code>${App.esc(m.id)}</code></td>
-                                <td>${App.esc(m.name)}</td>
+                                <td>${kindIcon(m)}${App.esc(m.name)}</td>
                                 <td><span class="badge bg-${providerBadge(m.provider)}">${App.esc(m.provider)}</span></td>
                                 <td class="model-cell" data-mid="${App.escAttr(m.id)}">
                                     <code>${App.esc(m.model || '—')}</code>
@@ -169,7 +176,33 @@ const ModelsPage = {
     // Ollama/llama.cpp knobs are only shown for local providers. `ph` is the
     // effective default, shown as placeholder so an empty field is honest about
     // what actually happens.
-    optionSpecs(provider) {
+    // What a model of this kind may be. Chat has four providers and image
+    // two, and the two lists share the label "openai" while meaning different
+    // endpoints (/v1/chat/completions vs /v1/images/generations) — which is why
+    // the kind is a stored field and not something guessed from the provider.
+    providerChoices(kind) {
+        return kind === 'image'
+            ? [['openai', i18n('models.providerImageOpenai')], ['a1111', i18n('models.providerA1111')]]
+            : [['ollama', 'Ollama'], ['llamacpp', 'llama.cpp'],
+               ['openai', i18n('models.providerOpenai')], ['anthropic', i18n('models.providerAnthropic')]];
+    },
+
+    // Defaults for the generator, overridable per call by the tool's own
+    // parameters. Mirrors imagegen.KNOWN_OPTIONS; sampler and negative_prompt
+    // are text, every other knob a number.
+    imageOptionSpecs() {
+        return [
+            { key: 'width',           min: 64, int: true, ph: '512' },
+            { key: 'height',          min: 64, int: true, ph: '512' },
+            { key: 'steps',           min: 1,  int: true, ph: '20' },
+            { key: 'cfg_scale',       min: 0,  max: 30, ph: '7' },
+            { key: 'sampler',         text: true, ph: 'euler_a' },
+            { key: 'negative_prompt', text: true, ph: i18n('models.optUnset') },
+        ];
+    },
+
+    optionSpecs(provider, kind) {
+        if (kind === 'image') return this.imageOptionSpecs();
         const local = provider === 'ollama' || provider === 'llamacpp';
         const anthropic = provider === 'anthropic';
         const specs = [
@@ -201,6 +234,14 @@ const ModelsPage = {
         return provider === 'openai' || provider === 'anthropic';
     },
 
+    // Whether the api_key field is offered. An image backend is usually on
+    // localhost and needs none, but it may sit behind an auth proxy and the
+    // server keeps a key for it either way (KEYED_PROVIDERS in app/models.py),
+    // so the field is shown and simply left empty when there is no key.
+    showsKey(kind, provider) {
+        return kind === 'image' ? true : this.isRemote(provider);
+    },
+
     // Union of every key that has a dedicated field for SOME provider. Keys in
     // here are never kept in the advanced-JSON box: switching to a provider that
     // rejects them (top_k on a remote API) must drop them, not smuggle them
@@ -209,6 +250,7 @@ const ModelsPage = {
         return new Set([
             ...this.optionSpecs('ollama').map(s => s.key),
             ...this.optionSpecs('openai').map(s => s.key),
+            ...this.imageOptionSpecs().map(s => s.key),
         ]);
     },
 
@@ -227,21 +269,27 @@ const ModelsPage = {
     // against a step of 16, request_timeout 600 against 5+30k — both shipped
     // defaults) makes the field :invalid, and the form then refuses to submit
     // with nothing on screen to explain why. Integers step by 1, floats by "any".
-    renderOptionFields(provider, options) {
+    renderOptionFields(provider, options, kind) {
         const cell = (s) => {
             const v = options[s.key];
-            return `
-                <div class="col-6 col-md-4">
-                    <label class="form-label small mb-1" for="opt-${s.key}">${this.optionLabel(s.key)}</label>
-                    <input type="number" class="form-control form-control-sm opt-field" id="opt-${s.key}"
+            const val = v === undefined || v === null ? '' : App.esc(String(v));
+            // A sampler name is not a number; everything else here is.
+            const input = s.text
+                ? `<input type="text" class="form-control form-control-sm opt-field" id="opt-${s.key}"
+                           data-key="${s.key}" data-text="1"
+                           value="${val}" placeholder="${App.escAttr(s.ph)}">`
+                : `<input type="number" class="form-control form-control-sm opt-field" id="opt-${s.key}"
                            data-key="${s.key}" ${s.int ? 'data-int="1"' : ''}
                            min="${s.min}" ${s.max !== undefined ? `max="${s.max}"` : ''}
                            step="${s.int ? '1' : 'any'}"
-                           value="${v === undefined || v === null ? '' : App.esc(String(v))}"
-                           placeholder="${App.esc(s.ph)}">
+                           value="${val}" placeholder="${App.escAttr(s.ph)}">`;
+            return `
+                <div class="col-6 col-md-4">
+                    <label class="form-label small mb-1" for="opt-${s.key}">${this.optionLabel(s.key)}</label>
+                    ${input}
                 </div>`;
         };
-        return this.optionSpecs(provider).map(cell).join('');
+        return this.optionSpecs(provider, kind).map(cell).join('');
     },
 
     // Options the form has no dedicated field for (custom/experimental keys):
@@ -258,6 +306,7 @@ const ModelsPage = {
         document.querySelectorAll('.opt-field').forEach(inp => {
             const raw = inp.value.trim();
             if (raw === '') return;
+            if (inp.dataset.text) { out[inp.dataset.key] = raw; return; }
             const n = inp.dataset.int ? parseInt(raw, 10) : parseFloat(raw);
             if (!Number.isNaN(n)) out[inp.dataset.key] = n;
         });
@@ -300,8 +349,17 @@ const ModelsPage = {
         el.innerHTML = `<i class="bi bi-info-circle"></i> ` + parts.join(' · ');
     },
 
-    // Default base URL per provider (used when switching in the form)
-    defaultUrl(provider) {
+    // Default base URL per provider (used when switching in the form). Split by
+    // kind because "openai" means two different servers: the chat API, or
+    // whatever speaks /v1/images/generations — stable-diffusion.cpp's sd-server
+    // on 8080 being the local case this was written for.
+    defaultUrl(provider, kind) {
+        if (kind === 'image') {
+            return {
+                openai: 'http://127.0.0.1:8080',
+                a1111: 'http://127.0.0.1:7860',
+            }[provider] || '';
+        }
         return {
             ollama: 'http://localhost:11434',
             llamacpp: 'http://localhost:8080',
@@ -310,8 +368,16 @@ const ModelsPage = {
         }[provider] || '';
     },
 
+    // True when this URL is one this form would have filled in by itself, for
+    // any kind and provider. Used to decide whether switching kind may rewrite
+    // it (see the f-kind handler).
+    isDefaultUrl(url) {
+        return ['chat', 'image'].some(k =>
+            this.providerChoices(k).some(([v]) => this.defaultUrl(v, k) === url));
+    },
+
     async renderForm(modelId) {
-        let model = { id: '', name: '', provider: 'ollama', model: '', base_url: 'http://localhost:11434', api_key: '', api_format: 'openai', supports_vision: true, supports_audio: false, supports_tools: null, context_window: null, options: {} };
+        let model = { id: '', name: '', kind: 'chat', provider: 'ollama', model: '', base_url: 'http://localhost:11434', api_key: '', api_format: 'openai', supports_vision: true, supports_audio: false, supports_tools: null, context_window: null, options: {} };
         let isEdit = false;
 
         if (modelId) {
@@ -329,6 +395,10 @@ const ModelsPage = {
         // when one is set. We prefill the password field with that mask so an
         // untouched field round-trips as "keep the stored key", while clearing
         // the field sends an empty value = explicitly remove the key.
+        // Absent kind = chat: that is all this store held until image
+        // generators joined it, and the server reads it back the same way.
+        const kind = model.kind || 'chat';
+        const isImage = kind === 'image';
         const KEY_MASK = '********';
         const hasKey = !!model.api_key;
         const keyInitial = hasKey ? KEY_MASK : '';
@@ -350,19 +420,25 @@ const ModelsPage = {
                             <input type="text" class="form-control" id="f-name" value="${App.esc(model.name)}" required>
                         </div>
                         <div class="mb-3">
-                            <label class="form-label">${i18n('models.provider')}</label>
+                            <label class="form-label" for="f-kind">${i18n('models.kind')}</label>
+                            <select class="form-select" id="f-kind">
+                                <option value="chat" ${isImage ? '' : 'selected'}>${i18n('models.kindChat')}</option>
+                                <option value="image" ${isImage ? 'selected' : ''}>${i18n('models.kindImage')}</option>
+                            </select>
+                            <div class="form-text">${i18n('models.kindHelp')}</div>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label" for="f-provider">${i18n('models.provider')}</label>
                             <select class="form-select" id="f-provider">
-                                <option value="ollama" ${model.provider === 'ollama' ? 'selected' : ''}>Ollama</option>
-                                <option value="llamacpp" ${model.provider === 'llamacpp' ? 'selected' : ''}>llama.cpp</option>
-                                <option value="openai" ${model.provider === 'openai' ? 'selected' : ''}>${i18n('models.providerOpenai')}</option>
-                                <option value="anthropic" ${model.provider === 'anthropic' ? 'selected' : ''}>${i18n('models.providerAnthropic')}</option>
+                                ${this.providerChoices(kind).map(([v, label]) =>
+                                    `<option value="${v}" ${model.provider === v ? 'selected' : ''}>${App.esc(label)}</option>`).join('')}
                             </select>
                         </div>
                         <div class="mb-3">
                             <label class="form-label">${i18n('models.baseUrl')}</label>
                             <input type="text" class="form-control" id="f-url" value="${App.esc(model.base_url)}" autocomplete="url" required>
                         </div>
-                        <div class="mb-3" id="api-key-group" ${this.isRemote(model.provider) ? '' : 'style="display:none"'}>
+                        <div class="mb-3" id="api-key-group" ${this.showsKey(kind, model.provider) ? '' : 'style="display:none"'}>
                             <label class="form-label">${i18n('models.apiKey')}</label>
                             <div class="input-group">
                                 <input type="password" class="form-control" id="f-apikey" value="${keyInitial}" autocomplete="new-password"
@@ -371,21 +447,22 @@ const ModelsPage = {
                             </div>
                             <small class="text-secondary">${i18n('models.apiKeyHint')}${isEdit && hasKey ? ' ' + i18n('models.apiKeyKeep') : ''}</small>
                         </div>
-                        <div class="mb-3" id="model-name-group" ${model.provider === 'llamacpp' ? 'style="display:none"' : ''}>
-                            <label class="form-label">${i18n('models.modelName')}</label>
+                        <div class="mb-3" id="model-name-group" ${!isImage && model.provider === 'llamacpp' ? 'style="display:none"' : ''}>
+                            <label class="form-label" for="f-model">${i18n('models.modelName')}</label>
                             <div class="input-group">
                                 <input type="text" class="form-control" id="f-model" value="${App.esc(model.model)}"
                                        list="remote-models"
-                                       ${model.provider !== 'llamacpp' ? 'required' : ''}
-                                       placeholder="${i18n('models.modelPlaceholder')}">
+                                       ${!isImage && model.provider !== 'llamacpp' ? 'required' : ''}
+                                       placeholder="${isImage ? i18n('models.modelImagePlaceholder') : i18n('models.modelPlaceholder')}">
                                 <button type="button" class="btn btn-outline-secondary" id="btn-fetch-models"
-                                        ${this.isRemote(model.provider) ? '' : 'style="display:none"'}>
+                                        ${!isImage && this.isRemote(model.provider) ? '' : 'style="display:none"'}>
                                     <i class="bi bi-cloud-download"></i> ${i18n('models.fetchRemote')}
                                 </button>
                             </div>
                             <datalist id="remote-models"></datalist>
+                            ${isImage ? `<small class="text-secondary">${i18n('models.modelImageHint')}</small>` : ''}
                         </div>
-                        <div class="mb-3">
+                        <div class="mb-3" id="cap-group" ${isImage ? 'style="display:none"' : ''}>
                             <label class="form-label">${i18n('models.capabilities')}</label>
                             <div class="form-check">
                                 <input class="form-check-input" type="checkbox" id="f-vision" ${model.supports_vision !== false ? 'checked' : ''}>
@@ -406,7 +483,7 @@ const ModelsPage = {
                                 <div class="form-text">${i18n('models.toolCallingHelp')}</div>
                             </div>
                         </div>
-                        <div class="mb-3">
+                        <div class="mb-3" id="ctx-group" ${isImage ? 'style="display:none"' : ''}>
                             <label class="form-label" for="f-ctx">${i18n('models.contextWindow')}</label>
                             <div class="input-group">
                                 <input type="number" class="form-control" id="f-ctx" min="0" step="1024"
@@ -420,7 +497,7 @@ const ModelsPage = {
                         </div>
                         <div class="mb-3">
                             <label class="form-label">${i18n('models.options')}</label>
-                            <div class="row g-2" id="options-fields">${this.renderOptionFields(model.provider, model.options || {})}</div>
+                            <div class="row g-2" id="options-fields">${this.renderOptionFields(model.provider, model.options || {}, kind)}</div>
                             <div class="form-text" id="options-help"></div>
                             <details class="mt-2" ${Object.keys(extraOptions).length ? 'open' : ''}>
                                 <summary class="small text-secondary">${i18n('models.optionsAdvanced')}</summary>
@@ -442,9 +519,16 @@ const ModelsPage = {
         // Provider-specific help: which options exist, and what the context
         // field actually does (it allocates on Ollama, only guards truncation
         // elsewhere).
-        const applyProviderHelp = (provider) => {
-            document.getElementById('options-help').textContent =
-                i18n(this.isRemote(provider) ? 'models.optionsRemoteHelp' : 'models.optionsLocalHelp');
+        const currentKind = () => document.getElementById('f-kind').value;
+
+        const applyProviderHelp = (provider, k) => {
+            document.getElementById('options-help').textContent = k === 'image'
+                // On the OpenAI image route only the size survives: steps, cfg
+                // and the sampler have no field in that request body. Say so
+                // here rather than let them look effective and be dropped.
+                ? i18n(provider === 'a1111' ? 'models.optionsA1111Help' : 'models.optionsImageOpenaiHelp')
+                : i18n(this.isRemote(provider) ? 'models.optionsRemoteHelp' : 'models.optionsLocalHelp');
+            if (k === 'image') return;   // ctx-help lives in a hidden group
             document.getElementById('ctx-help').textContent = i18n({
                 ollama: 'models.contextHelpOllama',
                 llamacpp: 'models.contextHelpLlamacpp',
@@ -452,30 +536,61 @@ const ModelsPage = {
                 anthropic: 'models.contextHelpAnthropic',
             }[provider] || 'models.contextHelpOllama');
         };
-        applyProviderHelp(model.provider);
+        applyProviderHelp(model.provider, kind);
 
-        // Adapt the form when the provider changes: default URL, API key,
-        // model-name visibility/requiredness and the available options.
-        document.getElementById('f-provider').onchange = (e) => {
-            const provider = e.target.value;
-            document.getElementById('f-url').value = this.defaultUrl(provider);
-            document.getElementById('api-key-group').style.display = this.isRemote(provider) ? '' : 'none';
-            document.getElementById('model-name-group').style.display = provider === 'llamacpp' ? 'none' : '';
-            document.getElementById('f-model').required = provider !== 'llamacpp';
-            document.getElementById('btn-fetch-models').style.display = this.isRemote(provider) ? '' : 'none';
+        // Adapt the form to the provider: API key, model-name
+        // visibility/requiredness and the available options. Shared by the two
+        // selects, because changing the kind also changes the provider.
+        const applyProvider = (provider, k) => {
+            const img = k === 'image';
+            document.getElementById('api-key-group').style.display = this.showsKey(k, provider) ? '' : 'none';
+            document.getElementById('model-name-group').style.display = !img && provider === 'llamacpp' ? 'none' : '';
+            document.getElementById('f-model').required = !img && provider !== 'llamacpp';
+            document.getElementById('btn-fetch-models').style.display = !img && this.isRemote(provider) ? '' : 'none';
             // Re-render the option fields for the new provider, keeping the
             // values the user already typed for the knobs that survive.
             document.getElementById('options-fields').innerHTML =
-                this.renderOptionFields(provider, this.collectFieldOptions());
-            applyProviderHelp(provider);
+                this.renderOptionFields(provider, this.collectFieldOptions(), k);
+            applyProviderHelp(provider, k);
             // The probe reads the STORED config, so a pending provider switch
             // makes any detected value stale until the form is saved.
             const probeBtn = document.getElementById('btn-probe-ctx');
             if (probeBtn) {
-                const pending = provider !== model.provider;
+                const pending = provider !== model.provider || k !== kind;
                 probeBtn.disabled = pending;
                 if (pending) document.getElementById('ctx-info').textContent = i18n('models.contextSaveFirst');
             }
+        };
+
+        document.getElementById('f-provider').onchange = (e) => {
+            const k = currentKind();
+            document.getElementById('f-url').value = this.defaultUrl(e.target.value, k);
+            applyProvider(e.target.value, k);
+        };
+
+        // Changing the kind rebuilds the provider list: the two kinds share the
+        // name "openai" for two unrelated endpoints, so the provider cannot
+        // simply carry over.
+        document.getElementById('f-kind').onchange = (e) => {
+            const k = e.target.value;
+            const img = k === 'image';
+            const sel = document.getElementById('f-provider');
+            const keep = this.providerChoices(k).some(([v]) => v === sel.value) ? sel.value : null;
+            sel.innerHTML = this.providerChoices(k).map(([v, label]) =>
+                `<option value="${v}" ${v === (keep || '') ? 'selected' : ''}>${App.esc(label)}</option>`).join('');
+            const provider = sel.value;
+            // The URL only follows when what is in the box is still one of the
+            // defaults: a URL the user typed by hand is the one thing on this
+            // form they could not get back.
+            const url = document.getElementById('f-url');
+            if (!url.value.trim() || this.isDefaultUrl(url.value.trim())) {
+                url.value = this.defaultUrl(provider, k);
+            }
+            // An image generator answers neither "can it see" nor "how big is
+            // its context": both questions belong to a chat model.
+            document.getElementById('cap-group').style.display = img ? 'none' : '';
+            document.getElementById('ctx-group').style.display = img ? 'none' : '';
+            applyProvider(provider, k);
         };
 
         // Query the remote provider for its model list (fills the datalist)
@@ -506,6 +621,7 @@ const ModelsPage = {
         document.getElementById('model-form').onsubmit = async (e) => {
             e.preventDefault();
             const provider = document.getElementById('f-provider').value;
+            const newKind = currentKind();
             const options = this.collectOptions();
             if (options === null) {
                 App.toast(i18n('models.invalidOptions'), 'danger');
@@ -516,12 +632,13 @@ const ModelsPage = {
             const data = {
                 id: document.getElementById('f-id').value.trim(),
                 name: document.getElementById('f-name').value.trim(),
+                kind: newKind,
                 provider: provider,
-                model: modelName || (provider === 'llamacpp' ? 'default' : ''),
+                model: modelName || (!isImage && provider === 'llamacpp' ? 'default' : ''),
                 base_url: document.getElementById('f-url').value.trim(),
                 // Empty on an existing keyed config means "keep the stored key"
                 // (the server never sends the real key back).
-                api_key: this.isRemote(provider) ? document.getElementById('f-apikey').value : '',
+                api_key: this.showsKey(newKind, provider) ? document.getElementById('f-apikey').value : '',
                 api_format: 'openai',
                 supports_vision: document.getElementById('f-vision').checked,
                 supports_audio: document.getElementById('f-audio').checked,
@@ -546,13 +663,17 @@ const ModelsPage = {
 
         if (isEdit) {
             // Local servers are cheap to ask, so show the live window right away;
-            // remote (paid) providers only on demand, via the button.
-            if (!this.isRemote(model.provider)) {
+            // remote (paid) providers only on demand, via the button. An image
+            // backend has no context window and no /v1/models to ask about one.
+            if (isImage) {
+                /* nothing to probe */
+            } else if (!this.isRemote(model.provider)) {
                 this.probeContext(modelId);
             } else {
                 document.getElementById('ctx-info').textContent = i18n('models.contextDetectHint');
             }
-            document.getElementById('btn-probe-ctx').onclick = () => this.probeContext(modelId, true);
+            const probeBtn = document.getElementById('btn-probe-ctx');
+            if (probeBtn) probeBtn.onclick = () => this.probeContext(modelId, true);
 
             document.getElementById('btn-delete').onclick = async () => {
                 if (!confirm(i18n('models.confirmDelete'))) return;

@@ -1,0 +1,217 @@
+#!/usr/bin/env python3
+"""Text-to-image, over whatever backend Settings points at.
+
+WHERE it generates is not this tool's decision and is not in its parameters:
+app.engine.imagegen resolves the model chosen in Settings and hands it down in
+the environment (MYAGENT_IMAGE_URL / _FORMAT / _MODEL / _KEY / _OPTIONS). Two
+reasons it is done that way rather than as tool parameters. The parameters are
+written BY the model and come straight back to it in the turn's trace, so an
+api_key placed there would be one question away from being read out loud; and a
+small local model asked to fill in an endpoint URL will invent one.
+
+Stdlib only (urllib + base64), like every other bundled tool: this must run on a
+fresh install with nothing pip-installed.
+
+Two wire formats, and they are NOT equivalent:
+
+  a1111  POST /sdapi/v1/txt2img  -> {"images": ["<base64 png>"]}
+         Takes negative_prompt, steps, cfg_scale, seed, sampler natively.
+         Spoken by Automatic1111, Forge, SwarmUI and stable-diffusion.cpp's
+         sd-server. Prefer it for a local generator: it is the only one of the
+         two that can carry the knobs.
+
+  openai POST /v1/images/generations -> {"data": [{"b64_json"|"url": ...}]}
+         Takes prompt, n and size and nothing else. steps/seed/negative_prompt
+         have nowhere to go, so they are reported as ignored instead of being
+         silently dropped — a user who asked for 4 steps and waited 40 wants to
+         know why.
+"""
+import base64
+import json
+import os
+import re
+import sys
+import time
+import urllib.error
+import urllib.request
+
+TIMEOUT = 570  # under tool.json's 600 so we fail with a sentence, not a kill
+
+
+def fail(msg):
+    print(f"ERROR: {msg}")
+    sys.exit(1)
+
+
+def slug(text, fallback="image"):
+    s = re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")
+    return (s[:40].rstrip("-") or fallback)
+
+
+def main():
+    try:
+        params = json.load(sys.stdin)
+    except Exception as e:
+        fail(f"invalid parameters: {e}")
+
+    url = os.environ.get("MYAGENT_IMAGE_URL", "").strip()
+    if not url:
+        fail("no image generation model is configured. Open Settings -> Image "
+             "generation and choose one (register it first under Models, with "
+             "Kind = Image). Nothing can be generated until then.")
+    fmt = os.environ.get("MYAGENT_IMAGE_FORMAT", "openai")
+    backend = os.environ.get("MYAGENT_IMAGE_NAME", "the image model")
+
+    prompt = (params.get("prompt") or "").strip()
+    if not prompt:
+        fail("prompt is required")
+
+    # The model's stored options are the DEFAULTS; the call's parameters win.
+    # Unknown keys are forwarded untouched: a backend knob we have never heard
+    # of is the user's business, not ours to filter.
+    try:
+        opts = json.loads(os.environ.get("MYAGENT_IMAGE_OPTIONS") or "{}")
+    except Exception:
+        opts = {}
+    if not isinstance(opts, dict):
+        opts = {}
+
+    def pick(key, default=None):
+        v = params.get(key)
+        if v in (None, "", []):
+            v = opts.get(key, default)
+        return v
+
+    width = pick("width")
+    height = pick("height")
+    steps = pick("steps")
+    seed = pick("seed", -1)
+    negative = pick("negative_prompt", "")
+
+    ignored = []
+    if fmt == "a1111":
+        payload = dict(opts)
+        for k in ("width", "height", "steps", "seed", "negative_prompt",
+                  "size", "cfg_scale", "sampler", "sampler_name"):
+            payload.pop(k, None)
+        payload.update({"prompt": prompt, "batch_size": 1})
+        if negative:
+            payload["negative_prompt"] = negative
+        if width:
+            payload["width"] = int(width)
+        if height:
+            payload["height"] = int(height)
+        if steps:
+            payload["steps"] = int(steps)
+        if seed not in (None, ""):
+            payload["seed"] = int(seed)
+        for src, dst in (("cfg_scale", "cfg_scale"), ("sampler", "sampler_name"),
+                         ("sampler_name", "sampler_name")):
+            if opts.get(src) not in (None, ""):
+                payload[dst] = opts[src]
+    else:
+        payload = {"prompt": prompt, "n": 1}
+        model = os.environ.get("MYAGENT_IMAGE_MODEL", "").strip()
+        if model:
+            payload["model"] = model
+        size = opts.get("size")
+        if width and height:
+            size = f"{int(width)}x{int(height)}"
+        if size:
+            payload["size"] = size
+        # OpenAI's own gpt-image-1 rejects response_format and always returns
+        # b64_json; dall-e-* needs it to be asked for. Send it only when the
+        # endpoint is not OpenAI's own, and handle both shapes on the way back.
+        if "api.openai.com" not in url:
+            payload.setdefault("response_format", "b64_json")
+        # Only keys this API actually defines travel. The stored options are
+        # written for a generator, and OpenAI's own endpoint answers 400 to any
+        # field it does not know — so forwarding them wholesale would break the
+        # one backend that is strict about it. Everything else is REPORTED as
+        # dropped rather than silently discarded.
+        for k in ("quality", "style", "background", "moderation",
+                  "output_format", "output_compression", "user"):
+            if opts.get(k) not in (None, ""):
+                payload.setdefault(k, opts[k])
+        ignored = [k for k, v in (("negative_prompt", negative), ("steps", steps))
+                   if v not in (None, "", -1)]
+        if seed not in (None, "", -1):
+            ignored.append("seed")
+        ignored += [k for k in ("cfg_scale", "sampler", "sampler_name")
+                    if opts.get(k) not in (None, "")]
+
+    req = urllib.request.Request(
+        url, data=json.dumps(payload).encode(), method="POST",
+        headers={"Content-Type": "application/json"})
+    key = os.environ.get("MYAGENT_IMAGE_KEY")
+    if key:
+        req.add_header("Authorization", f"Bearer {key}")
+
+    started = time.time()
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+            data = json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        body = ""
+        try:
+            body = e.read().decode()[:400]
+        except Exception:
+            pass
+        fail(f"{backend} refused the request (HTTP {e.code}) at {url}: {body}")
+    except urllib.error.URLError as e:
+        fail(f"cannot reach {backend} at {url}: {e.reason}. Check that the "
+             "backend is running and that the base URL in Models is right.")
+    except Exception as e:
+        fail(f"image generation failed: {e}")
+    elapsed = time.time() - started
+
+    # Pull the bytes out of whichever shape came back.
+    raw = None
+    if fmt == "a1111":
+        images = data.get("images") or []
+        if images:
+            raw = base64.b64decode(images[0])
+    else:
+        items = data.get("data") or []
+        if items and isinstance(items[0], dict):
+            if items[0].get("b64_json"):
+                raw = base64.b64decode(items[0]["b64_json"])
+            elif items[0].get("url"):
+                try:
+                    with urllib.request.urlopen(items[0]["url"], timeout=120) as r:
+                        raw = r.read()
+                except Exception as e:
+                    fail(f"the image was generated but could not be downloaded "
+                         f"from {items[0]['url']}: {e}")
+    if not raw:
+        fail(f"{backend} answered without an image: {json.dumps(data)[:300]}")
+
+    # cwd IS the workspace (the tool contract), so a bare relative path lands
+    # where the resource channel can serve it. Never overwrite: two generations
+    # from one conversation must both stay reachable from the trace.
+    base = slug(params.get("filename") or prompt)
+    name = f"{base}.png"
+    n = 2
+    while os.path.exists(name):
+        name = f"{base}-{n}.png"
+        n += 1
+    try:
+        with open(name, "wb") as f:
+            f.write(raw)
+    except OSError as e:
+        fail(f"could not write {name} into the workspace: {e}")
+
+    kb = len(raw) // 1024
+    print(f"Image generated by {backend} in {elapsed:.0f}s and saved as "
+          f"{name} ({kb} KB). It is already displayed to the user: describe it "
+          "or offer a change, do not paste the path.")
+    if ignored:
+        print(f"NOTE: this backend speaks the OpenAI image API, which has no "
+              f"field for {', '.join(ignored)} — that parameter was ignored. "
+              "Configure the model as provider 'a1111' if the backend also "
+              "serves /sdapi/v1/txt2img (stable-diffusion.cpp does).")
+    print(f"[[resource:{name}|image/png|{prompt[:80]}]]")
+
+
+if __name__ == "__main__":
+    main()

@@ -12,8 +12,8 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from app import config
-from app.engine import embedding, prompts, trace
-from app.models import Agent, ChatMessage, ChatResponse, ModelConfig
+from app.engine import embedding, imagegen, prompts, trace
+from app.models import CHAT_KIND, Agent, ChatMessage, ChatResponse, ModelConfig
 from app.engine.default_model import resolve_default
 from app.engine.llm_provider import LLMProvider
 from app.engine.reasoning import ReasoningSplitter
@@ -143,6 +143,19 @@ class Stores:
     # Carried here so sub-agents inherit the pointer via create_for_agent —
     # access is still gated per-agent by Agent.memory_enabled.
     memory: MemoryStore | None = None
+
+
+def _refuse_image_model(cfg: ModelConfig, where: str) -> None:
+    """A kind=image model can't serve a chat turn; say so before the first
+    /v1/chat/completions comes back as a 404. The UI hides them from both
+    pickers, but the id also travels in the request body and in agent files
+    edited by hand; resolve_default has the same guard for the default."""
+    if cfg.kind != CHAT_KIND:
+        raise ValueError(
+            f"'{cfg.name}' ({where}) is an image generation model and cannot "
+            "answer a chat. Pick a chat model; image models are used through "
+            "the generate_image tool, chosen under Settings -> Image generation."
+        )
 
 
 class AgentExecutor:
@@ -382,6 +395,7 @@ class AgentExecutor:
                     f"default (available: {known})."
                 )
             model_config = ModelConfig(**model_data)
+            _refuse_image_model(model_config, "picked for this chat")
         elif model_id in ("", "default"):
             model_config, notice = await resolve_default(
                 stores.models, config.settings.default_model_id)
@@ -396,6 +410,7 @@ class AgentExecutor:
                     f"(available: {known})."
                 )
             model_config = ModelConfig(**model_data)
+            _refuse_image_model(model_config, f"pinned on agent '{agent.id}'")
 
         executor = cls(agent, model_config, tool_registry, stores, depth)
         executor.notice = notice
@@ -526,6 +541,11 @@ class AgentExecutor:
         # Local-only, resolved per turn: app.engine.embedding owns that rule,
         # and IndexService reads the SAME one when it builds the index.
         env.update(embedding.resolve_embed_env(self.stores.models))
+        # Where generate_image generates. Its sibling module owns the (looser)
+        # rule about where that may be, and the api_key rides here rather than
+        # in the tool's parameters — those are written by the model and handed
+        # straight back to it in the turn's trace.
+        env.update(imagegen.resolve_image_env(self.stores.models))
         return env
 
 

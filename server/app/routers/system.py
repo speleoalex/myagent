@@ -10,7 +10,7 @@ from pydantic import BaseModel
 
 from app import config
 from app.config import save_settings, WORKSPACE_DIR
-from app.engine import default_model, embedding
+from app.engine import default_model, embedding, imagegen
 from app.models import Settings
 
 router = APIRouter()
@@ -116,6 +116,22 @@ async def update_settings(new_settings: Settings, request: Request):
                         f"({why}). Indexing sends the CONTENTS of your documents "
                         "to the embedding endpoint, not just your question, so "
                         "only a local model (Ollama or llama.cpp) can be used."))
+    # The image generator has no such rule and that asymmetry is deliberate:
+    # what leaves the machine is a sentence written to be turned into a picture,
+    # not the user's documents, so remote is allowed (see app.engine.imagegen).
+    # What is still refused is a setting that can only ever do nothing.
+    img = new_settings.image_model_id
+    if img:
+        raw = request.app.state.stores.models.get(img) or {}
+        if not raw:
+            raise HTTPException(status_code=400, detail=f"Unknown model '{img}'")
+        why = imagegen.rejection_reason(raw)
+        if why:
+            raise HTTPException(
+                status_code=400,
+                detail=(f"'{raw.get('name') or img}' cannot generate images "
+                        f"({why}). Register the generator under Models with "
+                        "Kind = Image."))
     # The demotion threshold is a fraction of the usable window. Below 0.5 the
     # payload is compressed on turns that fit comfortably, which throws away
     # context for nothing; above 0.95 there is no room left to land in and the

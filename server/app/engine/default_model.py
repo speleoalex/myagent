@@ -36,7 +36,7 @@ import httpx
 
 from app import config
 from app.engine import model_probe
-from app.models import ModelConfig
+from app.models import CHAT_KIND, ModelConfig
 
 log = logging.getLogger(__name__)
 
@@ -118,6 +118,11 @@ async def _find_fallback(
         ModelConfig(**d)
         for d in sorted(models_store.list_all(), key=lambda d: d.get("id") or "")
         if d.get("provider") in LOCAL_PROVIDERS and not d.get("api_key")
+        # An image generator is in the same store but answers a different
+        # question; electing one as the default chat model would fail on the
+        # user's first message with a 404 from a /v1/chat/completions that was
+        # never there. CHAT_KIND is also what an absent `kind` reads as.
+        and ModelConfig(**d).kind == CHAT_KIND
     ]
     if candidates:
         results = await asyncio.gather(
@@ -215,6 +220,16 @@ async def _decide(
         data = models_store.get(configured_id)
         if data:
             configured = ModelConfig(**data)
+
+    if configured is not None and configured.kind != CHAT_KIND:
+        # Configured explicitly, but it is an image generator: say so instead of
+        # falling back silently onto some other model, which would look like the
+        # setting had simply been ignored.
+        return None, None, (
+            f"'{configured.name}' is an image generation model and cannot answer "
+            "a chat. Pick a chat model as the default in Settings — image models "
+            "are chosen separately, under Image generation."
+        )
 
     if configured is not None:
         # A remote default is taken at its word: see the module docstring.

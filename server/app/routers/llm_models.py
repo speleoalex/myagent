@@ -5,7 +5,7 @@ import httpx
 from pydantic import BaseModel
 
 from app.engine import default_model, model_probe
-from app.models import ModelConfig
+from app.models import KEYED_PROVIDERS, ModelConfig
 from app.routers.crud import get_or_404, require_absent, require_exists
 from app.routers.secrets import SECRET_MASK
 from app import config
@@ -217,11 +217,13 @@ async def update_model(model_id: str, model: ModelConfig, request: Request):
     existing = store.get(model_id) or {}
     model.id = model_id
     # API key handling (write-only — the frontend only ever holds the mask):
-    #  - a non-remote provider never keeps a key;
+    #  - a LOCAL provider (ollama, llamacpp) never keeps a key — everything
+    #    else may, image endpoints included: they usually sit on localhost but
+    #    can be behind an auth proxy (KEYED_PROVIDERS, app.models);
     #  - the mask sentinel means "keep the stored key" (field untouched);
     #  - anything else (including an empty string) is taken literally, so the
     #    key can be replaced or explicitly cleared.
-    if model.provider not in ("openai", "anthropic"):
+    if model.provider not in KEYED_PROVIDERS:
         model.api_key = ""
     elif model.api_key == API_KEY_MASK:
         model.api_key = existing.get("api_key", "")

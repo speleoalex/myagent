@@ -56,6 +56,7 @@ dependencies are present:
 | Document extraction (PDF, images) | `document_extract` | `poppler-utils`, `tesseract`, `pandoc` (each optional) |
 | Offline Wikipedia archives | `local_search`, `local_read` | `libzim`, installed by `install.sh` (`.zim` files only — Markdown/text notes need nothing). To repair it by hand: `server/.venv/bin/pip install libzim` |
 | Speech to text (audio files, Telegram voice notes, voice satellites) | `document_extract` | `ffmpeg` + `faster-whisper` (installed with the connectors plugin) |
+| Image generation | `generate_image` | an image endpoint chosen in Settings → *Image generation*: a local `sd-server` (stable-diffusion.cpp) or AUTOMATIC1111 on this machine or another one you trust, or OpenAI's Images API. Nothing to install here — the model runs wherever the endpoint runs. |
 
 Missing dependencies never block startup: the tool simply fails when called,
 and `./install.sh` tells you which ones are dark.

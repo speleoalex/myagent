@@ -1,0 +1,42 @@
+{
+  "name": "Generate Image",
+  "description": "Generate an image from a text description and save it in the workspace. The picture is shown to the user automatically. Write the prompt in English and describe subject, setting, style and lighting explicitly — the image model is not the one reading this conversation and knows nothing about it.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "prompt": {
+        "type": "string",
+        "description": "What to draw, in English. Be concrete and visual: subject, action, setting, art style, lighting, colours."
+      },
+      "negative_prompt": {
+        "type": "string",
+        "description": "What must NOT appear in the image (e.g. 'text, watermark, extra fingers'). Optional."
+      },
+      "width": {
+        "type": "integer",
+        "description": "Image width in pixels. Leave unset to use the configured default; most models want a multiple of 64."
+      },
+      "height": {
+        "type": "integer",
+        "description": "Image height in pixels. Leave unset to use the configured default."
+      },
+      "steps": {
+        "type": "integer",
+        "description": "Denoising steps. More is slower and usually cleaner; turbo/lightning models want very few (1-8). Leave unset for the configured default."
+      },
+      "seed": {
+        "type": "integer",
+        "description": "Random seed. Reuse the same seed with the same prompt to get the same image back; omit or -1 for a new one."
+      },
+      "filename": {
+        "type": "string",
+        "description": "Base name for the saved file, without extension. Optional: one is derived from the prompt."
+      }
+    },
+    "required": [
+      "prompt"
+    ]
+  },
+  "timeout": 600,
+  "max_output": 4000
+}
