@@ -14,10 +14,12 @@ const ModelsPage = {
 
         // No extra column for the kind: an icon in front of the name says it in
         // the width a phone has, and "chat" needs no marking — it is what every
-        // model in this table was until image generators joined it.
+        // model in this table was until image generators and embedders joined it.
         const kindIcon = (m) => m.kind === 'image'
             ? `<i class="bi bi-image text-secondary me-1" title="${App.escAttr(i18n('models.kindImage'))}"></i>`
-            : '';
+            : m.kind === 'embedding'
+                ? `<i class="bi bi-diagram-2 text-secondary me-1" title="${App.escAttr(i18n('models.kindEmbedding'))}"></i>`
+                : '';
 
         App.container.innerHTML = `
             <div class="d-flex flex-wrap gap-2 justify-content-between align-items-center mb-3">
@@ -180,11 +182,18 @@ const ModelsPage = {
     // two, and the two lists share the label "openai" while meaning different
     // endpoints (/v1/chat/completions vs /v1/images/generations) — which is why
     // the kind is a stored field and not something guessed from the provider.
+    // An embedder is LOCAL only: indexing ships the contents of the user's
+    // documents to it, and app/engine/embedding.py refuses a remote one
+    // whatever is stored, so offering one here would only offer a 400.
     providerChoices(kind) {
-        return kind === 'image'
-            ? [['openai', i18n('models.providerImageOpenai')], ['a1111', i18n('models.providerA1111')]]
-            : [['ollama', 'Ollama'], ['llamacpp', 'llama.cpp'],
-               ['openai', i18n('models.providerOpenai')], ['anthropic', i18n('models.providerAnthropic')]];
+        if (kind === 'image') {
+            return [['openai', i18n('models.providerImageOpenai')], ['a1111', i18n('models.providerA1111')]];
+        }
+        if (kind === 'embedding') {
+            return [['ollama', 'Ollama'], ['llamacpp', 'llama.cpp']];
+        }
+        return [['ollama', 'Ollama'], ['llamacpp', 'llama.cpp'],
+                ['openai', i18n('models.providerOpenai')], ['anthropic', i18n('models.providerAnthropic')]];
     },
 
     // Defaults for the generator, overridable per call by the tool's own
@@ -203,6 +212,9 @@ const ModelsPage = {
 
     optionSpecs(provider, kind) {
         if (kind === 'image') return this.imageOptionSpecs();
+        // An embedder samples nothing: temperature, penalties and the context
+        // window are all questions for a model that writes text.
+        if (kind === 'embedding') return [];
         const local = provider === 'ollama' || provider === 'llamacpp';
         const anthropic = provider === 'anthropic';
         const specs = [
@@ -239,7 +251,16 @@ const ModelsPage = {
     // server keeps a key for it either way (KEYED_PROVIDERS in app/models.py),
     // so the field is shown and simply left empty when there is no key.
     showsKey(kind, provider) {
-        return kind === 'image' ? true : this.isRemote(provider);
+        if (kind === 'image') return true;
+        if (kind === 'embedding') return false;   // local only, by policy
+        return this.isRemote(provider);
+    },
+
+    // Placeholder of the model-name field, per kind: an example the user can
+    // copy is worth more than a generic "model name".
+    modelPlaceholderKey(kind) {
+        return { image: 'models.modelImagePlaceholder',
+                 embedding: 'models.modelEmbedPlaceholder' }[kind] || 'models.modelPlaceholder';
     },
 
     // Union of every key that has a dedicated field for SOME provider. Keys in
@@ -399,6 +420,9 @@ const ModelsPage = {
         // generators joined it, and the server reads it back the same way.
         const kind = model.kind || 'chat';
         const isImage = kind === 'image';
+        // Chat is the only kind with capabilities, a context window and
+        // sampling options; the other two hide those groups.
+        const isChat = kind === 'chat';
         const KEY_MASK = '********';
         const hasKey = !!model.api_key;
         const keyInitial = hasKey ? KEY_MASK : '';
@@ -422,7 +446,8 @@ const ModelsPage = {
                         <div class="mb-3">
                             <label class="form-label" for="f-kind">${i18n('models.kind')}</label>
                             <select class="form-select" id="f-kind">
-                                <option value="chat" ${isImage ? '' : 'selected'}>${i18n('models.kindChat')}</option>
+                                <option value="chat" ${isChat ? 'selected' : ''}>${i18n('models.kindChat')}</option>
+                                <option value="embedding" ${kind === 'embedding' ? 'selected' : ''}>${i18n('models.kindEmbedding')}</option>
                                 <option value="image" ${isImage ? 'selected' : ''}>${i18n('models.kindImage')}</option>
                             </select>
                             <div class="form-text">${i18n('models.kindHelp')}</div>
@@ -453,7 +478,7 @@ const ModelsPage = {
                                 <input type="text" class="form-control" id="f-model" value="${App.esc(model.model)}"
                                        list="remote-models"
                                        ${!isImage && model.provider !== 'llamacpp' ? 'required' : ''}
-                                       placeholder="${isImage ? i18n('models.modelImagePlaceholder') : i18n('models.modelPlaceholder')}">
+                                       placeholder="${i18n(this.modelPlaceholderKey(kind))}">
                                 <button type="button" class="btn btn-outline-secondary" id="btn-fetch-models"
                                         ${!isImage && this.isRemote(model.provider) ? '' : 'style="display:none"'}>
                                     <i class="bi bi-cloud-download"></i> ${i18n('models.fetchRemote')}
@@ -462,7 +487,7 @@ const ModelsPage = {
                             <datalist id="remote-models"></datalist>
                             ${isImage ? `<small class="text-secondary">${i18n('models.modelImageHint')}</small>` : ''}
                         </div>
-                        <div class="mb-3" id="cap-group" ${isImage ? 'style="display:none"' : ''}>
+                        <div class="mb-3" id="cap-group" ${isChat ? '' : 'style="display:none"'}>
                             <label class="form-label">${i18n('models.capabilities')}</label>
                             <div class="form-check">
                                 <input class="form-check-input" type="checkbox" id="f-vision" ${model.supports_vision !== false ? 'checked' : ''}>
@@ -483,7 +508,7 @@ const ModelsPage = {
                                 <div class="form-text">${i18n('models.toolCallingHelp')}</div>
                             </div>
                         </div>
-                        <div class="mb-3" id="ctx-group" ${isImage ? 'style="display:none"' : ''}>
+                        <div class="mb-3" id="ctx-group" ${isChat ? '' : 'style="display:none"'}>
                             <label class="form-label" for="f-ctx">${i18n('models.contextWindow')}</label>
                             <div class="input-group">
                                 <input type="number" class="form-control" id="f-ctx" min="0" step="1024"
@@ -495,7 +520,7 @@ const ModelsPage = {
                             <div class="form-text" id="ctx-info">${isEdit ? '' : i18n('models.contextNewHint')}</div>
                             <div class="form-text" id="ctx-help"></div>
                         </div>
-                        <div class="mb-3">
+                        <div class="mb-3" id="options-group" ${kind === 'embedding' ? 'style="display:none"' : ''}>
                             <label class="form-label">${i18n('models.options')}</label>
                             <div class="row g-2" id="options-fields">${this.renderOptionFields(model.provider, model.options || {}, kind)}</div>
                             <div class="form-text" id="options-help"></div>
@@ -522,6 +547,7 @@ const ModelsPage = {
         const currentKind = () => document.getElementById('f-kind').value;
 
         const applyProviderHelp = (provider, k) => {
+            if (k === 'embedding') return;   // both help lines live in hidden groups
             document.getElementById('options-help').textContent = k === 'image'
                 // On the OpenAI image route only the size survives: steps, cfg
                 // and the sampler have no field in that request body. Say so
@@ -544,9 +570,13 @@ const ModelsPage = {
         const applyProvider = (provider, k) => {
             const img = k === 'image';
             document.getElementById('api-key-group').style.display = this.showsKey(k, provider) ? '' : 'none';
+            // llama.cpp serves one model and ignores the name (chat and
+            // embedding alike); an image backend takes an optional one.
             document.getElementById('model-name-group').style.display = !img && provider === 'llamacpp' ? 'none' : '';
             document.getElementById('f-model').required = !img && provider !== 'llamacpp';
+            document.getElementById('f-model').placeholder = i18n(this.modelPlaceholderKey(k));
             document.getElementById('btn-fetch-models').style.display = !img && this.isRemote(provider) ? '' : 'none';
+            document.getElementById('options-group').style.display = k === 'embedding' ? 'none' : '';
             // Re-render the option fields for the new provider, keeping the
             // values the user already typed for the knobs that survive.
             document.getElementById('options-fields').innerHTML =
@@ -573,7 +603,7 @@ const ModelsPage = {
         // simply carry over.
         document.getElementById('f-kind').onchange = (e) => {
             const k = e.target.value;
-            const img = k === 'image';
+            const chat = k === 'chat';
             const sel = document.getElementById('f-provider');
             const keep = this.providerChoices(k).some(([v]) => v === sel.value) ? sel.value : null;
             sel.innerHTML = this.providerChoices(k).map(([v, label]) =>
@@ -586,10 +616,10 @@ const ModelsPage = {
             if (!url.value.trim() || this.isDefaultUrl(url.value.trim())) {
                 url.value = this.defaultUrl(provider, k);
             }
-            // An image generator answers neither "can it see" nor "how big is
-            // its context": both questions belong to a chat model.
-            document.getElementById('cap-group').style.display = img ? 'none' : '';
-            document.getElementById('ctx-group').style.display = img ? 'none' : '';
+            // Neither an image generator nor an embedder answers "can it see"
+            // or "how big is its context": both questions belong to a chat model.
+            document.getElementById('cap-group').style.display = chat ? '' : 'none';
+            document.getElementById('ctx-group').style.display = chat ? '' : 'none';
             applyProvider(provider, k);
         };
 
@@ -634,7 +664,7 @@ const ModelsPage = {
                 name: document.getElementById('f-name').value.trim(),
                 kind: newKind,
                 provider: provider,
-                model: modelName || (!isImage && provider === 'llamacpp' ? 'default' : ''),
+                model: modelName || (newKind !== 'image' && provider === 'llamacpp' ? 'default' : ''),
                 base_url: document.getElementById('f-url').value.trim(),
                 // Empty on an existing keyed config means "keep the stored key"
                 // (the server never sends the real key back).
@@ -664,8 +694,8 @@ const ModelsPage = {
         if (isEdit) {
             // Local servers are cheap to ask, so show the live window right away;
             // remote (paid) providers only on demand, via the button. An image
-            // backend has no context window and no /v1/models to ask about one.
-            if (isImage) {
+            // backend or an embedder has no context window to ask about.
+            if (!isChat) {
                 /* nothing to probe */
             } else if (!this.isRemote(model.provider)) {
                 this.probeContext(modelId);

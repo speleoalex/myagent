@@ -222,13 +222,14 @@ async def _decide(
             configured = ModelConfig(**data)
 
     if configured is not None and configured.kind != CHAT_KIND:
-        # Configured explicitly, but it is an image generator: say so instead of
-        # falling back silently onto some other model, which would look like the
-        # setting had simply been ignored.
+        # Configured explicitly, but it is an image generator or an embedder:
+        # say so instead of falling back silently onto some other model, which
+        # would look like the setting had simply been ignored.
         return None, None, (
-            f"'{configured.name}' is an image generation model and cannot answer "
-            "a chat. Pick a chat model as the default in Settings — image models "
-            "are chosen separately, under Image generation."
+            f"'{configured.name}' is registered as a {configured.kind} model and "
+            "cannot answer a chat. Pick a chat model as the default in Settings "
+            "— image generators and embedders are chosen separately, each for "
+            "its own purpose."
         )
 
     if configured is not None:

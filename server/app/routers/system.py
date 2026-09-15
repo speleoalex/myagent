@@ -1,6 +1,7 @@
 import getpass
 import os
 import platform
+import re
 import secrets as secrets_mod
 import socket
 import sys
@@ -19,6 +20,11 @@ router = APIRouter()
 # this floor. Short enough to be typeable on a phone, long enough that the port
 # it protects is not worth guessing at.
 API_KEY_MIN_LEN = 12
+
+# The instance name is shown in a navbar brand and a browser tab, both of which
+# truncate; anything longer than this would be cut where the eye reads it.
+INSTANCE_NAME_MAX = 40
+_HEX_COLOR = re.compile(r"^#[0-9a-fA-F]{6}$")
 
 
 class ApiKeyUpdate(BaseModel):
@@ -43,6 +49,12 @@ async def info():
     except Exception:
         user = str(os.getuid()) if hasattr(os, "getuid") else "?"
     return {
+        # How this install introduces itself (Settings -> Server). Reported
+        # here and not only in /settings because the navbar needs it on every
+        # page load, and /settings carries fields nobody else should read for
+        # that. Empty name = the UI shows the hostname below.
+        "instance_name": config.settings.instance_name,
+        "instance_color": config.settings.instance_color,
         "user": user,
         "uid": os.getuid() if hasattr(os, "getuid") else None,
         "is_root": (os.getuid() == 0) if hasattr(os, "getuid") else False,
@@ -113,9 +125,10 @@ async def update_settings(new_settings: Settings, request: Request):
             raise HTTPException(
                 status_code=400,
                 detail=(f"'{raw.get('name') or emb}' cannot provide embeddings "
-                        f"({why}). Indexing sends the CONTENTS of your documents "
-                        "to the embedding endpoint, not just your question, so "
-                        "only a local model (Ollama or llama.cpp) can be used."))
+                        f"({why}). Register the embedder under Models with Kind = "
+                        "Embedding; it must be local (Ollama or llama.cpp), because "
+                        "indexing sends the CONTENTS of your documents to the "
+                        "embedding endpoint, not just your question."))
     # The image generator has no such rule and that asymmetry is deliberate:
     # what leaves the machine is a sentence written to be turned into a picture,
     # not the user's documents, so remote is allowed (see app.engine.imagegen).
@@ -143,6 +156,25 @@ async def update_settings(new_settings: Settings, request: Request):
             detail=(f"context_compact_at must be between 0.5 and 0.95 (got {at}): "
                     "below 0.5 it compresses turns that fit, above 0.95 there is "
                     "no room left to land in."))
+    # Identity: trimmed, bounded, and the colour either a full #rrggbb or
+    # empty. Normalised here rather than in the model so a hand-edited
+    # settings.json with an odd value still loads — it just shows as-is until
+    # the next save through the UI.
+    name = (new_settings.instance_name or "").strip()
+    if len(name) > INSTANCE_NAME_MAX:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"instance_name is too long ({len(name)} characters, max "
+                    f"{INSTANCE_NAME_MAX}): it has to fit a navbar brand and a "
+                    "browser tab."))
+    color = (new_settings.instance_color or "").strip().lower()
+    if color and not _HEX_COLOR.match(color):
+        raise HTTPException(
+            status_code=400,
+            detail=(f"instance_color must be a #rrggbb colour or empty (got "
+                    f"{color!r})."))
+    new_settings.instance_name = name
+    new_settings.instance_color = color
     save_settings(new_settings)
     config.settings = new_settings
     # The default model and the backend URLs are exactly what the fallback

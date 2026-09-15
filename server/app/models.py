@@ -18,14 +18,22 @@ _VALID_MCP_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{0,%d}$" % (MCP_ID_MAX_LEN - 1))
 
 
 # What a registered model is FOR. A model store that only ever held chat models
-# now also holds image generators, and almost every consumer wants exactly one
-# of the two: the agent form and the default-model resolver must never offer an
-# image generator, and the image tool must never be pointed at an LLM. One field
-# answers that, and "chat" is the default so every config written before this
-# existed keeps meaning what it meant.
+# now also holds image generators and embedders, and almost every consumer
+# wants exactly one of the three: the agent form and the default-model resolver
+# must never offer an image generator or an embedder, the image tool must never
+# be pointed at an LLM, and the semantic index must never be pointed at a
+# picture generator. One field answers that, and "chat" is the default so every
+# config written before this existed keeps meaning what it meant.
+#
+# "embedding" is advisory on the READ side: an embedder registered before the
+# kind existed carries "chat", and app.engine.embedding keeps accepting it, so
+# nobody has to re-register anything. What the kind buys is the other direction
+# — an embedding model is hidden from every chat picker, where it could only
+# produce a turn that answers nothing.
 CHAT_KIND = "chat"
+EMBED_KIND = "embedding"
 IMAGE_KIND = "image"
-MODEL_KINDS = (CHAT_KIND, IMAGE_KIND)
+MODEL_KINDS = (CHAT_KIND, EMBED_KIND, IMAGE_KIND)
 
 # Providers whose config may carry an api_key. The complement is not "not local"
 # but the LOCAL_PROVIDERS pair (ollama, llamacpp) specifically: an a1111 or
@@ -544,6 +552,17 @@ class Settings(BaseModel):
     # ~/myagent/logs/debug.log — full chat content on disk — so it is off by
     # default and meant to be turned on for a while, read, and turned off.
     debug: bool = False
+    # How THIS install introduces itself. Several MyAgent servers (the laptop,
+    # the Jetson in the kitchen, the one behind the public HTTPS name) serve a
+    # UI that looks identical, and the only thing telling them apart used to be
+    # the address bar — which a phone hides and an installed PWA has none of.
+    # The name goes into the navbar brand, the browser tab and the web-app
+    # manifest; the colour paints the brand so the eye tells two tabs apart
+    # before reading anything. Both empty by default: the UI then falls back to
+    # the hostname, which /system/info already reports, so a fresh install is
+    # still distinguishable without anyone having typed anything.
+    instance_name: str = ""
+    instance_color: str = ""
     # No connectors_base_url / connectors_api_key any more: notify_user reaches
     # the connectors plugin in-process, so there is no URL or bearer key to
     # configure. Pydantic ignores unknown keys, so an existing settings.json

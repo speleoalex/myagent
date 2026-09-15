@@ -861,14 +861,15 @@ const AgentsPage = {
         // nothing is kept as its own selected option instead: the reference is
         // dangling, and silently rewriting it to "default" on the next save would
         // hide that (same reasoning as the preserved orphan tool rows).
-        // Only chat models: the store also holds image generators, and electing
-        // one here would fail on the agent's first message with a 404 from a
-        // /v1/chat/completions that was never there. An agent already pointing
-        // at one therefore falls into the dangling-reference branch below, which
-        // is the honest outcome — it keeps the id visible and flags it.
-        // `|| 'chat'` because a model registered before the field existed has no
-        // kind, and it has always been a chat model.
-        const chatModels = models.filter(m => (m.kind || 'chat') !== 'image');
+        // Only chat models: the store also holds image generators and
+        // embedders, and electing one here would fail on the agent's first
+        // message with a 404 from a /v1/chat/completions that was never there.
+        // An agent already pointing at one therefore falls into the
+        // dangling-reference branch below, which is the honest outcome — it
+        // keeps the id visible and flags it. `|| 'chat'` because a model
+        // registered before the field existed has no kind, and it has always
+        // been a chat model.
+        const chatModels = models.filter(m => (m.kind || 'chat') === 'chat');
         const modelMissing = !!agent.model_id && agent.model_id !== 'default'
             && !chatModels.some(m => m.id === agent.model_id);
         const modelIsDefault = !agent.model_id || agent.model_id === 'default';

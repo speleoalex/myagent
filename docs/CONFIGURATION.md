@@ -56,10 +56,12 @@ Prefer `a1111` for a local backend: it is the only shape that carries
 `strength`, `steps`, `seed` and a negative prompt — the OpenAI shape has no
 field for them and the tools say so when they are dropped.
 
-- **Image models never show up as chat models.** The chat picker, the agent
-  form and the default-model fallback all skip kind *Image*, and the server
-  refuses one wherever a chat model is expected — it cannot answer a
-  conversation.
+- **Only chat models show up as chat models.** The chat picker, the agent
+  form and the default-model fallback all skip kind *Image* and kind
+  *Embedding*, and the server refuses either wherever a chat model is expected
+  — neither can answer a conversation. Likewise Settings → *Image generation*
+  lists only kind *Image* and Settings → *Embedding model* only kind
+  *Embedding*: each select offers exactly what can do the job.
 - **A remote provider is allowed here**, unlike the embedder below: only the
   prompt the agent wrote leaves the machine, never your documents.
 - **Defaults live on the model**, in its *Options* (`width`, `height`, `steps`,
@@ -111,7 +113,7 @@ There are two ways to provide the embeddings.
 | Option | What it needs |
 |---|---|
 | **In this process** (recommended) | the optional `fastembed` package: `server/.venv/bin/pip install fastembed`, then pick *In this process* in Settings. No server, no model to pull, no model to register. The first index run downloads a 241 MB multilingual model into `~/myagent/cache/embed-models/`; `install.sh` offers to fetch it up front. |
-| **An embedding endpoint** | a local embedding model pulled and registered under *Models* (e.g. `ollama pull embeddinggemma:300m`), then picked in Settings. Use this when you already run one, or want a specific model. |
+| **An embedding endpoint** | a local embedding model pulled and registered under *Models* with *What it is for* = **Embedding** (e.g. `ollama pull embeddinggemma:300m`), then picked in Settings. Use this when you already run one, or want a specific model. An embedder registered as *Chat* before that kind existed keeps working, but is listed only while it is the one in use — re-save it as *Embedding* to get it out of the chat pickers. |
 
 - **Nothing leaves this machine.** Indexing sends the CONTENTS of your
   documents to the embedder — not just your question — so a remote provider is
@@ -250,3 +252,14 @@ under **Settings**:
   `MYAGENT_API_KEY` when that is set.
 - **MyAgent server** — a browser-side preference, for when the UI is served
   from somewhere other than the API.
+- **Instance name and color** (Settings → *Server*) — how this install
+  introduces itself: the name appears next to the *MyAgent* brand in the
+  navbar, in the browser tab title, on the home page and as the name of the
+  installed app; the color fills that badge and draws a stripe under the
+  navbar. Two servers with the same UI are otherwise indistinguishable
+  without reading the URL — which a reverse proxy, an installed app or a
+  phone hides. Leave the name empty and the host name is shown instead.
+
+The Settings page is split into tabs (*General*, *Models*, *Advanced*,
+*Access*, *Server*); the tab is part of the URL (`#/settings/models`), so a
+link can point at one.

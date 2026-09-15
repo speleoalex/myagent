@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from app import config
@@ -349,6 +349,33 @@ class _ShellStaticFiles(StaticFiles):
 
 
 if STATIC_DIR.is_dir():
+    @app.get("/manifest.webmanifest", include_in_schema=False)
+    async def manifest():
+        """The static manifest with THIS server's name stamped in.
+
+        Two MyAgent servers installed as apps on the same phone would both be
+        called "MyAgent" — the manifest's name is the installed app's name, and
+        the only place it can be told apart is here, when the browser fetches it
+        during installation. So the file on disk is a template: `instance_name`
+        from Settings replaces `name`/`short_name` when set, and the file is
+        served verbatim otherwise. Registered before the static mount because
+        the mount would otherwise answer first. Same no-cache policy as
+        _ShellStaticFiles, so a rename reaches the browser on the next visit.
+        """
+        import json
+        raw = (STATIC_DIR / "manifest.webmanifest").read_text(encoding="utf-8")
+        name = (getattr(config.settings, "instance_name", "") or "").strip()
+        if name:
+            try:
+                data = json.loads(raw)
+                data["name"] = f"MyAgent · {name}"
+                data["short_name"] = name[:12]
+                raw = json.dumps(data, ensure_ascii=False, indent=2)
+            except ValueError:
+                pass  # a hand-edited, broken manifest is served as it is
+        return Response(raw, media_type="application/manifest+json",
+                        headers={"Cache-Control": "no-cache"})
+
     app.mount("/", _ShellStaticFiles(directory=STATIC_DIR, html=True), name="static")
 else:
     # Deliberately NOT mkdir'd. An empty directory mounts happily and then

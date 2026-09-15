@@ -39,6 +39,7 @@ import logging
 
 from app import config
 from app.engine.default_model import LOCAL_PROVIDERS
+from app.models import IMAGE_KIND
 
 log = logging.getLogger(__name__)
 
@@ -83,6 +84,11 @@ def rejection_reason(raw: dict) -> str:
     """Why this model config cannot provide embeddings, or "" if it can."""
     if not raw:
         return "no such model"
+    # Kind "embedding" or "chat" both pass: embedders registered before the
+    # kind existed say "chat" and still work. Only a picture generator is
+    # refused by kind — its endpoint has no /v1/embeddings to speak of.
+    if raw.get("kind") == IMAGE_KIND:
+        return "it is an image generator, not an embedding model"
     if raw.get("api_key"):
         return "it carries an api_key"
     if raw.get("provider") not in LOCAL_PROVIDERS:

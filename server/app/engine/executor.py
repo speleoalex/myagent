@@ -146,15 +146,16 @@ class Stores:
 
 
 def _refuse_image_model(cfg: ModelConfig, where: str) -> None:
-    """A kind=image model can't serve a chat turn; say so before the first
-    /v1/chat/completions comes back as a 404. The UI hides them from both
-    pickers, but the id also travels in the request body and in agent files
-    edited by hand; resolve_default has the same guard for the default."""
+    """A model that is not kind=chat (an image generator, an embedder) can't
+    serve a chat turn; say so before the first /v1/chat/completions comes back
+    as a 404. The UI hides them from both pickers, but the id also travels in
+    the request body and in agent files edited by hand; resolve_default has
+    the same guard for the default."""
     if cfg.kind != CHAT_KIND:
         raise ValueError(
-            f"'{cfg.name}' ({where}) is an image generation model and cannot "
-            "answer a chat. Pick a chat model; image models are used through "
-            "the generate_image tool, chosen under Settings -> Image generation."
+            f"'{cfg.name}' ({where}) is registered as a {cfg.kind} model and "
+            "cannot answer a chat. Pick a chat model; image generators and "
+            "embedders are chosen for their own purpose under Settings -> Models."
         )
 
 

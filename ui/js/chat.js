@@ -32,9 +32,9 @@ const ChatPage = {
         // selector at all — the chat itself must not depend on this list.
         let models = [];
         try { models = await App.api('GET', '/models'); } catch (e) { /* empty */ }
-        // Chat models only: an image generator lives in the same store but
-        // cannot answer a message. Absent kind = chat (pre-image stores).
-        models = models.filter(m => (m.kind || 'chat') !== 'image');
+        // Chat models only: image generators and embedders live in the same
+        // store but cannot answer a message. Absent kind = chat (older stores).
+        models = models.filter(m => (m.kind || 'chat') === 'chat');
         this.models = models;
 
         if (agents.length === 0) {

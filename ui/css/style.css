@@ -11,6 +11,28 @@ body {
     min-height: calc(100vh - var(--nav-h) - 1rem);
 }
 
+/* ---- Instance identity (App.applyInstance) ------------------------------- */
+
+/* The server's name next to the brand. Neutral outline when it has no color
+   (the label alone already tells two servers apart); filled with the chosen
+   color otherwise, text color computed for contrast in JS. */
+.brand-instance {
+    margin-left: 0.5rem;
+    font-size: 0.7rem;
+    font-weight: 500;
+    vertical-align: middle;
+    border: 1px solid rgba(255, 255, 255, 0.35);
+    color: rgba(255, 255, 255, 0.75);
+}
+.brand-instance.brand-instance-colored {
+    border-color: transparent;
+}
+/* The same color as a stripe under the whole navbar: readable at a glance
+   on every page, even one with the brand scrolled out of a phone's view. */
+.navbar-instance-colored {
+    border-bottom-width: 3px !important;
+}
+
 /* ---- Home dashboard ------------------------------------------------------ */
 
 .home-wrap {

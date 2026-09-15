@@ -1,17 +1,40 @@
 const SettingsPage = {
-    async render() {
+    /** The page is five TABS routed as #/settings/<tab>, all in the DOM at
+     * once behind one form. Tabs and not collapsibles: the page had grown to
+     * nine sections under one scrollbar, and the questions they answer are
+     * unrelated ("which theme" next to "which embedder" next to "is Ollama
+     * up"). A tab reached by URL is also a tab you can send someone to.
+     * Everything stays rendered so a single Save reads every field, and the
+     * pollers (index status, PWA state) keep their element ids.
+     */
+    TABS: ['general', 'models', 'advanced', 'access', 'server'],
+
+    async render(params = []) {
+        const tab = this.TABS.includes(params[0]) ? params[0] : 'general';
+
         let settings = {};
         try { settings = await App.api('GET', '/system/settings'); } catch (e) { /* empty */ }
 
         let models = [];
         try { models = await App.api('GET', '/models'); } catch (e) { /* empty */ }
+        // Each select lists exactly the KIND it is for. `|| 'chat'` because a
+        // config written before the field existed has no kind, and it has
+        // always been a chat model.
+        const kindOf = (m) => m.kind || 'chat';
+        const isLocal = (m) => m.provider === 'ollama' || m.provider === 'llamacpp';
+        const chatModels = models.filter(m => kindOf(m) === 'chat');
+        const imageModels = models.filter(m => kindOf(m) === 'image');
         // Only a LOCAL model can embed — see the select below for why.
-        const localModels = models.filter(m => m.provider === 'ollama' || m.provider === 'llamacpp');
-        // The store holds models of two KINDS and each select wants exactly
-        // one of them. `|| 'chat'` because a config written before the field
-        // existed has no kind, and it has always been a chat model.
-        const chatModels = models.filter(m => (m.kind || 'chat') !== 'image');
-        const imageModels = models.filter(m => m.kind === 'image');
+        const embedModels = models.filter(m => kindOf(m) === 'embedding' && isLocal(m));
+        // An embedder registered as "chat" before the Embedding kind existed
+        // still works (the read side never refused it) — but it is listed only
+        // while it is the one in use, with a nudge to re-register it. Dropping
+        // it from the select would silently save "" over a working choice.
+        const legacyEmbed = settings.embedding_model_id
+            && settings.embedding_model_id !== 'local'
+            && !embedModels.some(m => m.id === settings.embedding_model_id)
+            ? models.find(m => m.id === settings.embedding_model_id && isLocal(m))
+            : null;
         // Whether the in-process embedder can be offered at all. Asked here
         // rather than in renderIndexStatus because the answer decides whether
         // an <option> exists: offering one that can only answer 400 is the
@@ -20,34 +43,68 @@ const SettingsPage = {
         try { idx = await App.api('GET', '/index/status'); } catch (e) { /* no service */ }
         const localEmbed = !!(idx && idx.local_available);
 
+        const opt = (m, selected) =>
+            `<option value="${App.escAttr(m.id)}" ${m.id === selected ? 'selected' : ''}>${App.esc(m.name)} (${App.esc(m.provider)})</option>`;
+        const ctxPct = Math.round((settings.context_compact_at ?? 0.9) * 100);
+        const color = settings.instance_color || '';
+
+        const tabBtn = (key, icon, label) => `
+            <li class="nav-item" role="presentation">
+                <button class="nav-link ${tab === key ? 'active' : ''}" type="button" role="tab"
+                        data-bs-toggle="tab" data-bs-target="#pane-${key}" data-tab="${key}">
+                    <i class="bi ${icon}"></i> <span class="d-none d-sm-inline">${label}</span>
+                </button>
+            </li>`;
+        const pane = (key, body) =>
+            `<div class="tab-pane fade ${tab === key ? 'show active' : ''}" id="pane-${key}" role="tabpanel">${body}</div>`;
+        const saveBtn = `<button type="submit" class="btn btn-primary">${i18n('settings.save')}</button>`;
+
         App.container.innerHTML = `
             <div class="row">
                 <div class="col-lg-8 mx-auto">
                     <h3><i class="bi bi-gear"></i> ${i18n('settings.title')}</h3>
 
-                    <!-- Appearance: client-side preferences (apply immediately,
-                         stored in localStorage — not part of the server form). -->
-                    <h5 class="mt-3">${i18n('settings.appearance')}</h5>
-                    <div class="row g-3 mb-2">
-                        <div class="col-sm-6">
-                            <label class="form-label"><i class="bi bi-translate"></i> ${i18n('settings.language')}</label>
-                            <select class="form-select" id="f-language">
-                                <option value="en" ${I18n.locale === 'en' ? 'selected' : ''}>English</option>
-                                <option value="it" ${I18n.locale === 'it' ? 'selected' : ''}>Italiano</option>
-                            </select>
+                    <ul class="nav nav-tabs mt-3 mb-3" id="settings-tabs" role="tablist">
+                        ${tabBtn('general', 'bi-sliders', i18n('settings.tabGeneral'))}
+                        ${tabBtn('models', 'bi-box', i18n('settings.tabModels'))}
+                        ${tabBtn('advanced', 'bi-wrench-adjustable', i18n('settings.tabAdvanced'))}
+                        ${tabBtn('access', 'bi-key', i18n('settings.tabAccess'))}
+                        ${tabBtn('server', 'bi-hdd-network', i18n('settings.tabServer'))}
+                    </ul>
+
+                    <!-- One form around every pane: the panes are all in the
+                         DOM, so a Save from any of them sends the whole thing.
+                         Every button drawn by the helper boxes is type=button. -->
+                    <form id="settings-form">
+                    <div class="tab-content">
+
+                    ${pane('general', `
+                        <!-- Appearance: client-side preferences (apply immediately,
+                             stored in localStorage — not part of the server form). -->
+                        <h5>${i18n('settings.appearance')}</h5>
+                        <div class="row g-3 mb-4">
+                            <div class="col-sm-6">
+                                <label class="form-label"><i class="bi bi-translate"></i> ${i18n('settings.language')}</label>
+                                <select class="form-select" id="f-language">
+                                    <option value="en" ${I18n.locale === 'en' ? 'selected' : ''}>English</option>
+                                    <option value="it" ${I18n.locale === 'it' ? 'selected' : ''}>Italiano</option>
+                                </select>
+                            </div>
+                            <div class="col-sm-6">
+                                <label class="form-label"><i class="bi bi-circle-half"></i> ${i18n('settings.theme')}</label>
+                                <select class="form-select" id="f-theme">
+                                    <option value="light" ${ThemeManager.getCurrentTheme() === 'light' ? 'selected' : ''}>${i18n('settings.themeLight')}</option>
+                                    <option value="dark" ${ThemeManager.getCurrentTheme() === 'dark' ? 'selected' : ''}>${i18n('settings.themeDark')}</option>
+                                </select>
+                            </div>
                         </div>
-                        <div class="col-sm-6">
-                            <label class="form-label"><i class="bi bi-circle-half"></i> ${i18n('settings.theme')}</label>
-                            <select class="form-select" id="f-theme">
-                                <option value="light" ${ThemeManager.getCurrentTheme() === 'light' ? 'selected' : ''}>${i18n('settings.themeLight')}</option>
-                                <option value="dark" ${ThemeManager.getCurrentTheme() === 'dark' ? 'selected' : ''}>${i18n('settings.themeDark')}</option>
-                            </select>
-                        </div>
+
                         <!-- Which server this UI talks to — a BROWSER preference
                              like the two above, because the UI is static HTML that
                              may be hosted anywhere (Apache, nginx) away from the
                              API. Empty = same origin, i.e. the classic setup. -->
-                        <div class="col-12">
+                        <h5>${i18n('settings.connection')}</h5>
+                        <div class="mb-4">
                             <label class="form-label"><i class="bi bi-hdd-network"></i> ${i18n('settings.serverBase')}</label>
                             <div class="input-group">
                                 <input type="text" class="form-control" id="f-server-base"
@@ -57,26 +114,30 @@ const SettingsPage = {
                             </div>
                             <small class="text-secondary">${i18n('settings.serverBaseHint')}</small>
                         </div>
-                    </div>
 
-                    <hr class="my-4">
+                        <!-- Install the UI as an app. Client-side only: nothing
+                             here touches the server's settings. -->
+                        <h5>${i18n('settings.install')}</h5>
+                        <div id="install-box" class="mb-3"></div>
+                    `)}
 
-                    <form id="settings-form">
+                    ${pane('models', `
                         <div class="mb-3">
                             <label class="form-label">${i18n('settings.defaultModel')}</label>
                             <select class="form-select" id="f-default-model">
                                 <option value="">${i18n('settings.noDefaultModel')}</option>
-                                ${chatModels.map(m => `<option value="${App.escAttr(m.id)}" ${m.id === settings.default_model_id ? 'selected' : ''}>${App.esc(m.name)} (${App.esc(m.provider)})</option>`).join('')}
+                                ${chatModels.map(m => opt(m, settings.default_model_id)).join('')}
                             </select>
                             <small class="text-secondary">${i18n('settings.defaultModelHint')}</small>
                         </div>
                         <div class="mb-3">
                             <label class="form-label">${i18n('settings.embeddingModel')}</label>
-                            <!-- LOCAL providers only, and this filter is NOT the
-                                 enforcement: indexing sends the CONTENTS of every
-                                 document to this endpoint, so app/engine/embedding.py
-                                 refuses a remote one whatever is stored. Listing
-                                 remote models here would only offer a 400. -->
+                            <!-- Kind = embedding AND local, and this filter is NOT
+                                 the enforcement: indexing sends the CONTENTS of
+                                 every document to this endpoint, so
+                                 app/engine/embedding.py refuses a remote one
+                                 whatever is stored. Listing remote models here
+                                 would only offer a 400. -->
                             <select class="form-select" id="f-embedding-model">
                                 <option value="">${i18n('settings.noEmbeddingModel')}</option>
                                 <!-- The in-process backend goes FIRST: it needs
@@ -84,17 +145,21 @@ const SettingsPage = {
                                      config, so it is the one most people want.
                                      Listed only when fastembed is importable. -->
                                 ${localEmbed ? `<option value="local" ${settings.embedding_model_id === 'local' ? 'selected' : ''}>${App.esc(i18n('settings.embeddingLocal'))}</option>` : ''}
-                                ${localModels.map(m => `<option value="${App.escAttr(m.id)}" ${m.id === settings.embedding_model_id ? 'selected' : ''}>${App.esc(m.name)} (${App.esc(m.provider)})</option>`).join('')}
+                                ${embedModels.map(m => opt(m, settings.embedding_model_id)).join('')}
+                                ${legacyEmbed ? `<option value="${App.escAttr(legacyEmbed.id)}" selected>${App.esc(legacyEmbed.name)} (${App.esc(legacyEmbed.provider)}) — ${App.esc(i18n('settings.embeddingLegacyOption'))}</option>` : ''}
                             </select>
                             <small class="text-secondary">${i18n('settings.embeddingModelHint')}</small>
                             <div id="index-rebuild-warn" class="form-text text-warning-emphasis d-none">
                                 <i class="bi bi-exclamation-triangle"></i> ${i18n('settings.embeddingModelChanged')}
                             </div>
+                            ${legacyEmbed ? `<div class="form-text text-warning-emphasis">
+                                <i class="bi bi-exclamation-triangle"></i> ${i18n('settings.embeddingLegacyHint')}
+                            </div>` : ''}
                             ${localEmbed ? '' : `<div class="form-text">
                                 <i class="bi bi-info-circle"></i> ${i18n('settings.embeddingLocalHint')}
                                 <code>server/.venv/bin/pip install fastembed</code>
                             </div>`}
-                            ${localModels.length ? '' : `<div class="form-text">
+                            ${embedModels.length ? '' : `<div class="form-text">
                                 <i class="bi bi-info-circle"></i> ${i18n('settings.noEmbeddingModelHint')}
                                 <code>ollama pull embeddinggemma:300m</code>
                             </div>`}
@@ -109,28 +174,35 @@ const SettingsPage = {
                                  model, wherever it lives. -->
                             <select class="form-select" id="f-image-model">
                                 <option value="">${i18n('settings.noImageModel')}</option>
-                                ${imageModels.map(m => `<option value="${App.escAttr(m.id)}" ${m.id === settings.image_model_id ? 'selected' : ''}>${App.esc(m.name)} (${App.esc(m.provider)})</option>`).join('')}
+                                ${imageModels.map(m => opt(m, settings.image_model_id)).join('')}
                             </select>
                             <small class="text-secondary">${i18n('settings.imageModelHint')}</small>
                             ${imageModels.length ? '' : `<div class="form-text">
                                 <i class="bi bi-info-circle"></i> ${i18n('settings.noImageModelHint')}
                             </div>`}
                         </div>
-                        <div class="mb-3">
-                            <label class="form-label">${i18n('settings.ollamaUrl')}</label>
-                            <input type="text" class="form-control" id="f-ollama-url" value="${App.esc(settings.ollama_base_url || 'http://localhost:11434')}">
+                        <h5 class="mt-4">${i18n('settings.backends')}</h5>
+                        <div class="row g-3 mb-3">
+                            <div class="col-sm-6">
+                                <label class="form-label">${i18n('settings.ollamaUrl')}</label>
+                                <input type="text" class="form-control" id="f-ollama-url" value="${App.escAttr(settings.ollama_base_url || 'http://localhost:11434')}">
+                            </div>
+                            <div class="col-sm-6">
+                                <label class="form-label">${i18n('settings.llamacppUrl')}</label>
+                                <input type="text" class="form-control" id="f-llamacpp-url" value="${App.escAttr(settings.llamacpp_base_url || 'http://localhost:8080')}">
+                            </div>
                         </div>
-                        <div class="mb-3">
-                            <label class="form-label">${i18n('settings.llamacppUrl')}</label>
-                            <input type="text" class="form-control" id="f-llamacpp-url" value="${App.esc(settings.llamacpp_base_url || 'http://localhost:8080')}">
-                        </div>
+                        ${saveBtn}
+                    `)}
+
+                    ${pane('advanced', `
                         <div class="mb-3">
                             <label class="form-label" for="f-ctx-compact">${i18n('settings.contextCompact')}</label>
                             <div class="d-flex align-items-center gap-2">
                                 <input type="range" class="form-range" id="f-ctx-compact"
                                        min="50" max="95" step="5" style="max-width:14rem"
-                                       value="${Math.round((settings.context_compact_at ?? 0.9) * 100)}">
-                                <span class="text-secondary small" id="f-ctx-compact-val">${Math.round((settings.context_compact_at ?? 0.9) * 100)}%</span>
+                                       value="${ctxPct}">
+                                <span class="text-secondary small" id="f-ctx-compact-val">${ctxPct}%</span>
                             </div>
                             <div class="form-text">${i18n('settings.contextCompactHint')}</div>
                         </div>
@@ -141,43 +213,79 @@ const SettingsPage = {
                             <div class="form-text">${i18n('settings.debugHint')}</div>
                             <div id="debug-box" class="mt-2"></div>
                         </div>
-                        <button type="submit" class="btn btn-primary">${i18n('settings.save')}</button>
+                        ${saveBtn}
+                    `)}
+
+                    ${pane('access', `
+                        <!-- API key: a SERVER setting, but with its own box because
+                             saving it also has to update this browser's stored copy
+                             (the next request would 401 otherwise). -->
+                        <h5>${i18n('settings.apiKey')}</h5>
+                        <div id="api-key-box" class="mb-3">
+                            <div class="spinner-border spinner-border-sm"></div>
+                        </div>
+                    `)}
+
+                    ${pane('server', `
+                        <!-- Instance identity: a name and a color this server
+                             shows in the navbar, the tab title and the installed
+                             app, so two MyAgent servers can be told apart without
+                             reading the URL. Server-side, so every browser and
+                             every installed copy of the UI shows the same thing. -->
+                        <h5>${i18n('settings.identity')}</h5>
+                        <div class="row g-3 mb-2">
+                            <div class="col-sm-7">
+                                <label class="form-label" for="f-instance-name">${i18n('settings.instanceName')}</label>
+                                <input type="text" class="form-control" id="f-instance-name" maxlength="40"
+                                       value="${App.escAttr(settings.instance_name || '')}"
+                                       placeholder="${App.escAttr(App.instance && App.instance.hostname || i18n('settings.instanceNamePlaceholder'))}">
+                            </div>
+                            <div class="col-sm-5">
+                                <label class="form-label" for="f-instance-color">${i18n('settings.instanceColor')}</label>
+                                <div class="d-flex align-items-center gap-2">
+                                    <input type="color" class="form-control form-control-color" id="f-instance-color"
+                                           value="${App.escAttr(color || '#0d6efd')}" ${color ? '' : 'disabled'}>
+                                    <div class="form-check mb-0">
+                                        <input class="form-check-input" type="checkbox" id="f-instance-color-on" ${color ? 'checked' : ''}>
+                                        <label class="form-check-label" for="f-instance-color-on">${i18n('settings.instanceColorOn')}</label>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="form-text mb-3">${i18n('settings.identityHint')}</div>
+                        ${saveBtn}
+
+                        <hr class="my-4">
+
+                        <!-- Server identity: which account the process runs as
+                             and which directories it really uses. Read-only. -->
+                        <h5>${i18n('settings.server')}</h5>
+                        <div id="server-info" class="mb-3">
+                            <div class="spinner-border spinner-border-sm"></div> ${i18n('settings.checking')}
+                        </div>
+
+                        <hr class="my-4">
+
+                        <h5>${i18n('settings.systemStatus')}</h5>
+                        <div id="status-checks" class="mb-3">
+                            <div class="spinner-border spinner-border-sm"></div> ${i18n('settings.checking')}
+                        </div>
+                    `)}
+
+                    </div>
                     </form>
-
-                    <hr class="my-4">
-
-                    <!-- API key: a SERVER setting, but with its own box because
-                         saving it also has to update this browser's stored copy
-                         (the next request would 401 otherwise). -->
-                    <h5>${i18n('settings.apiKey')}</h5>
-                    <div id="api-key-box" class="mb-3">
-                        <div class="spinner-border spinner-border-sm"></div>
-                    </div>
-
-                    <hr class="my-4">
-
-                    <!-- Install the UI as an app. Client-side only: nothing
-                         here touches the server's settings. -->
-                    <h5>${i18n('settings.install')}</h5>
-                    <div id="install-box" class="mb-3"></div>
-
-                    <hr class="my-4">
-
-                    <!-- Server identity: which account the process runs as
-                         and which directories it really uses. Read-only. -->
-                    <h5>${i18n('settings.server')}</h5>
-                    <div id="server-info" class="mb-3">
-                        <div class="spinner-border spinner-border-sm"></div> ${i18n('settings.checking')}
-                    </div>
-
-                    <hr class="my-4">
-
-                    <h5>${i18n('settings.systemStatus')}</h5>
-                    <div id="status-checks" class="mb-3">
-                        <div class="spinner-border spinner-border-sm"></div> ${i18n('settings.checking')}
-                    </div>
                 </div>
             </div>`;
+
+        // Switching a tab rewrites the hash WITHOUT navigating: a hashchange
+        // would re-render the page (re-fetching everything and dropping any
+        // half-edited field), while replaceState only keeps the URL honest so
+        // a reload or a shared link lands on the same tab.
+        document.querySelectorAll('#settings-tabs [data-tab]').forEach(btn => {
+            btn.addEventListener('shown.bs.tab', () => {
+                history.replaceState(null, '', `#/settings/${btn.dataset.tab}`);
+            });
+        });
 
         // Language: applies immediately and re-renders the app (so this page
         // re-renders with the new locale, keeping the select in sync).
@@ -200,6 +308,12 @@ const SettingsPage = {
             location.reload();
         };
 
+        // The color picker cannot say "none" (it always holds a value), hence
+        // the switch next to it: off = no color stored.
+        const colorOn = document.getElementById('f-instance-color-on');
+        const colorInput = document.getElementById('f-instance-color');
+        colorOn.onchange = () => { colorInput.disabled = !colorOn.checked; };
+
         document.getElementById('settings-form').onsubmit = async (e) => {
             e.preventDefault();
             const data = {
@@ -213,6 +327,8 @@ const SettingsPage = {
                 // that is what the label reads.
                 context_compact_at:
                     Number(document.getElementById('f-ctx-compact').value) / 100,
+                instance_name: document.getElementById('f-instance-name').value.trim(),
+                instance_color: colorOn.checked ? colorInput.value : '',
             };
             try {
                 await App.api('PUT', '/system/settings', data);
@@ -225,13 +341,13 @@ const SettingsPage = {
                 this.renderDebugBox();
                 document.getElementById('index-rebuild-warn').classList.add('d-none');
                 this.renderIndexStatus();
+                // The navbar is what the identity is FOR: refresh it now.
+                App.loadInstance();
             } catch (err) {
                 App.toast(err.message, 'danger');
             }
         };
 
-        // Changing the embedder discards every index. Say so BEFORE the save,
-        // not after hours of re-indexing.
         const ctxSlider = document.getElementById('f-ctx-compact');
         if (ctxSlider) {
             ctxSlider.oninput = () => {
@@ -239,6 +355,8 @@ const SettingsPage = {
                     ctxSlider.value + '%';
             };
         }
+        // Changing the embedder discards every index. Say so BEFORE the save,
+        // not after hours of re-indexing.
         document.getElementById('f-embedding-model').onchange = (e) => {
             const prev = settings.embedding_model_id || '';
             document.getElementById('index-rebuild-warn')
@@ -593,6 +711,7 @@ const SettingsPage = {
             ? ` <span class="badge text-bg-warning ms-1">${i18n('settings.serverRoot')}</span>` : '';
         box.innerHTML = `
             <table class="table table-sm table-borderless mb-0 w-auto">
+                ${info.instance_name ? row(i18n('settings.instanceName'), info.instance_name) : ''}
                 ${row(i18n('settings.serverUser'), info.uid != null ? `${info.user} (uid ${info.uid})` : info.user, rootWarn)}
                 ${row(i18n('settings.serverHost'), info.hostname)}
                 ${row(i18n('settings.serverHome'), info.home_dir)}

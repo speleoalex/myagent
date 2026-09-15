@@ -22,10 +22,67 @@ const App = {
         // Not awaited: the other pages must not wait on the network to render.
         // Pages that need it await pluginsReady(), sharing this same promise.
         this.pluginsReady();
+        // Which server this is — name and color in the navbar. Not awaited
+        // either: the pages render, the brand fills in when /system/info
+        // answers (renderHome awaits it, it wants the name in its title).
+        this.instancePromise = this.loadInstance();
         window.addEventListener('hashchange', () => this.route());
         this._wireReveal();
         this.route();
         this.updateActiveNav();
+    },
+
+    /** Identity of the server this UI is talking to: {label, name, color,
+     * hostname}, or null before /system/info has answered. Two MyAgent
+     * instances look identical otherwise, and "which one am I on" is a
+     * question the URL bar answers badly (a reverse proxy, an installed PWA
+     * and a phone all hide it). */
+    instance: null,
+    instancePromise: null,
+
+    async loadInstance() {
+        let info = null;
+        try { info = await this.api('GET', '/system/info'); } catch (e) { /* older server, or down */ }
+        this.applyInstance(info);
+        return this.instance;
+    },
+
+    /** Paint the identity into the chrome that is outside the SPA container.
+     *
+     * Label = the name the user gave in Settings -> Server, else the host
+     * name: a server that was never named is still told apart from the next
+     * one. The color goes on the badge and as a 3px stripe under the navbar,
+     * which is visible from across the room in a way a word is not. */
+    applyInstance(info) {
+        const name = ((info && info.instance_name) || '').trim();
+        const hostname = ((info && info.hostname) || '').trim();
+        const color = /^#[0-9a-fA-F]{6}$/.test((info && info.instance_color) || '')
+            ? info.instance_color.toLowerCase() : '';
+        const label = name || hostname;
+        this.instance = { label, name, color, hostname };
+
+        const badge = document.getElementById('brand-instance');
+        if (badge) {
+            badge.textContent = label;
+            badge.classList.toggle('d-none', !label);
+            badge.style.backgroundColor = color;
+            badge.style.color = color ? this._contrastText(color) : '';
+            badge.classList.toggle('brand-instance-colored', !!color);
+        }
+        const nav = document.querySelector('nav.navbar');
+        if (nav) {
+            nav.style.borderBottomColor = color;
+            nav.classList.toggle('navbar-instance-colored', !!color);
+        }
+        document.title = label ? `${label} · MyAgent` : 'MyAgent';
+    },
+
+    /** Black or white, whichever reads on this background (WCAG luminance). */
+    _contrastText(hex) {
+        const n = parseInt(hex.slice(1), 16);
+        const lum = (c) => { c /= 255; return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; };
+        const L = 0.2126 * lum(n >> 16) + 0.7152 * lum((n >> 8) & 255) + 0.0722 * lum(n & 255);
+        return L > 0.4 ? '#000' : '#fff';
     },
 
     /** Publish the navbar's REAL height as --nav-h, so the CSS that sizes the
@@ -386,7 +443,7 @@ const App = {
     async renderHome() {
         // Each call caught on its own: the dashboard degrades panel by panel
         // (an older server without /tasks must not blank the whole page).
-        const [agents, models, tools, tasks, ready] = await Promise.all([
+        const [agents, models, tools, tasks, ready, inst] = await Promise.all([
             this.api('GET', '/agents').catch(() => []),
             this.api('GET', '/models').catch(() => []),
             this.api('GET', '/tools').catch(() => []),
@@ -395,6 +452,8 @@ const App = {
             // are non-zero even on a completely broken install (everything
             // is seeded), so they cannot carry this signal themselves.
             this.api('GET', '/system/ready').catch(() => null),
+            // Which server this is: the title says so, see applyInstance.
+            this.instancePromise || Promise.resolve(this.instance),
         ]);
 
         // "N live" under the agents counter, next due run under the tasks one:
@@ -408,6 +467,12 @@ const App = {
             <div class="home-wrap mx-auto mt-4">
                 <div class="text-center">
                     <h1><i class="bi bi-robot"></i> MyAgent</h1>
+                    ${inst && inst.label ? `<div class="home-instance mb-2">
+                        <span class="badge rounded-pill ${inst.color ? '' : 'text-bg-secondary'}"
+                              ${inst.color ? `style="background-color:${this.escAttr(inst.color)};color:${this._contrastText(inst.color)}"` : ''}>
+                            <i class="bi bi-hdd-network"></i> ${this.esc(inst.label)}
+                        </span>
+                    </div>` : ''}
                     <p class="lead text-secondary mb-3">${i18n('home.subtitle')}</p>
                     <a href="#/chat" class="btn btn-primary btn-lg px-4 home-chat-cta">
                         <i class="bi bi-chat-dots-fill"></i> ${this.esc(i18n('home.openChat'))}
