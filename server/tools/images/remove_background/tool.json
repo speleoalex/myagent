@@ -6,11 +6,11 @@
     "properties": {
       "image": {
         "type": "string",
-        "description": "Path of the source image in the workspace (as printed by list_dir or by another image tool). PNG, JPEG or WebP."
+        "description": "Path of the source image in the workspace, exactly as printed by list_dir or by another tool, folder included (e.g. '_attachments/photo.jpg' for a file the user attached). PNG, JPEG or WebP."
       },
       "background": {
         "type": "string",
-        "description": "What goes behind the subject: 'transparent' (default), a colour name or hex code ('blue', 'white', '#1e3a8a'), or the path of a workspace image, which is scaled and centre-cropped to the size of the source."
+        "description": "What goes behind the subject: 'transparent' (default), a colour name or hex code ('blue', 'white', '#1e3a8a'), or the PATH of a workspace image, which is scaled and centre-cropped to the size of the source. Never a description of a scene: to get a new scene, draw it first with generate_image and pass the file it saved here."
       },
       "filename": {
         "type": "string",

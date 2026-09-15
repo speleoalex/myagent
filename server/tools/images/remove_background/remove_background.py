@@ -128,8 +128,8 @@ def load_image(param, what):
     p = Path(str(param)).expanduser()
     if not p.is_file():
         fail(f"{what} not found: {param}. Use the exact path printed by list_dir "
-             "or by the tool that produced it; the file must already exist in the "
-             "workspace.")
+             "or by the tool that produced it, including any folder such as "
+             "'_attachments/'; the file must already exist in the workspace.")
     try:
         img = Image.open(p)
         img.load()
@@ -189,8 +189,11 @@ def parse_background(value):
     p = Path(v).expanduser()
     if p.is_file():
         return "image", p
-    fail(f"background '{value}' is neither a colour Pillow knows (e.g. 'blue', "
-         "'#1e3a8a') nor an existing workspace image.")
+    fail(f"background '{value}' is neither a colour (e.g. 'blue', '#1e3a8a', "
+         "'transparent') nor the path of an existing workspace image. A background "
+         "is never a description: to put the subject in a new scene, first draw the "
+         "scene with generate_image, then call remove_background again with "
+         "background=<the file it saved>.")
 
 
 def cover(bg, size):
@@ -290,7 +293,7 @@ def main():
     fetched = "" if had_model else " (first use: the segmentation model was downloaded, later calls are faster)"
     print(f"Subject cut out by {name} in {elapsed:.1f}s{fetched}, kept at full resolution "
           f"({w}x{h}), placed on {where} and saved as {out_name} ({kb} KB); the original "
-          f"{src.name} is unchanged. The subject covers {share:.0%} of the picture.")
+          f"{params['image']} is unchanged. The subject covers {share:.0%} of the picture.")
     if share < 0.03:
         print("WARNING: almost nothing was recognised as subject — the result is probably "
               "empty. Tell the user the picture has no clear foreground subject.")
