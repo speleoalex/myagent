@@ -217,6 +217,7 @@ if [ -z "$IN_PLACE" ]; then
         echo '.git'
         echo 'connectors'   # has its own installer (connectors/install.sh)
         echo 'satellite'    # installs on ANOTHER device (see satellite/README.md)
+        echo 'contrib'      # per-machine extras, installed by hand (see contrib/*/README.md)
         # Checkout-side tooling: it operates ON a git clone, so in the install
         # dir it can only mislead (install.sh would install the install onto
         # itself — the guard above —, update.sh needs a .git that is not there,

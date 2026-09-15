@@ -5,7 +5,7 @@ An agent is `model + system prompt + tools`, stored as a JSON file under
 
 ![The bundled agents in the web UI](images/agents.png)
 
-## The ten bundled agents
+## The eleven bundled agents
 
 First run seeds ten, each running on the model chosen in **Settings**:
 
@@ -14,6 +14,7 @@ First run seeds ten, each running on the model chosen in **Settings**:
 | **Master** | orchestrator: routes your question to the right agent, and schedules reminders and recurring jobs for itself | no |
 | **Librarian** | answers from the offline library | no |
 | **HTML Designer** | builds HTML pages, reports and dashboards and delivers them to the chat | no |
+| **Illustrator** | draws pictures from a description and edits existing ones in the workspace, and shows them in the chat | only if the image model chosen in Settings is remote |
 | **Home Automation** | drives IoT devices over their local HTTP APIs — fill in with your own | no |
 | **System Administrator** | shell and file operations on the machine; converts PDFs, images and audio to text | no |
 | **Coder** | writes scripts and programs in the workspace, runs them, and fixes what fails | no |
@@ -40,6 +41,14 @@ conversation. Its pages are single self-contained files — CSS, JavaScript and
 graphics (inline SVG) all embedded, no CDN — so they render offline and can be
 copied anywhere as one file. Ask it for a report, a dashboard, a presentation,
 or to update a page it made earlier.
+
+**Illustrator** draws with `generate_image` and reworks with `edit_image`, the
+two tools of the `images/` group, once an image model is chosen in Settings
+([how](CONFIGURATION.md#image-generation-optional)). Ask for a picture and it
+appears in the chat; ask for a change to it — another style, another season,
+one element replaced — and the agent edits the existing file instead of
+starting over, keeping the original. It writes its prompts in English whatever
+language you use: the image model is not the one reading the conversation.
 
 If your install predates an agent listed above, it shows in **Agents** as a
 dimmed card — one click on *Import* adds it.

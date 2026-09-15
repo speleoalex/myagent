@@ -1,0 +1,23 @@
+# ~/.config/systemd/user/sd-server.service — stable-diffusion.cpp's sd-server,
+# SD-Turbo, localhost only (sd-server has no authentication).
+#
+# Deliberately NOT enabled: on an 8 GB board it cannot run next to llama-server
+# (sd-server peaks at ~4.4 GB, llama-server at 16k context leaves ~1.4 GB free).
+# The MyAgent wrapper in this folder starts it around each image and stops it
+# again; Conflicts= makes systemd stop the other one even if started by hand.
+# Adjust the two paths, then: systemctl --user daemon-reload
+[Unit]
+Description=stable-diffusion.cpp sd-server (SD-Turbo, port 7860, localhost only)
+Conflicts=llama-server.service
+After=network.target
+
+[Service]
+Environment=LD_LIBRARY_PATH=/usr/local/cuda/lib64
+ExecStart=%h/src/stable-diffusion.cpp/build/bin/sd-server \
+  --listen-ip 127.0.0.1 --listen-port 7860 \
+  -m %h/models/sd/sd_turbo-f16-q8_0.gguf \
+  --taesd %h/models/sd/taesd.safetensors
+Restart=no
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,270 @@
+#!/usr/bin/env python3
+"""Image-to-image: rework an existing picture, optionally only inside a mask.
+
+Sibling of generate_image and deliberately shaped like it: the backend comes
+from the environment (app.engine.imagegen resolves the model chosen in Settings
+and exports MYAGENT_IMAGE_EDIT_URL next to MYAGENT_IMAGE_URL), the api_key
+never appears in the parameters, stdlib only. Same two wire formats, again NOT
+equivalent:
+
+  a1111  POST /sdapi/v1/img2img  {"init_images": ["<b64>"], "denoising_strength",
+         "mask": "<b64>", ...} -> {"images": ["<b64 png>"]}
+         The source image sets the output size (width/height are NOT sent, so
+         the 512x512 defaults stored for txt2img do not squash a 768 picture);
+         strength, steps, seed, negative_prompt all have a field. Spoken by
+         Automatic1111, Forge and stable-diffusion.cpp's sd-server. The mask
+         follows the A1111 convention: white = repaint, black = keep.
+
+  openai POST /v1/images/edits  multipart/form-data (image, mask, prompt, n,
+         model, size) -> {"data": [{"b64_json"|"url": ...}]}
+         No strength, steps, seed or negative prompt: the instruction is all the
+         model gets, and those parameters are reported as ignored rather than
+         silently dropped. OpenAI's own endpoint, and sd-server's copy of it.
+
+The source file is never modified: the result is written next to it under a
+new name, so both stay reachable from the trace.
+"""
+import base64
+import json
+import mimetypes
+import os
+import re
+import sys
+import time
+import urllib.error
+import urllib.request
+import uuid
+from pathlib import Path
+
+TIMEOUT = 570  # under tool.json's 600 so we fail with a sentence, not a kill
+DEFAULT_STRENGTH = 0.6
+
+
+def fail(msg):
+    print(f"ERROR: {msg}")
+    sys.exit(1)
+
+
+def slug(text, fallback="image"):
+    s = re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")
+    return (s[:40].rstrip("-") or fallback)
+
+
+def load_image(param, what):
+    """Bytes + mime of a workspace image, or a sentence saying why not.
+
+    cwd IS the workspace (the tool contract), so a bare name resolves there; a
+    leading '~' is expanded because small models write the workspace that way.
+    """
+    p = Path(str(param)).expanduser()
+    if not p.is_file():
+        fail(f"{what} not found: {param}. Use the exact path printed by "
+             "generate_image or list_dir; the source must already exist in the "
+             "workspace.")
+    try:
+        data = p.read_bytes()
+    except OSError as e:
+        fail(f"cannot read {what} {param}: {e}")
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        mime = "image/png"
+    elif data[:3] == b"\xff\xd8\xff":
+        mime = "image/jpeg"
+    elif data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        mime = "image/webp"
+    else:
+        mime = mimetypes.guess_type(p.name)[0] or ""
+        if not mime.startswith("image/"):
+            fail(f"{what} {param} is not a PNG, JPEG or WebP image")
+    return p, data, mime
+
+
+def multipart(fields, files):
+    """Encode fields {name: str} and files {name: (filename, mime, bytes)}."""
+    boundary = "----myagent-" + uuid.uuid4().hex
+    out = bytearray()
+    for name, value in fields.items():
+        out += (f"--{boundary}\r\nContent-Disposition: form-data; "
+                f'name="{name}"\r\n\r\n{value}\r\n').encode()
+    for name, (filename, mime, data) in files.items():
+        out += (f"--{boundary}\r\nContent-Disposition: form-data; "
+                f'name="{name}"; filename="{filename}"\r\n'
+                f"Content-Type: {mime}\r\n\r\n").encode()
+        out += data + b"\r\n"
+    out += f"--{boundary}--\r\n".encode()
+    return bytes(out), f"multipart/form-data; boundary={boundary}"
+
+
+def main():
+    try:
+        params = json.load(sys.stdin)
+    except Exception as e:
+        fail(f"invalid parameters: {e}")
+
+    if not os.environ.get("MYAGENT_IMAGE_URL", "").strip():
+        fail("no image model is configured. Open Settings -> Image generation "
+             "and choose one (register it first under Models, with Kind = "
+             "Image). Nothing can be edited until then.")
+    url = os.environ.get("MYAGENT_IMAGE_EDIT_URL", "").strip()
+    if not url:
+        fail("the configured image model has no editing endpoint")
+    fmt = os.environ.get("MYAGENT_IMAGE_FORMAT", "openai")
+    backend = os.environ.get("MYAGENT_IMAGE_NAME", "the image model")
+
+    prompt = (params.get("prompt") or "").strip()
+    if not prompt:
+        fail("prompt is required: describe the wanted result")
+    if not params.get("image"):
+        fail("image is required: the path of the picture to edit")
+    src, src_bytes, src_mime = load_image(params["image"], "source image")
+    mask = None
+    if params.get("mask"):
+        mask = load_image(params["mask"], "mask")
+
+    try:
+        opts = json.loads(os.environ.get("MYAGENT_IMAGE_OPTIONS") or "{}")
+    except Exception:
+        opts = {}
+    if not isinstance(opts, dict):
+        opts = {}
+
+    def pick(key, default=None):
+        v = params.get(key)
+        if v in (None, "", []):
+            v = opts.get(key, default)
+        return v
+
+    strength = params.get("strength")
+    try:
+        strength = DEFAULT_STRENGTH if strength in (None, "") else float(strength)
+    except (TypeError, ValueError):
+        fail("strength must be a number between 0 and 1")
+    strength = min(1.0, max(0.0, strength))
+    steps = pick("steps")
+    seed = pick("seed", -1)
+    negative = pick("negative_prompt", "")
+
+    ignored = []
+    if fmt == "a1111":
+        payload = dict(opts)
+        # The source picture decides the size; the stored width/height are
+        # txt2img defaults and would resize it.
+        for k in ("width", "height", "steps", "seed", "negative_prompt",
+                  "size", "cfg_scale", "sampler", "sampler_name"):
+            payload.pop(k, None)
+        payload.update({
+            "prompt": prompt,
+            "batch_size": 1,
+            "init_images": [base64.b64encode(src_bytes).decode()],
+            "denoising_strength": strength,
+        })
+        if mask:
+            payload["mask"] = base64.b64encode(mask[1]).decode()
+            payload["inpainting_mask_invert"] = 0
+        if negative:
+            payload["negative_prompt"] = negative
+        if steps:
+            payload["steps"] = int(steps)
+        if seed not in (None, ""):
+            payload["seed"] = int(seed)
+        for k_src, k_dst in (("cfg_scale", "cfg_scale"), ("sampler", "sampler_name"),
+                             ("sampler_name", "sampler_name")):
+            if opts.get(k_src) not in (None, ""):
+                payload[k_dst] = opts[k_src]
+        body = json.dumps(payload).encode()
+        ctype = "application/json"
+    else:
+        fields = {"prompt": prompt, "n": "1"}
+        model = os.environ.get("MYAGENT_IMAGE_MODEL", "").strip()
+        if model:
+            fields["model"] = model
+        if opts.get("size"):
+            fields["size"] = str(opts["size"])
+        # Same rule as generate_image: OpenAI's gpt-image-1 rejects
+        # response_format, everything else needs to be asked for b64.
+        if "api.openai.com" not in url:
+            fields["response_format"] = "b64_json"
+        files = {"image": (src.name, src_mime, src_bytes)}
+        if mask:
+            files["mask"] = (mask[0].name, mask[2], mask[1])
+        body, ctype = multipart(fields, files)
+        ignored = [k for k, v in (("negative_prompt", negative), ("steps", steps))
+                   if v not in (None, "", -1)]
+        if seed not in (None, "", -1):
+            ignored.append("seed")
+        if params.get("strength") not in (None, ""):
+            ignored.append("strength")
+
+    req = urllib.request.Request(url, data=body, method="POST",
+                                 headers={"Content-Type": ctype})
+    key = os.environ.get("MYAGENT_IMAGE_KEY")
+    if key:
+        req.add_header("Authorization", f"Bearer {key}")
+
+    started = time.time()
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+            data = json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try:
+            detail = e.read().decode()[:400]
+        except Exception:
+            pass
+        fail(f"{backend} refused the request (HTTP {e.code}) at {url}: {detail}")
+    except urllib.error.URLError as e:
+        fail(f"cannot reach {backend} at {url}: {e.reason}. Check that the "
+             "backend is running and that the base URL in Models is right.")
+    except Exception as e:
+        fail(f"image editing failed: {e}")
+    elapsed = time.time() - started
+
+    raw = None
+    if fmt == "a1111":
+        images = data.get("images") or []
+        if images:
+            raw = base64.b64decode(images[0])
+    else:
+        items = data.get("data") or []
+        if items and isinstance(items[0], dict):
+            if items[0].get("b64_json"):
+                raw = base64.b64decode(items[0]["b64_json"])
+            elif items[0].get("url"):
+                try:
+                    with urllib.request.urlopen(items[0]["url"], timeout=120) as r:
+                        raw = r.read()
+                except Exception as e:
+                    fail(f"the image was edited but could not be downloaded "
+                         f"from {items[0]['url']}: {e}")
+    if not raw:
+        fail(f"{backend} answered without an image: {json.dumps(data)[:300]}")
+
+    # A new file next to the source, never over it (and never over an earlier
+    # edit): every version stays reachable from the trace.
+    base = slug(params.get("filename") or f"{src.stem}-edited")
+    name = f"{base}.png"
+    n = 2
+    while os.path.exists(name):
+        name = f"{base}-{n}.png"
+        n += 1
+    try:
+        with open(name, "wb") as f:
+            f.write(raw)
+    except OSError as e:
+        fail(f"could not write {name} into the workspace: {e}")
+
+    kb = len(raw) // 1024
+    how = "inside the mask" if mask else f"at strength {strength:.2f}"
+    print(f"Image edited by {backend} in {elapsed:.0f}s ({how}) and saved as "
+          f"{name} ({kb} KB); the original {src.name} is unchanged. The result "
+          "is already displayed to the user: describe it or offer a further "
+          "change, do not paste the path.")
+    if ignored:
+        print(f"NOTE: this backend speaks the OpenAI image API, which has no "
+              f"field for {', '.join(ignored)} — that parameter was ignored. "
+              "Configure the model as provider 'a1111' if the backend also "
+              "serves /sdapi/v1/img2img (stable-diffusion.cpp does).")
+    print(f"[[resource:{name}|image/png|{prompt[:80]}]]")
+
+
+if __name__ == "__main__":
+    main()

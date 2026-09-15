@@ -1,0 +1,47 @@
+{
+  "name": "Edit Image",
+  "description": "Modify an EXISTING image from the workspace according to a text instruction and save the result as a new file, which is shown to the user automatically. Without a mask the whole picture is redrawn guided by the original (change style, mood, colours, season, add or alter elements); with a mask only the white area of the mask is repainted (inpainting). Write the prompt in English as a description of the WANTED result, not as a command: the image model knows nothing about this conversation and does not understand 'make it darker' — describe the dark version. The original file is never touched.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "image": {
+        "type": "string",
+        "description": "Path of the source image in the workspace (e.g. 'bee-on-a-meadow.png', as printed by generate_image or list_dir). PNG, JPEG or WebP."
+      },
+      "prompt": {
+        "type": "string",
+        "description": "Description of the final image, in English: subject, setting, style, lighting, colours. Repeat what must stay the same as well as what changes."
+      },
+      "mask": {
+        "type": "string",
+        "description": "Optional path of a mask image with the same size as the source: WHITE = area to repaint, BLACK = keep. Without it the whole image is reworked."
+      },
+      "strength": {
+        "type": "number",
+        "description": "How far the result may depart from the original, 0.0-1.0. Around 0.3 keeps the composition and only retouches; 0.5-0.7 changes style or mood; above 0.8 keeps little more than the layout. Default 0.6."
+      },
+      "negative_prompt": {
+        "type": "string",
+        "description": "What must NOT appear in the result (e.g. 'text, watermark, blurry'). Optional."
+      },
+      "steps": {
+        "type": "integer",
+        "description": "Denoising steps. Turbo/lightning models want very few (1-8). Leave unset for the configured default."
+      },
+      "seed": {
+        "type": "integer",
+        "description": "Random seed; the same seed with the same inputs gives the same result. Omit or -1 for a new one."
+      },
+      "filename": {
+        "type": "string",
+        "description": "Base name for the saved file, without extension. Optional: derived from the source name."
+      }
+    },
+    "required": [
+      "image",
+      "prompt"
+    ]
+  },
+  "timeout": 600,
+  "max_output": 4000
+}

@@ -1,0 +1,163 @@
+#!/usr/bin/env python3
+"""User-layer wrapper for generate_image / edit_image on a machine where the
+chat model and Stable Diffusion cannot share the memory (Jetson Orin Nano 8 GB).
+
+Installed by ../install.sh as ~/myagent/tools/<tool>/run for BOTH image tools:
+the same id as the bundled tool makes it an overlay override, so the agents see
+the usual tool and this script runs instead. What it adds around the bundled
+script, unchanged and still the one doing the HTTP work:
+
+  1. clamps the parameters to what SD-Turbo does well on this board
+  2. stops the LLM unit, starts the sd-server unit, waits until it answers
+  3. runs the BUNDLED tool with the same stdin/env (MYAGENT_IMAGE_* are set by
+     the server from the model chosen in Settings, as always)
+  4. stops sd-server and starts the LLM unit again, waiting for /health
+  5. a detached guardian repeats step 4 if this process is killed (the registry
+     kills only the tool process on timeout), so the chat never stays dark
+
+The tool id is the folder this script lives in; the bundled script is found
+under $MYAGENT_APP_DIR/tools (grouped or flat), which the registry exports.
+No secrets in here: the units, ports and paths are the only machine-specific
+bits, and they are the constants below.
+"""
+import json
+import os
+import subprocess
+import sys
+import time
+import urllib.request
+
+LLM_UNIT = "llama-server"
+SD_UNIT = "sd-server"
+SD_READY = "http://127.0.0.1:7860/sdapi/v1/options"   # /health is 404 on sd-server
+LLM_READY = "http://127.0.0.1:8080/health"
+MAX_SIDE, MAX_STEPS = 768, 8
+START_TIMEOUT = 120   # seconds for either unit to come up
+TOOL_TIMEOUT = 400    # the bundled tool's own run; tool.json allows 600 overall
+
+TOOL_ID = os.path.basename(os.path.dirname(os.path.abspath(__file__)))
+
+
+def log(msg):
+    print(f"[sd-arbitrage {TOOL_ID}] {msg}", file=sys.stderr, flush=True)
+
+
+def bundled_run():
+    roots = []
+    if os.environ.get("MYAGENT_APP_DIR"):
+        roots.append(os.path.join(os.environ["MYAGENT_APP_DIR"], "tools"))
+    roots.append(os.path.expanduser("~/myagent/bin/server/tools"))
+    for root in roots:
+        flat = os.path.join(root, TOOL_ID, "run")
+        if os.path.isfile(flat):
+            return flat
+        if os.path.isdir(root):
+            for group in sorted(os.listdir(root)):
+                cand = os.path.join(root, group, TOOL_ID, "run")
+                if os.path.isfile(cand):
+                    return cand
+    return None
+
+
+def sysctl(*args):
+    return subprocess.run(["systemctl", "--user", *args],
+                          capture_output=True, text=True).returncode
+
+
+def wait_http(url, timeout):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(url, timeout=3) as r:
+                if r.status == 200:
+                    return True
+        except Exception:
+            pass
+        time.sleep(1)
+    return False
+
+
+def clamp(params):
+    """SD-Turbo: multiples of 64 up to MAX_SIDE, at most MAX_STEPS steps.
+
+    edit_image takes its size from the source picture, so only steps apply.
+    """
+    notes = []
+    if TOOL_ID == "generate_image":
+        for k in ("width", "height"):
+            v = params.get(k)
+            if isinstance(v, int):
+                nv = max(256, min(MAX_SIDE, (v // 64) * 64))
+                if nv != v:
+                    notes.append(f"{k} {v}->{nv}")
+                    params[k] = nv
+    v = params.get("steps")
+    if isinstance(v, int):
+        nv = max(1, min(MAX_STEPS, v))
+        if nv != v:
+            notes.append(f"steps {v}->{nv}")
+            params["steps"] = nv
+    return notes
+
+
+def spawn_guardian():
+    script = ("while kill -0 %d 2>/dev/null; do sleep 2; done; "
+              "systemctl --user stop %s; systemctl --user start %s"
+              % (os.getpid(), SD_UNIT, LLM_UNIT))
+    subprocess.Popen(["bash", "-c", script], start_new_session=True,
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL)
+
+
+def main():
+    try:
+        params = json.load(sys.stdin)
+    except Exception as e:
+        print(f"ERROR: invalid parameters: {e}")
+        return 1
+    target = bundled_run()
+    if not target:
+        print(f"ERROR: bundled tool {TOOL_ID} not found under MYAGENT_APP_DIR/tools")
+        return 1
+    notes = clamp(params)
+    if notes:
+        log("clamped for SD-Turbo: " + ", ".join(notes))
+
+    spawn_guardian()
+    t0 = time.time()
+    out, rc = "", 1
+    try:
+        log(f"stopping {LLM_UNIT}, starting {SD_UNIT}")
+        sysctl("stop", LLM_UNIT)
+        if sysctl("start", SD_UNIT) != 0:
+            out = (f"ERROR: could not start {SD_UNIT} (systemctl --user start "
+                   f"failed); see journalctl --user -u {SD_UNIT}\n")
+            return 1
+        if not wait_http(SD_READY, START_TIMEOUT):
+            out = (f"ERROR: {SD_UNIT} did not answer on {SD_READY} within "
+                   f"{START_TIMEOUT} s; see journalctl --user -u {SD_UNIT}\n")
+            return 1
+        log(f"{SD_UNIT} ready after {time.time() - t0:.0f}s, running {target}")
+        proc = subprocess.run([target], input=json.dumps(params), text=True,
+                              capture_output=True, timeout=TOOL_TIMEOUT)
+        out, rc = proc.stdout, proc.returncode
+        if proc.stderr:
+            sys.stderr.write(proc.stderr)
+    except subprocess.TimeoutExpired:
+        out, rc = "ERROR: the image backend took too long and was stopped\n", 1
+    finally:
+        log(f"restoring {LLM_UNIT}")
+        sysctl("stop", SD_UNIT)
+        sysctl("start", LLM_UNIT)
+        if not wait_http(LLM_READY, START_TIMEOUT):
+            log(f"WARNING: {LLM_UNIT} not healthy after {START_TIMEOUT} s")
+        log(f"done in {time.time() - t0:.0f}s total")
+        sys.stdout.write(out)
+        if notes and rc == 0:
+            print("\n(note: parameters clamped for SD-Turbo on this machine: "
+                  + ", ".join(notes) + ")")
+    return rc
+
+
+if __name__ == "__main__":
+    sys.exit(main())

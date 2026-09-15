@@ -40,13 +40,20 @@ with [`library/fetch.py`](../library/README.md).
 ## Image generation (optional)
 
 Registering a model of kind **Image** under *Models* and picking it in
-Settings → *Image generation* gives every agent that has the `generate_image`
-tool a way to draw. Two endpoint shapes are understood:
+Settings → *Image generation* switches on both tools of the `images/` group:
+`generate_image` draws a picture from a description, `edit_image` reworks one
+that is already in the workspace (whole picture guided by the original, or
+only the white area of a mask). The bundled **Illustrator** agent has both.
+Two endpoint shapes are understood, each with its editing counterpart:
 
-| Provider | Endpoint | Typical backend |
-|---|---|---|
-| `a1111` | `POST /sdapi/v1/txt2img` | stable-diffusion.cpp's `sd-server`, AUTOMATIC1111 |
-| `openai` | `POST /v1/images/generations` | OpenAI Images API, or any server that speaks it |
+| Provider | Generate | Edit | Typical backend |
+|---|---|---|---|
+| `a1111` | `POST /sdapi/v1/txt2img` | `POST /sdapi/v1/img2img` | stable-diffusion.cpp's `sd-server`, AUTOMATIC1111 |
+| `openai` | `POST /v1/images/generations` | `POST /v1/images/edits` | OpenAI Images API, or any server that speaks it |
+
+Prefer `a1111` for a local backend: it is the only shape that carries
+`strength`, `steps`, `seed` and a negative prompt — the OpenAI shape has no
+field for them and the tools say so when they are dropped.
 
 - **Image models never show up as chat models.** The chat picker, the agent
   form and the default-model fallback all skip kind *Image*, and the server
@@ -56,7 +63,12 @@ tool a way to draw. Two endpoint shapes are understood:
   prompt the agent wrote leaves the machine, never your documents.
 - **Defaults live on the model**, in its *Options* (`width`, `height`, `steps`,
   `cfg_scale`, `sampler`); the tool's own parameters override them per call.
+  An edit keeps the source picture's size and never touches the source file.
   Pictures land in `~/myagent/workspace/` and are shown in the chat.
+- **Too small for both models?** A machine that cannot hold the chat model and
+  the diffusion model at once (a Jetson Orin Nano 8 GB, say) can alternate
+  them around each image with the user-layer wrappers in
+  [`contrib/jetson-orin-8gb/`](../contrib/jetson-orin-8gb/README.md).
 - **Nothing is picked for you.** Without a choice in Settings the tool fails
   with a clear message and everything else works as before.
 

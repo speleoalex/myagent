@@ -25,6 +25,12 @@ spoken by Forge, SwarmUI and again sd-server). Both are plain HTTP, which is why
 this machine, one on another node of the overlay network, and a paid API are the
 same three fields with different values, not three mechanisms.
 
+**One model, two tools.** The same provider also names the EDITING endpoint
+(``/v1/images/edits`` and ``/sdapi/v1/img2img``), exported alongside as
+``MYAGENT_IMAGE_EDIT_URL`` for the ``edit_image`` tool. A model that can draw
+can also redraw: choosing it once in Settings switches both tools on, and there
+is no second setting to forget.
+
 **Nothing is chosen automatically.** With ``image_model_id`` unset the tool is
 still installed but refuses with an instruction to go and pick one — the same
 posture as the embedder, and deliberately unlike ``default_model``, which falls
@@ -40,10 +46,18 @@ from app.models import IMAGE_KIND
 
 log = logging.getLogger(__name__)
 
-#: Wire format per provider, and the path appended to ``base_url``.
+#: Wire format per provider, and the path appended to ``base_url`` for
+#: text-to-image (``generate_image``).
 ENDPOINTS = {
     "openai": "/v1/images/generations",
     "a1111": "/sdapi/v1/txt2img",
+}
+
+#: Same providers, the image-to-image path (``edit_image``): the whole picture
+#: guided by a source, or only a masked region.
+EDIT_ENDPOINTS = {
+    "openai": "/v1/images/edits",
+    "a1111": "/sdapi/v1/img2img",
 }
 
 #: Options forwarded to the backend as generation defaults. Free-form values in
@@ -72,17 +86,25 @@ def rejection_reason(raw: dict) -> str:
     return ""
 
 
-def endpoint_url(raw: dict) -> str:
-    """The full URL the tool will POST to.
+def endpoint_url(raw: dict, path: str | None = None) -> str:
+    """The full URL the tool will POST to; ``path`` defaults to text-to-image.
 
     A base_url that already ends in the endpoint's path is left alone, so
     pasting the complete URL out of a backend's own documentation works instead
-    of producing ``/v1/images/generations/v1/images/generations``.
+    of producing ``/v1/images/generations/v1/images/generations``. A base_url
+    pasted WITH the generation path still yields the right editing URL: the
+    known tail is stripped before the other path goes on.
     """
     base = (raw.get("base_url") or "").strip().rstrip("/")
-    path = ENDPOINTS[raw["provider"]]
+    provider = raw["provider"]
+    if path is None:
+        path = ENDPOINTS[provider]
     if base.endswith(path):
         return base
+    for known in (ENDPOINTS[provider], EDIT_ENDPOINTS[provider]):
+        if base.endswith(known):
+            base = base[: -len(known)].rstrip("/")
+            break
     # OpenAI-compatible base_urls are conventionally written with the /v1 on:
     # the chat side has the same wart (see _fetch_remote_models in the models
     # router), and the two must not disagree about what a base_url means.
@@ -92,7 +114,7 @@ def endpoint_url(raw: dict) -> str:
 
 
 def resolve_image_env(models_store) -> dict[str, str]:
-    """The environment that tells the generate_image tool where to generate, or {}.
+    """The environment that tells the image tools where to generate/edit, or {}.
 
     Resolved on every call rather than cached, for the same reason
     :func:`app.engine.embedding.resolve_embed_env` is: the registry's
@@ -117,6 +139,7 @@ def resolve_image_env(models_store) -> dict[str, str]:
         return {}
     env = {
         "MYAGENT_IMAGE_URL": endpoint_url(raw),
+        "MYAGENT_IMAGE_EDIT_URL": endpoint_url(raw, EDIT_ENDPOINTS[raw["provider"]]),
         "MYAGENT_IMAGE_FORMAT": raw["provider"],
         "MYAGENT_IMAGE_NAME": raw.get("name") or model_id,
     }
