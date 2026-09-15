@@ -6,7 +6,10 @@ httpx>=0.27.0
 
 # Optional, per-tool (not required by the core app):
 #   libzim>=3.4.0   # only for the `library/*` tools (offline ZIM knowledge base)
-#   numpy           # scores the optional semantic index
+#   numpy           # scores the optional semantic index; also feeds remove_background
+#   onnxruntime     # remove_background (images/): runs the segmentation network on the CPU
+#   pillow          # remove_background: compositing. Both installed best-effort
+#                   # by install.sh; the 178 MB model is OFFERED, or fetched on first use.
 #   fastembed       # optional IN-PROCESS embeddings for that index: no endpoint
 #                   # and nothing to register. 8 packages, no torch — against 82
 #                   # (15 of them nvidia wheels) for sentence-transformers.

@@ -30,8 +30,8 @@
 # service user's ~/myagent (MYAGENT_HOME), outside the code, so re-running this
 # script is safe. Optional dependencies are handled differently ON PURPOSE, and
 # the rule is what the install COSTS the user, not where it lands: things that
-# merely complete our own installation (libzim, numpy) are just installed; things
-# that change the machine (poppler, tesseract, ffmpeg, Node — root) or pull
+# merely complete our own installation (libzim, numpy, onnxruntime) are just installed;
+# things that change the machine (poppler, tesseract, ffmpeg, Node — root) or pull
 # hundreds of MB over the network (fastembed and its model) are OFFERED with the
 # exact command printed; library CONTENT (the .zim archives) is never downloaded
 # here at all.
@@ -279,6 +279,19 @@ if ! "$VENV/bin/python" -c "import numpy" >/dev/null 2>&1; then
     fi
 fi
 
+# onnxruntime + pillow: what remove_background (images/) runs its segmentation
+# network and compositing with. Same rule as numpy — a few tens of MB of wheels
+# that only complete OUR install, so they are installed, not offered; the model
+# they load is the 178 MB fetch and THAT is offered below. Non-fatal: without
+# them the tool alone says what is missing, the rest of the app is unaffected.
+if ! "$VENV/bin/python" -c "import onnxruntime, PIL" >/dev/null 2>&1; then
+    echo "  Installing onnxruntime + pillow (background removal in images)..."
+    if ! "$VENV/bin/pip" install -q onnxruntime pillow; then
+        echo "  onnxruntime/pillow could not be installed — remove_background stays"
+        echo "  disabled. Retry: $VENV/bin/pip install onnxruntime pillow"
+    fi
+fi
+
 # fastembed: embeddings computed IN THIS PROCESS, so semantic search needs no
 # endpoint, no pulled model and no registered config — one dropdown entry in
 # Settings and it works. OFFERED rather than installed, unlike libzim and numpy
@@ -336,6 +349,26 @@ if "$VENV/bin/python" -c "import fastembed" >/dev/null 2>&1; then
             echo "  Could not fetch it now — the first index run will try again."
     else
         echo "  Skipped: the first semantic search downloads it in the background."
+    fi
+fi
+
+# The background-removal model, offered on the same terms: 178 MB the first
+# call would otherwise fetch inline, inside the tool's timeout, while the user
+# waits in the chat — worth getting out of the way now. Same service-user and
+# MYAGENT_HOME dance as above so it lands in the cache the service reads.
+if "$VENV/bin/python" -c "import onnxruntime, PIL, numpy" >/dev/null 2>&1; then
+    BGREMOVE="$INSTALL_DIR/server/tools/images/remove_background/remove_background.py"
+    if ask "Download the background-removal model now (178 MB)?"; then
+        BG_OK=1
+        if [ "$RUN_USER" != "$(id -un)" ]; then
+            sudo -u "$RUN_USER" MYAGENT_HOME="$STATE_HOME" \
+                "$VENV/bin/python" "$BGREMOVE" --prefetch || BG_OK=""
+        else
+            MYAGENT_HOME="$STATE_HOME" "$VENV/bin/python" "$BGREMOVE" --prefetch || BG_OK=""
+        fi
+        [ -n "$BG_OK" ] || echo "  Could not fetch it now — the first remove_background call will try again."
+    else
+        echo "  Skipped: the first remove_background call downloads it (about a minute)."
     fi
 fi
 
@@ -804,6 +837,17 @@ else
     echo "                             or pull a local embedding model such as"
     echo "                             ollama pull embeddinggemma:300m, then"
     echo "                             pick it in Settings)"
+fi
+
+# Background removal: the packages are ours to install, the model is a download
+# the tool repeats on its own — so only the packages make the line "off".
+BG_MODEL="${MYAGENT_CACHE:-$STATE_HOME/cache}/models/isnet-general-use.onnx"
+if ! "$VENV/bin/python" -c "import onnxruntime, PIL, numpy" >/dev/null 2>&1; then
+    echo "  [--] background removal   (onnxruntime/pillow missing: $VENV/bin/pip install onnxruntime pillow numpy)"
+elif [ -s "$BG_MODEL" ]; then
+    echo "  [ok] background removal   (model cached)"
+else
+    echo "  [ok] background removal   (model fetched on first use, 178 MB)"
 fi
 
 echo ""

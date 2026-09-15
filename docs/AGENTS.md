@@ -14,7 +14,7 @@ First run seeds ten, each running on the model chosen in **Settings**:
 | **Master** | orchestrator: routes your question to the right agent, and schedules reminders and recurring jobs for itself | no |
 | **Librarian** | answers from the offline library | no |
 | **HTML Designer** | builds HTML pages, reports and dashboards and delivers them to the chat | no |
-| **Illustrator** | draws pictures from a description and edits existing ones in the workspace, and shows them in the chat | only if the image model chosen in Settings is remote |
+| **Illustrator** | draws pictures from a description, edits existing ones in the workspace, cuts the subject of a photo out onto a new background, and shows them in the chat | only if the image model chosen in Settings is remote |
 | **Home Automation** | drives IoT devices over their local HTTP APIs — fill in with your own | no |
 | **System Administrator** | shell and file operations on the machine; converts PDFs, images and audio to text | no |
 | **Coder** | writes scripts and programs in the workspace, runs them, and fixes what fails | no |
@@ -42,13 +42,19 @@ graphics (inline SVG) all embedded, no CDN — so they render offline and can be
 copied anywhere as one file. Ask it for a report, a dashboard, a presentation,
 or to update a page it made earlier.
 
-**Illustrator** draws with `generate_image` and reworks with `edit_image`, the
-two tools of the `images/` group, once an image model is chosen in Settings
-([how](CONFIGURATION.md#image-generation-optional)). Ask for a picture and it
-appears in the chat; ask for a change to it — another style, another season,
-one element replaced — and the agent edits the existing file instead of
+**Illustrator** draws with `generate_image` and reworks with `edit_image`, two
+of the three tools of the `images/` group, once an image model is chosen in
+Settings ([how](CONFIGURATION.md#image-generation-optional)). Ask for a picture
+and it appears in the chat; ask for a change to it — another style, another
+season, one element replaced — and the agent edits the existing file instead of
 starting over, keeping the original. It writes its prompts in English whatever
 language you use: the image model is not the one reading the conversation.
+The third tool, `remove_background`, needs no image model at all: ask for "a
+white background", "cut the person out" or "put me on the beach picture" and a
+segmentation network isolates the subject pixel for pixel, so the face is never
+redrawn — something an image model cannot promise. For a painted scene behind a
+real person the agent generates the scene first and puts the cut-out on it, or
+hands the mask it got to `edit_image` so only the background is repainted.
 
 If your install predates an agent listed above, it shows in **Agents** as a
 dimmed card — one click on *Import* adds it.

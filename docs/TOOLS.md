@@ -83,9 +83,10 @@ Related tools can share a **group folder**: a subfolder of the tools dir
 ├── library/                # another group: search the offline library…
 │   ├── local_search/       #   …then read one result at length
 │   └── local_read/
-├── images/                 # draw a picture, then rework it
+├── images/                 # draw a picture, rework it, cut its subject out
 │   ├── generate_image/
-│   └── edit_image/
+│   ├── edit_image/
+│   └── remove_background/
 └── shell_exec/             # ungrouped tool, same as before
 ```
 

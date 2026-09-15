@@ -40,10 +40,11 @@ with [`library/fetch.py`](../library/README.md).
 ## Image generation (optional)
 
 Registering a model of kind **Image** under *Models* and picking it in
-Settings → *Image generation* switches on both tools of the `images/` group:
+Settings → *Image generation* switches on two tools of the `images/` group:
 `generate_image` draws a picture from a description, `edit_image` reworks one
 that is already in the workspace (whole picture guided by the original, or
-only the white area of a mask). The bundled **Illustrator** agent has both.
+only the white area of a mask). The bundled **Illustrator** agent has both,
+plus `remove_background`, which needs no image model (see below).
 Two endpoint shapes are understood, each with its editing counterpart:
 
 | Provider | Generate | Edit | Typical backend |
@@ -63,6 +64,28 @@ field for them and the tools say so when they are dropped.
   prompt the agent wrote leaves the machine, never your documents.
 - **Defaults live on the model**, in its *Options* (`width`, `height`, `steps`,
   `cfg_scale`, `sampler`); the tool's own parameters override them per call.
+
+### Background removal (no image model)
+
+`remove_background` cuts the subject of a photo out and puts it on a
+transparent, uniform or other background, exactly: a salient-object
+segmentation network (ISNet, the ONNX export the rembg project publishes)
+runs on the CPU inside the tool, and Pillow does the compositing. Nothing is
+redrawn, so it is the right tool for "remove the background" — `edit_image`
+would repaint the person too. It also saves `<name>-mask.png` (white =
+background), which `edit_image` accepts as `mask` to paint a scene only behind
+the subject.
+
+- **Dependencies**: `onnxruntime`, `pillow` and `numpy` in the app venv,
+  installed best-effort by `install.sh` (to repair by hand:
+  `server/.venv/bin/pip install onnxruntime pillow numpy`).
+- **The model** (178 MB) is offered by `install.sh` and otherwise downloaded on
+  first use into `~/myagent/cache/models/` (`MYAGENT_CACHE` moves it). Later
+  calls take a second or two on a laptop CPU, about ten on a small ARM board.
+- `MYAGENT_BGREMOVE_MODEL` picks another network: `isnet-general-use`
+  (default, best edges), `u2net` or `u2net_human_seg` (a 320 px input, much
+  faster on a weak CPU, coarser edges). Set it in a systemd drop-in like every
+  other environment override.
   An edit keeps the source picture's size and never touches the source file.
   Pictures land in `~/myagent/workspace/` and are shown in the chat.
 - **Too small for both models?** A machine that cannot hold the chat model and

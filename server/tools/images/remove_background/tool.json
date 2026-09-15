@@ -1,0 +1,26 @@
+{
+  "name": "Remove Background",
+  "description": "Cut the subject (person, animal, object) out of an EXISTING workspace image and place it on a new background: transparent, a uniform colour, or another image from the workspace. Exact and deterministic: the subject is kept pixel for pixel at full resolution, nothing is redrawn and no image model is involved — use THIS, never edit_image, for 'remove the background', 'uniform / white / blue background', 'cut out the person'. For a new SCENE behind the subject, generate the scene with generate_image first and pass its file as background. It also saves a mask of the background (white = background) that edit_image accepts as 'mask' to repaint only behind the subject. The original file is never touched.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "image": {
+        "type": "string",
+        "description": "Path of the source image in the workspace (as printed by list_dir or by another image tool). PNG, JPEG or WebP."
+      },
+      "background": {
+        "type": "string",
+        "description": "What goes behind the subject: 'transparent' (default), a colour name or hex code ('blue', 'white', '#1e3a8a'), or the path of a workspace image, which is scaled and centre-cropped to the size of the source."
+      },
+      "filename": {
+        "type": "string",
+        "description": "Base name for the saved file, without extension. Optional: derived from the source name."
+      }
+    },
+    "required": [
+      "image"
+    ]
+  },
+  "timeout": 300,
+  "max_output": 4000
+}

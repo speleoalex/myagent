@@ -57,6 +57,7 @@ dependencies are present:
 | Offline Wikipedia archives | `local_search`, `local_read` | `libzim`, installed by `install.sh` (`.zim` files only — Markdown/text notes need nothing). To repair it by hand: `server/.venv/bin/pip install libzim` |
 | Speech to text (audio files, Telegram voice notes, voice satellites) | `document_extract` | `ffmpeg` + `faster-whisper` (installed with the connectors plugin) |
 | Image generation and editing | `generate_image`, `edit_image` | an image endpoint chosen in Settings → *Image generation*: a local `sd-server` (stable-diffusion.cpp) or AUTOMATIC1111 on this machine or another one you trust, or OpenAI's Images API. Nothing to install here — the model runs wherever the endpoint runs. |
+| Background removal (cut the subject out onto a transparent, uniform or new background) | `remove_background` | `onnxruntime` + `pillow` in the venv, installed by `install.sh`; the 178 MB segmentation model is offered by `install.sh` or fetched on first use into `~/myagent/cache/models/`. Runs on the CPU, no image model needed. |
 
 Missing dependencies never block startup: the tool simply fails when called,
 and `./install.sh` tells you which ones are dark.

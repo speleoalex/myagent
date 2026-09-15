@@ -296,7 +296,7 @@ Each tool is a folder with two files:
 level deep (e.g. the bundled `file_management/` holds `file_read`,
 `file_write`, `file_edit`, `list_dir`, `file_search`, `file_append`,
 `make_dir`, `show_file`; `library/` holds `local_search` and `local_read`;
-`images/` holds `generate_image` and `edit_image`).
+`images/` holds `generate_image`, `edit_image` and `remove_background`).
 The group name becomes the tools'
 `category`; ids stay global (the leaf folder name), so grouping a tool
 changes nothing for the agents that reference it. An agent's `tools` list can

@@ -1,0 +1,10 @@
+#!/bin/sh
+# remove_background launcher.
+# onnxruntime, numpy and Pillow live in the app virtualenv, so this must run the
+# venv's python and not whatever `python3` resolves to (the service does not put
+# .venv/bin on PATH). Same pattern as document_extract/run and library/*/run.
+DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+PY="$MYAGENT_APP_DIR/.venv/bin/python"
+[ -x "$PY" ] || PY="$DIR/../../../.venv/bin/python"
+[ -x "$PY" ] || PY=python3
+exec "$PY" "$DIR/remove_background.py"
