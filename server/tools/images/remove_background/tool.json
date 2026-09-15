@@ -10,7 +10,7 @@
       },
       "background": {
         "type": "string",
-        "description": "What goes behind the subject: 'transparent' (default); a colour name or hex code ('blue', 'white', '#1e3a8a'); the PATH of a workspace image, scaled and centre-cropped to the size of the source; or a short English description of a NEW SCENE ('tropical beach at sunset', 'photo studio, grey backdrop'), which this tool has the image model draw without the subject and then places the subject on. The subject itself is never redrawn."
+        "description": "What goes behind the subject: 'transparent' (default); a colour name or hex code ('blue', 'white', 'light blue', 'solid blue', '#1e3a8a'); the PATH of a workspace image, scaled and centre-cropped to the size of the source; or a short English description of a NEW SCENE ('tropical beach at sunset', 'photo studio, grey backdrop'), which this tool has the image model draw without the subject and then places the subject on. The subject itself is never redrawn."
       },
       "filename": {
         "type": "string",

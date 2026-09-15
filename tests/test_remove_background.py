@@ -146,6 +146,12 @@ with tempfile.TemporaryDirectory() as td:
     os.environ["PY"] = sys.executable
     check("find_tool: user layer, grouped", rb.find_tool("generate_image") == fake)
     check("parse: two words are a scene", rb.parse_background("tropical beach at sunset") == ("scene", "tropical beach at sunset"))
+    check("parse: 'solid blue' is the colour blue, not a scene", rb.parse_background("solid blue") == ("colour", (0, 0, 255)))
+    check("parse: 'light blue' joins into lightblue", rb.parse_background("Light Blue") == ("colour", (173, 216, 230)))
+    check("parse: 'a uniform dark green background' is a colour", rb.parse_background("a uniform dark green background") == ("colour", (0, 100, 0)))
+    check("parse: 'white studio backdrop' stays a scene", rb.parse_background("white studio backdrop")[0] == "scene")
+    code, out = run({"image": "photo.png", "background": "solid blue"}, ws)
+    check("e2e 'solid blue': flat fill, no generate_image", code == 0 and "uniform solid blue background" in out and "saved as photo-on-solid-blue.png" in out and not (ws / "gen-params.json").exists(), out)
     code, out = run({"image": "photo.png", "background": "tropical beach at sunset"}, ws)
     check("e2e scene: ok", code == 0, out)
     check("e2e scene: named after the scene", "saved as photo-in-tropical-beach-at-sunset.png" in out and (ws / "photo-in-tropical-beach-at-sunset.png").is_file(), out)

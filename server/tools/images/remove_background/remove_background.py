@@ -47,6 +47,10 @@ MODELS = {
                         "mean": (0.485, 0.456, 0.406), "std": (0.229, 0.224, 0.225), "div": "max"},
 }
 DEFAULT_MODEL = "isnet-general-use"
+# Words that say "a colour" without naming one; what is left is joined and
+# tried as a Pillow colour name ("light blue" -> "lightblue").
+COLOUR_FILLER = {"a", "an", "the", "solid", "uniform", "plain", "flat", "simple", "pure",
+                 "background", "backdrop", "colour", "color", "coloured", "colored"}
 
 
 def fail(msg):
@@ -193,6 +197,15 @@ def parse_background(value):
     p = Path(v).expanduser()
     if p.is_file():
         return "image", p
+    # "solid blue", "light blue", "a uniform dark green background": a colour
+    # said in words. Seen live: a 4B wrote 'solid blue' and, before this, the
+    # tool drew a "solid blue" scene with the image model — 30 s for a fill.
+    words = [w for w in re.split(r"[\s_-]+", v.lower()) if w and w not in COLOUR_FILLER]
+    if words:
+        try:
+            return "colour", ImageColor.getrgb("".join(words))[:3]
+        except ValueError:
+            pass
     looks_like_path = v.startswith(("#", "/", "~", ".")) or "/" in v or re.search(
         r"\.(png|jpe?g|webp|gif|bmp|tiff?)$", v, re.I)
     if looks_like_path or len(v.split()) < 2:
