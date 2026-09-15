@@ -14,7 +14,9 @@ layer, `generate_image` and `edit_image` are overridden by one wrapper
 (`sd-arbitrage-run`) that stops llama-server, starts sd-server, waits for it,
 runs the **bundled** tool unchanged, then restores llama-server and waits for
 its `/health` before answering. A detached guardian repeats the restore if the
-wrapper is killed. Parameters are clamped to what SD-Turbo does well here
+wrapper is killed; on a normal exit the wrapper cancels it (left alive, it fired
+after every run and stopped the sd-server of the *next* call, which then timed
+out), and a `flock` serializes concurrent wrappers. Parameters are clamped to what SD-Turbo does well here
 (≤ 768 px, ≤ 8 steps). Measured: ~34 s end to end for a 768×768 picture at 8
 steps, of which ~22 s is the generation itself; the chat is dark for that long.
 
