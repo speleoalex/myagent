@@ -1,6 +1,6 @@
 {
   "name": "Remove Background",
-  "description": "Cut the subject (person, animal, object) out of an EXISTING workspace image and place it on a new background: transparent, a uniform colour, or another image from the workspace. Exact and deterministic: the subject is kept pixel for pixel at full resolution, nothing is redrawn and no image model is involved — use THIS, never edit_image, for 'remove the background', 'uniform / white / blue background', 'cut out the person'. For a new SCENE behind the subject, generate the scene with generate_image first and pass its file as background. It also saves a mask of the background (white = background) that edit_image accepts as 'mask' to repaint only behind the subject. The original file is never touched.",
+  "description": "Cut the subject (person, animal, object) out of an EXISTING workspace image and place it on a new background: transparent, a uniform colour, another image from the workspace, or a NEW SCENE described in a few English words (drawn by the image model without the subject, then the subject is placed on it). The subject is kept pixel for pixel at full resolution and is never redrawn — use THIS, never edit_image, for 'remove the background', 'uniform / white / blue background', 'cut out the person', 'put the person in front of / on a beach'. It also saves a mask of the background (white = background) that edit_image accepts as 'mask' to repaint only behind the subject. The original file is never touched.",
   "parameters": {
     "type": "object",
     "properties": {
@@ -10,7 +10,7 @@
       },
       "background": {
         "type": "string",
-        "description": "What goes behind the subject: 'transparent' (default), a colour name or hex code ('blue', 'white', '#1e3a8a'), or the PATH of a workspace image, which is scaled and centre-cropped to the size of the source. Never a description of a scene: to get a new scene, draw it first with generate_image and pass the file it saved here."
+        "description": "What goes behind the subject: 'transparent' (default); a colour name or hex code ('blue', 'white', '#1e3a8a'); the PATH of a workspace image, scaled and centre-cropped to the size of the source; or a short English description of a NEW SCENE ('tropical beach at sunset', 'photo studio, grey backdrop'), which this tool has the image model draw without the subject and then places the subject on. The subject itself is never redrawn."
       },
       "filename": {
         "type": "string",

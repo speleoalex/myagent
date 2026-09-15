@@ -52,9 +52,11 @@ language you use: the image model is not the one reading the conversation.
 The third tool, `remove_background`, needs no image model at all: ask for "a
 white background", "cut the person out" or "put me on the beach picture" and a
 segmentation network isolates the subject pixel for pixel, so the face is never
-redrawn — something an image model cannot promise. For a painted scene behind a
-real person the agent generates the scene first and puts the cut-out on it, or
-hands the mask it got to `edit_image` so only the background is repainted.
+redrawn — something an image model cannot promise. "Put me on a tropical
+beach" is the same single call with the scene as background: the tool has the
+image model draw the empty scene and places the cut-out on it. Only when the
+scene should be painted *around* the person does the agent hand the mask it got
+to `edit_image`, so the model repaints the background alone.
 
 If your install predates an agent listed above, it shows in **Agents** as a
 dimmed card — one click on *Import* adds it.

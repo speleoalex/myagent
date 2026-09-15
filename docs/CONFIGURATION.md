@@ -72,9 +72,13 @@ transparent, uniform or other background, exactly: a salient-object
 segmentation network (ISNet, the ONNX export the rembg project publishes)
 runs on the CPU inside the tool, and Pillow does the compositing. Nothing is
 redrawn, so it is the right tool for "remove the background" — `edit_image`
-would repaint the person too. It also saves `<name>-mask.png` (white =
-background), which `edit_image` accepts as `mask` to paint a scene only behind
-the subject.
+would repaint the person too. The background may also be a few English words
+describing a new scene: the tool then calls `generate_image` itself (through
+the same user/bundled overlay as the app, so a per-machine wrapper is
+honoured), asks for the empty scene and puts the untouched subject on it; this
+is the one case where an image model is involved. It also saves
+`<name>-mask.png` (white = background), which `edit_image` accepts as `mask`
+to paint a scene only behind the subject.
 
 - **Dependencies**: `onnxruntime`, `pillow` and `numpy` in the app venv,
   installed best-effort by `install.sh` (to repair by hand:

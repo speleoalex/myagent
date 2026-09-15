@@ -91,7 +91,7 @@ with tempfile.TemporaryDirectory() as td:
     kind, val = rb.parse_background(str(ws / "tall.png"))
     check("parse: existing file is an image background", kind == "image" and val.name == "tall.png")
     code, out = run({"image": "photo.png", "background": "nosuchcolour"}, ws)
-    check("parse: unknown word is one ERROR sentence pointing at generate_image", code == 1 and out.startswith("ERROR:") and "neither a colour" in out and "generate_image" in out, out)
+    check("parse: a single unknown word is one ERROR sentence, not a scene", code == 1 and out.startswith("ERROR:") and "neither a colour" in out and "description of a scene" in out, out)
 
     fitted = rb.cover(Image.open(ws / "tall.png"), (W, H))
     check("cover: output has the source size", fitted.size == (W, H), str(fitted.size))
@@ -132,6 +132,38 @@ with tempfile.TemporaryDirectory() as td:
     code, out = run({"image": "_attachments/att.jpg"}, ws)
     check("e2e subfolder: source echoed with its folder", code == 0 and "original _attachments/att.jpg is unchanged" in out, out)
     check("e2e subfolder: output lands in the workspace root", (ws / "att-cutout.png").is_file())
+
+    # A scene: the tool finds generate_image through the user layer and uses what it saved.
+    tmp = ws
+    tools = tmp / "usertools" / "images" / "generate_image"
+    tools.mkdir(parents=True)
+    fake = tools / "run"
+    fake.write_text("#!/bin/sh\nread p; printf '%s' \"$p\" > gen-params.json\n"
+                    "\"$PY\" -c \"from PIL import Image; Image.new('RGB',(90,30),(0,200,0)).save('scene.png')\"\n"
+                    "echo 'Image generated and saved as scene.png'\necho '[[resource:scene.png|image/png|scene]]'\n")
+    fake.chmod(0o755)
+    os.environ["MYAGENT_TOOLS"] = str(tmp / "usertools")
+    os.environ["PY"] = sys.executable
+    check("find_tool: user layer, grouped", rb.find_tool("generate_image") == fake)
+    check("parse: two words are a scene", rb.parse_background("tropical beach at sunset") == ("scene", "tropical beach at sunset"))
+    code, out = run({"image": "photo.png", "background": "tropical beach at sunset"}, ws)
+    check("e2e scene: ok", code == 0, out)
+    check("e2e scene: named after the scene", "saved as photo-in-tropical-beach-at-sunset.png" in out and (ws / "photo-in-tropical-beach-at-sunset.png").is_file(), out)
+    check("e2e scene: summary names the scene file", "kept as scene.png" in out, out)
+    gp = json.loads((ws / "gen-params.json").read_text())
+    check("e2e scene: prompt asks for an empty scene", gp["prompt"].startswith("tropical beach at sunset") and "no people" in gp["prompt"] and "person" in gp["negative_prompt"], gp)
+    res = Image.open(ws / "photo-in-tropical-beach-at-sunset.png").convert("RGB")
+    check("e2e scene: background is the drawn scene (cropped, not stretched)", res.getpixel((2, 2)) == (0, 200, 0) and res.size == (60, 40))
+    check("e2e scene: subject untouched", res.getpixel((30, 20)) == (1, 2, 3))
+    fake.write_text("#!/bin/sh\necho 'ERROR: no image model is configured'\nexit 1\n")
+    code, out = run({"image": "photo.png", "background": "tropical beach at sunset"}, ws)
+    check("e2e scene: generate_image failure is relayed", code == 1 and "could not draw the scene" in out and "no image model" in out, out)
+    os.environ["MYAGENT_TOOLS"] = str(tmp / "nowhere")
+    check("find_tool: falls back to the bundled tree", rb.find_tool("generate_image") is not None and "server/tools/images/generate_image" in str(rb.find_tool("generate_image")))
+    code, out = run({"image": "photo.png", "background": "#1e3a8"}, ws)
+    check("parse: broken hex is an error, not a scene", code == 1 and "neither a colour" in out, out)
+    code, out = run({"image": "photo.png", "background": "missing.png"}, ws)
+    check("parse: missing file is an error, not a scene", code == 1 and "neither a colour" in out, out)
     mask = Image.open(ws / "photo-mask.png")
     check("e2e mask: white where the background is", mask.getpixel((0, 0)) == 255, str(mask.getpixel((0, 0))))
     check("e2e mask: black on the subject", mask.getpixel((30, 20)) == 0, str(mask.getpixel((30, 20))))

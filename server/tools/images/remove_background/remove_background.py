@@ -172,11 +172,15 @@ def predict_alpha(img, name):
 
 
 def parse_background(value):
-    """('transparent', None) | ('colour', (r,g,b)) | ('image', Path).
+    """('transparent', None) | ('colour', (r,g,b)) | ('image', Path) | ('scene', str).
 
     A colour is anything Pillow's ImageColor understands (names, #hex, rgb());
-    otherwise it must be a workspace file. Decided in this order because a
-    file called 'blue' is far less likely than the model writing 'blue'.
+    then a workspace file; anything else that reads like words is a scene to
+    draw with the image model. Decided in this order because a file called
+    'blue' is far less likely than the model writing 'blue'. Something that
+    looks like a path or a hex code but matches nothing is an error, not a
+    scene: drawing "#1e3a8" or "photo.pnf" would hide a typo behind a minute
+    of generation.
     """
     from PIL import ImageColor
     v = (value or "").strip()
@@ -189,11 +193,57 @@ def parse_background(value):
     p = Path(v).expanduser()
     if p.is_file():
         return "image", p
-    fail(f"background '{value}' is neither a colour (e.g. 'blue', '#1e3a8a', "
-         "'transparent') nor the path of an existing workspace image. A background "
-         "is never a description: to put the subject in a new scene, first draw the "
-         "scene with generate_image, then call remove_background again with "
-         "background=<the file it saved>.")
+    looks_like_path = v.startswith(("#", "/", "~", ".")) or "/" in v or re.search(
+        r"\.(png|jpe?g|webp|gif|bmp|tiff?)$", v, re.I)
+    if looks_like_path or len(v.split()) < 2:
+        fail(f"background '{value}' is neither a colour (e.g. 'blue', '#1e3a8a', "
+             "'transparent'), nor the path of an existing workspace image, nor a "
+             "description of a scene (at least two words in English, e.g. 'tropical "
+             "beach at sunset').")
+    return "scene", v
+
+
+def find_tool(tool_id):
+    """The `run` of another tool, the way the app resolves it: user layer first
+    (MYAGENT_TOOLS or $MYAGENT_HOME/tools, flat or grouped), then the bundled
+    tree this file lives in."""
+    user_root = os.environ.get("MYAGENT_TOOLS") or os.path.join(
+        os.environ.get("MYAGENT_HOME") or os.path.expanduser("~/myagent"), "tools")
+    for root in (Path(user_root), Path(__file__).resolve().parent.parent.parent):
+        if root.is_dir():
+            hits = sorted(root.glob(f"**/{tool_id}/run"))
+            if hits:
+                return hits[0]
+    return None
+
+
+def draw_scene(prompt):
+    """Have generate_image draw an EMPTY scene; return the path it saved.
+
+    The two-step recipe (draw the scene, then cut the subject onto it) was
+    what a 4B model could not hold across two calls: it drew the person into
+    the scene and stopped. So the second step calls the first one itself,
+    through the same overlay the app uses, so a per-machine wrapper in the
+    user layer (contrib/jetson-orin-8gb) is honoured."""
+    import subprocess
+    run = find_tool("generate_image")
+    if run is None:
+        fail("the generate_image tool is not installed, so a scene cannot be drawn: "
+             "pass a colour or the path of an existing image as background.")
+    params = {"prompt": f"{prompt}, empty scene, wide view, no people",
+              "negative_prompt": "person, people, man, woman, child, face, figure, "
+                                 "silhouette, text, watermark"}
+    try:
+        proc = subprocess.run([str(run)], input=json.dumps(params), text=True,
+                              capture_output=True, timeout=240, env=os.environ)
+    except subprocess.TimeoutExpired:
+        fail("the image model took more than 4 minutes to draw the scene")
+    out = proc.stdout.strip()
+    m = re.search(r"^\[\[resource:([^|\]\n]+)\|", out, re.M)
+    if proc.returncode != 0 or not m:
+        first = (out or proc.stderr.strip()).splitlines()[:1]
+        fail(f"generate_image could not draw the scene: {first[0] if first else 'no output'}")
+    return Path(m.group(1))
 
 
 def cover(bg, size):
@@ -262,6 +312,11 @@ def main():
     kind, value = parse_background(params.get("background"))
     if kind == "image" and value.resolve() == src.resolve():
         fail("background must be a different file from the source image")
+    scene = None
+    if kind == "scene":
+        scene, value, kind = value, draw_scene(value), "image"
+        if not value.is_file():
+            fail(f"generate_image reported {value} but the file is not in the workspace")
 
     started = time.time()
     had_model = os.path.isfile(model_path(name))
@@ -275,6 +330,10 @@ def main():
     elif kind == "colour":
         default_base = f"{src.stem}-on-{slug(params.get('background'), 'colour')}"
         where = f"a uniform {params['background'].strip()} background"
+    elif scene:
+        default_base = f"{src.stem}-in-{slug(scene, 'scene')[:40]}"
+        where = (f"a scene the image model drew from '{scene}' (also kept as {value.name}), "
+                 "scaled and centre-cropped to fit")
     else:
         default_base = f"{src.stem}-on-{slug(value.stem, 'background')}"
         where = f"the picture {value.name} (scaled and centre-cropped to fit)"
