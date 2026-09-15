@@ -259,7 +259,18 @@ under **Settings**:
   navbar. Two servers with the same UI are otherwise indistinguishable
   without reading the URL — which a reverse proxy, an installed app or a
   phone hides. Leave the name empty and the host name is shown instead.
+  The installed app follows suit: it is called *MyAgent orin*, *MyAgent
+  Workshop* and so on rather than plain *MyAgent*, and its title bar takes the
+  instance color, so two servers installed on the same phone are told apart
+  from the home screen. The name is read at install time; rename the server
+  and reinstall the app to see the new one.
 
 The Settings page is split into tabs (*General*, *Models*, *Advanced*,
 *Access*, *Server*); the tab is part of the URL (`#/settings/models`), so a
 link can point at one.
+
+![The Models tab of the Settings page](images/settings-models.png)
+
+*Settings → Models: each select lists only models of its own kind (chat,
+embedding, image), the local backends are probed for reachability, and the
+instance name and color chosen under Server show up in the navbar badge.*

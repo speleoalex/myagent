@@ -351,28 +351,38 @@ class _ShellStaticFiles(StaticFiles):
 if STATIC_DIR.is_dir():
     @app.get("/manifest.webmanifest", include_in_schema=False)
     async def manifest():
-        """The static manifest with THIS server's name stamped in.
+        """The static manifest with THIS server's name and color stamped in.
 
         Two MyAgent servers installed as apps on the same phone would both be
         called "MyAgent" — the manifest's name is the installed app's name, and
         the only place it can be told apart is here, when the browser fetches it
         during installation. So the file on disk is a template: `instance_name`
-        from Settings replaces `name`/`short_name` when set, and the file is
-        served verbatim otherwise. Registered before the static mount because
-        the mount would otherwise answer first. Same no-cache policy as
-        _ShellStaticFiles, so a rename reaches the browser on the next visit.
+        from Settings, or the host name when none is set (the same fallback the
+        navbar badge uses, so an unnamed server is still not anonymous), goes
+        into `name`/`short_name`, and `instance_color` into `theme_color` (the
+        title bar of the installed app on Android). `short_name` is what the
+        launcher prints under the icon, about twelve characters: "MyAgent orin"
+        fits, a longer host name is shown alone rather than cut mid-word.
+        Registered before the static mount because the mount would otherwise
+        answer first. Same no-cache policy as _ShellStaticFiles, so a rename
+        reaches the browser on the next visit.
         """
         import json
+        import socket
         raw = (STATIC_DIR / "manifest.webmanifest").read_text(encoding="utf-8")
-        name = (getattr(config.settings, "instance_name", "") or "").strip()
-        if name:
-            try:
-                data = json.loads(raw)
-                data["name"] = f"MyAgent · {name}"
-                data["short_name"] = name[:12]
-                raw = json.dumps(data, ensure_ascii=False, indent=2)
-            except ValueError:
-                pass  # a hand-edited, broken manifest is served as it is
+        name = ((getattr(config.settings, "instance_name", "") or "").strip()
+                or socket.gethostname().split(".")[0])
+        color = (getattr(config.settings, "instance_color", "") or "").strip()
+        try:
+            data = json.loads(raw)
+            data["name"] = f"MyAgent · {name}"
+            short = f"MyAgent {name}"
+            data["short_name"] = short if len(short) <= 12 else name[:12]
+            if color:
+                data["theme_color"] = color
+            raw = json.dumps(data, ensure_ascii=False, indent=2)
+        except ValueError:
+            pass  # a hand-edited, broken manifest is served as it is
         return Response(raw, media_type="application/manifest+json",
                         headers={"Cache-Control": "no-cache"})
 

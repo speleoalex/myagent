@@ -7,7 +7,7 @@ An agent is `model + system prompt + tools`, stored as a JSON file under
 
 ## The eleven bundled agents
 
-First run seeds ten, each running on the model chosen in **Settings**:
+First run seeds eleven, each running on the model chosen in **Settings**:
 
 | Agent | Does | Needs internet? |
 |---|---|---|

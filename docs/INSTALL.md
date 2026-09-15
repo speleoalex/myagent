@@ -180,6 +180,13 @@ own machine.
 On iPhone and iPad, Safari has no install button: use *Share → Add to Home
 Screen*.
 
+The installed app carries the server's name: *MyAgent orin*, *MyAgent
+Workshop*, whatever is set as instance name under Settings → *Server*, or the
+host name when nothing is. Two MyAgent servers installed on the same phone thus
+get two icons with two names (and the instance color as title bar), instead of
+two identical *MyAgent* icons. The name is read when the app is installed;
+after renaming a server, remove and reinstall its app to update it.
+
 ### Installing from another device
 
 Browsers only offer this over a **secure connection**. `http://localhost:8888`

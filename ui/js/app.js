@@ -75,6 +75,13 @@ const App = {
             nav.classList.toggle('navbar-instance-colored', !!color);
         }
         document.title = label ? `${label} · MyAgent` : 'MyAgent';
+        // iOS reads the home-screen name from this meta at "Add to Home
+        // Screen" time, not from the manifest; Android colors the installed
+        // app's title bar from theme-color. Same fallbacks as the badge.
+        const appTitle = document.querySelector('meta[name="apple-mobile-web-app-title"]');
+        if (appTitle) appTitle.content = label ? `MyAgent ${label}` : 'MyAgent';
+        const themeMeta = document.querySelector('meta[name="theme-color"]');
+        if (themeMeta) themeMeta.content = color || '#212529';
     },
 
     /** Black or white, whichever reads on this background (WCAG luminance). */

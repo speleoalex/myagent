@@ -64,6 +64,19 @@ disk, searched full-text in moments, quoted with their source
 *A local model answering from the offline library: the Librarian searches, opens
 the best hit and answers from it. Nothing in that path touches the network.*
 
+## Pictures, on the same machine
+
+Point MyAgent at a local Stable Diffusion server and the **Illustrator** agent
+draws in the chat: ask for a picture and it appears, ask for a change and the
+agent edits the picture it made instead of starting over
+([image generation](docs/CONFIGURATION.md#image-generation-optional)).
+
+![The Illustrator agent drawing a picture in the chat](docs/images/chat-illustrator.png)
+
+*Image generation in the chat: the Illustrator calls the local image model and
+the picture is delivered into the conversation by reference, never through the
+language model.*
+
 ## Autonomous AI
 
 MyAgent doesn't only answer questions. Agents run scheduled tasks, monitor and
@@ -98,6 +111,7 @@ years. Even when the internet doesn't.
 | **Agent delegation** | agents call other agents, with per-agent permissions |
 | **Long-term memory** | opt-in: old turns are archived and replaced by compact summaries, so an agent remembers without blowing a small model's context |
 | **Tools are folders** | a `tool.json` plus an executable `run` in any language, hot-reloaded, no restart; the AI can write its own ([details](docs/TOOLS.md)) |
+| **Image generation** | an image model of your own (stable-diffusion.cpp, AUTOMATIC1111 or an OpenAI-shaped API) draws and edits pictures in the chat; a third tool cuts a subject out of its background with no image model at all ([details](docs/CONFIGURATION.md#image-generation-optional)) |
 | **Files into the chat** | tools deliver images, HTML pages and downloads into the conversation by reference, never through the model; the HTML Designer agent builds self-contained pages and reports this way ([details](docs/TOOLS.md#returning-files-to-the-user-resources)) |
 | **MCP servers** | stdio and HTTP servers join the tool list; paste a Claude Desktop config to import ([details](docs/MCP.md)) |
 | **IoT & home automation** | agents call your devices' local HTTP APIs (Home Assistant, Shelly, Tasmota, ESPHome, Hue …) over the LAN ([details](docs/AGENTS.md#local-devices--home-automation)) |

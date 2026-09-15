@@ -817,7 +817,14 @@ as an app, with the shell available offline. Everything is relative
 (`start_url` and `scope` are `"."`), so it also installs from a subpath. The
 manifest needs its MIME type registered (`mimetypes.add_type` in
 `server/main.py`) — Python's table does not know `.webmanifest` and browsers
-reject a manifest served as `text/plain`.
+reject a manifest served as `text/plain`. The file on disk is a template: a
+route in `server/main.py` (registered before the static mount, which would
+otherwise answer first) serves it with the instance name — or the host name
+when none is set — stamped into `name` and `short_name` and the instance color
+into `theme_color`, so two servers installed as apps on one phone are not both
+called *MyAgent*. The same route serves it `no-cache`, so a rename reaches the
+browser on the next visit; the installed app itself only re-reads the manifest
+when it is reinstalled.
 
 Three properties of the service worker are load-bearing:
 
