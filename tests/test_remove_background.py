@@ -151,7 +151,7 @@ with tempfile.TemporaryDirectory() as td:
     check("e2e scene: named after the scene", "saved as photo-in-tropical-beach-at-sunset.png" in out and (ws / "photo-in-tropical-beach-at-sunset.png").is_file(), out)
     check("e2e scene: summary names the scene file", "kept as scene.png" in out, out)
     gp = json.loads((ws / "gen-params.json").read_text())
-    check("e2e scene: prompt asks for an empty scene", gp["prompt"].startswith("tropical beach at sunset") and "no people" in gp["prompt"] and "person" in gp["negative_prompt"], gp)
+    check("e2e scene: prompt asks for an empty scene", gp["prompt"].startswith("tropical beach at sunset") and "no people" in gp["prompt"] and "person" in gp["negative_prompt"] and gp["filename"] == "scene-tropical-beach-at-sunset", gp)
     res = Image.open(ws / "photo-in-tropical-beach-at-sunset.png").convert("RGB")
     check("e2e scene: background is the drawn scene (cropped, not stretched)", res.getpixel((2, 2)) == (0, 200, 0) and res.size == (60, 40))
     check("e2e scene: subject untouched", res.getpixel((30, 20)) == (1, 2, 3))

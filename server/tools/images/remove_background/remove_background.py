@@ -232,7 +232,8 @@ def draw_scene(prompt):
              "pass a colour or the path of an existing image as background.")
     params = {"prompt": f"{prompt}, empty scene, wide view, no people",
               "negative_prompt": "person, people, man, woman, child, face, figure, "
-                                 "silhouette, text, watermark"}
+                                 "silhouette, text, watermark",
+              "filename": f"scene-{slug(prompt, 'background')[:40]}"}
     try:
         proc = subprocess.run([str(run)], input=json.dumps(params), text=True,
                               capture_output=True, timeout=240, env=os.environ)
