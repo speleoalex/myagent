@@ -101,12 +101,28 @@ def clamp(params):
 
 
 def spawn_guardian():
+    """Restores the LLM if THIS process is killed. It is cancelled on a normal
+    exit (see main): left alive, it fired ~2 s after every run and, when a
+    second image call had already started, stopped ITS sd-server — measured
+    on two back-to-back edit_image calls, the second timed out after 120 s."""
     script = ("while kill -0 %d 2>/dev/null; do sleep 2; done; "
               "systemctl --user stop %s; systemctl --user start %s"
               % (os.getpid(), SD_UNIT, LLM_UNIT))
-    subprocess.Popen(["bash", "-c", script], start_new_session=True,
-                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                     stderr=subprocess.DEVNULL)
+    return subprocess.Popen(["bash", "-c", script], start_new_session=True,
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
+
+
+def acquire_lock():
+    """One arbitrage at a time: two image calls in flight (two agents, or a
+    retry) would stop and start the units under each other's feet. The second
+    waits for the first, which is what a shared GPU means anyway."""
+    import fcntl
+    path = os.path.join(os.environ.get("XDG_RUNTIME_DIR") or "/tmp",
+                        f"sd-arbitrage-{os.getuid()}.lock")
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    return fd
 
 
 def main():
@@ -123,7 +139,8 @@ def main():
     if notes:
         log("clamped for SD-Turbo: " + ", ".join(notes))
 
-    spawn_guardian()
+    lock = acquire_lock()
+    guardian = spawn_guardian()
     t0 = time.time()
     out, rc = "", 1
     try:
@@ -146,12 +163,14 @@ def main():
     except subprocess.TimeoutExpired:
         out, rc = "ERROR: the image backend took too long and was stopped\n", 1
     finally:
+        guardian.terminate()   # we are doing the restore ourselves
         log(f"restoring {LLM_UNIT}")
         sysctl("stop", SD_UNIT)
         sysctl("start", LLM_UNIT)
         if not wait_http(LLM_READY, START_TIMEOUT):
             log(f"WARNING: {LLM_UNIT} not healthy after {START_TIMEOUT} s")
         log(f"done in {time.time() - t0:.0f}s total")
+        os.close(lock)
         sys.stdout.write(out)
         if notes and rc == 0:
             print("\n(note: parameters clamped for SD-Turbo on this machine: "

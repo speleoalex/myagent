@@ -14,7 +14,7 @@
       },
       "mask": {
         "type": "string",
-        "description": "Optional path of a mask image with the same size as the source: WHITE = area to repaint, BLACK = keep. Without it the whole image is reworked. remove_background saves exactly such a mask (<name>-mask.png, white = background): pass it here to paint a new scene ONLY behind the subject, which stays untouched."
+        "description": "Optional path of a mask image with the same size as the source: WHITE = area to repaint, BLACK = keep. Without it the whole image is reworked. remove_background saves exactly such a mask (<name>-mask.png, white = background): pass it here to paint a new scene ONLY behind the subject, which stays untouched. Do NOT pass that mask for a change to the subject itself (clothes, hair, colours, expression): it protects the subject, so nothing would change. For those, omit the mask."
       },
       "strength": {
         "type": "number",
