@@ -38,6 +38,10 @@ function systemBrowserCandidates() {
         '/usr/bin/chromium-browser',
         '/usr/bin/google-chrome-stable',
         '/usr/bin/google-chrome',
+        // Ubuntu 24.04+ ships chromium ONLY as a snap: the apt package is a shim
+        // that installs it, and /usr/bin/chromium never appears. Last, so a real
+        // deb/tarball install still wins — the snap is confined and slower to start.
+        '/snap/bin/chromium',
     ];
 }
 
@@ -108,7 +112,12 @@ async function browseWeb(url, extract) {
                 '--incognito',
                 '--disk-cache-size=0',
                 '--disable-application-cache',
-            ]
+            ],
+            // Puppeteer's default 30s for the WS endpoint is a desktop figure.
+            // A snap-confined Chromium on a Jetson-class board needs more than
+            // that on its FIRST launch (measured: timed out at 30s, fine on the
+            // second run) — the whole tool would fail on a cold cache.
+            timeout: 90000,
         };
 
         const chromePath = findChromePath();

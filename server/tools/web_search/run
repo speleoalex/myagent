@@ -59,7 +59,12 @@ async function webSearch(query) {
                 '--incognito',
                 '--disk-cache-size=0',
                 '--disable-application-cache',
-            ]
+            ],
+            // Puppeteer's default 30s for the WS endpoint is a desktop figure.
+            // A snap-confined Chromium on a Jetson-class board needs more than
+            // that on its FIRST launch (measured: timed out at 30s, fine on the
+            // second run) — the whole tool would fail on a cold cache.
+            timeout: 90000,
         };
 
         const chromePath = findChromePath();

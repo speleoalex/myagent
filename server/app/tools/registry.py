@@ -137,6 +137,12 @@ class ToolRegistry:
         self._tool_env = dict(tool_env or {})
         self._cache: dict[str, dict] = {}
         self._mtimes: dict[str, float] = {}
+        # category -> parsed group.json ({"name", "description"}). Only the
+        # groups that ship one; the rest describe themselves by their members'
+        # names (see activation_catalogue). Same mtime cache discipline as the
+        # tools, and the same overlay rule: the user layer wins.
+        self._groups: dict[str, dict] = {}
+        self._group_mtimes: dict[str, float] = {}
         # Scan debounce: every query method calls _scan(), and one GET
         # /api/tools annotates each tool with 3 more queries — dozens of full
         # directory walks per request without this. Within the TTL the cache
@@ -180,14 +186,23 @@ class ToolRegistry:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _walk_layer(root: Path | None) -> dict[str, tuple[Path, str | None]]:
-        """One layer's tools as ``id -> (folder, category)``.
+    def _walk_layer(
+        root: Path | None,
+    ) -> tuple[dict[str, tuple[Path, str | None]], dict[str, Path]]:
+        """One layer's content: ``id -> (folder, category)`` and
+        ``category -> group.json path`` for the groups that describe themselves.
 
         Flat tools are collected before group folders, so on an id collision
-        within the layer the flat copy deterministically wins."""
+        within the layer the flat copy deterministically wins.
+
+        A group is a subfolder WITHOUT a ``tool.json`` — that test is the whole
+        rule, which is why the optional group metadata file is called
+        ``group.json``: any other name is invisible here, and naming it
+        ``tool.json`` would turn every described group into a broken tool."""
         out: dict[str, tuple[Path, str | None]] = {}
+        group_meta: dict[str, Path] = {}
         if root is None or not root.exists():
-            return out
+            return out, group_meta
 
         def add(entry: Path, category: str | None) -> None:
             tool_id = entry.name
@@ -206,10 +221,13 @@ class ToolRegistry:
             elif "/" not in entry.name and ".." not in entry.name:
                 groups.append(entry)
         for entry in groups:
+            gj = entry / "group.json"
+            if gj.exists():
+                group_meta[entry.name] = gj
             for sub in sorted(entry.iterdir()):
                 if sub.is_dir() and (sub / "tool.json").exists():
                     add(sub, entry.name)
-        return out
+        return out, group_meta
 
     _SCAN_TTL = 1.0  # seconds a scan result stays authoritative
 
@@ -227,8 +245,9 @@ class ToolRegistry:
         if not force and now - self._last_scan < self._SCAN_TTL:
             return
         self._last_scan = now
-        native = self._walk_layer(self._bundled_dir)
-        user = self._walk_layer(self._tools_dir)
+        native, native_groups = self._walk_layer(self._bundled_dir)
+        user, user_groups = self._walk_layer(self._tools_dir)
+        self._load_groups(native_groups, user_groups)
         self._native_dirs = {tid: entry for tid, (entry, _cat) in native.items()}
         self._user_dirs = {tid: entry for tid, (entry, _cat) in user.items()}
 
@@ -301,6 +320,105 @@ class ToolRegistry:
                 self._mtimes.pop(old_id, None)
                 self._dirs.pop(old_id, None)
                 log.info("Removed tool: %s", old_id)
+
+    def _load_groups(
+        self, native: dict[str, Path], user: dict[str, Path]
+    ) -> None:
+        """Parse the ``group.json`` files found by _walk_layer, mtime-cached.
+
+        The user layer wins a category described in both, matching the tool
+        overlay. A malformed file is dropped with a warning: a group that
+        cannot describe itself falls back to listing its members, which is
+        never wrong, only terser."""
+        paths = {**native, **user}
+        for category, path in paths.items():
+            try:
+                mtime = path.stat().st_mtime
+            except OSError:
+                continue
+            if (
+                category in self._groups
+                and self._group_mtimes.get(category) == mtime
+            ):
+                continue
+            try:
+                with open(path) as f:
+                    data = json.load(f)
+                if not isinstance(data, dict):
+                    raise ValueError("group.json must contain an object")
+                self._groups[category] = {
+                    "name": str(data.get("name") or category),
+                    "description": str(data.get("description") or ""),
+                }
+                self._group_mtimes[category] = mtime
+            except Exception as e:
+                log.warning("Failed to load group metadata %s: %s", path, e)
+                self._groups.pop(category, None)
+                self._group_mtimes.pop(category, None)
+        for stale in [c for c in self._groups if c not in paths]:
+            del self._groups[stale]
+            self._group_mtimes.pop(stale, None)
+
+    def group_meta(self, category: str) -> dict | None:
+        """The category's ``group.json`` content, or None when it ships none."""
+        self._scan()
+        return self._groups.get(category)
+
+    def activation_catalogue(self, tool_ids: list[str]) -> list[dict]:
+        """The lazy-activation catalogue for an agent's grants.
+
+        One entry per thing that can be switched on, each
+        ``{"key", "description", "tool_ids"}``:
+
+        - a **group**, keyed by category name — described by its ``group.json``
+          when it has one, by its granted members' names otherwise;
+        - a **flat tool**, keyed by its own id and carrying no description: the
+          id is the name the model will call, and spending the tool's
+          description here would rebuild most of what the flag exists to avoid;
+        - an **MCP server**, keyed ``mcp:<server>`` and described by its
+          granted tools' names, like an undescribed group.
+
+        On a group/flat-id collision the group wins and the flat tool is folded
+        into it, so no grant can ever become unreachable. Order is stable
+        (groups, flat tools, MCP servers, each alphabetical) because it becomes
+        an ``enum`` in a prompt, and a set's iteration order there would make
+        two identical turns differ.
+        """
+        self._scan()
+        groups: dict[str, list[str]] = {}
+        flat: dict[str, list[str]] = {}
+        for tid in self.expand_tool_ids(tool_ids):
+            meta = self._cache.get(tid)
+            if meta is None or not meta.get("enabled", True):
+                continue
+            category = meta.get("category")
+            if category:
+                groups.setdefault(category, []).append(tid)
+            else:
+                flat.setdefault(tid, []).append(tid)
+
+        mcp: dict[str, list[str]] = {}
+        if self.mcp_manager is not None:
+            for meta in self.mcp_manager.defs_for_tool_ids(tool_ids):
+                if meta["id"] in self._cache:
+                    continue  # a filesystem tool owns that id
+                server = ((meta.get("mcp") or {}).get("server")) or "?"
+                mcp.setdefault(f"mcp:{server}", []).append(meta["id"])
+
+        out: list[dict] = []
+        for key in sorted(groups):
+            ids = sorted(groups.pop(key) + flat.pop(key, []))
+            info = self._groups.get(key)
+            description = (info or {}).get("description") or ", ".join(ids)
+            out.append({"key": key, "description": description, "tool_ids": ids})
+        for key in sorted(flat):
+            out.append({"key": key, "description": "", "tool_ids": [key]})
+        for key in sorted(mcp):
+            ids = sorted(mcp[key])
+            out.append({
+                "key": key, "description": ", ".join(ids), "tool_ids": ids,
+            })
+        return out
 
     # ------------------------------------------------------------------
     # Query methods

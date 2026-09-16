@@ -377,6 +377,18 @@ class Agent(BaseModel):
     schedule_others: bool = False
     # Optional autonomy knobs; None = all defaults (live alone is enough).
     autonomous: AutonomousConfig | None = None
+    # Send the tool SCHEMAS only once the model asks for them. Off = today's
+    # behaviour (every granted schema in every iteration, which is the single
+    # biggest fixed cost of a turn: schemas count twice in
+    # LLMProvider.context_state, in `used` AND in `reserve`). On, the first
+    # iteration carries a catalogue of activatable categories plus the one
+    # `activate_tools` schema; the real schemas arrive when the model turns a
+    # category on, and stay for the rest of the turn.
+    #
+    # It never changes WHAT the agent may execute — `tools` alone decides that,
+    # and ToolRegistry.execute is not gated by the definitions. This is a
+    # visibility filter, so a mistake costs a round trip, never a capability.
+    lazy_tools: bool = False
 
     @field_validator("id")
     @classmethod
