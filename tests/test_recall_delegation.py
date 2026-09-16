@@ -142,8 +142,11 @@ def test_findings_section():
 
 def test_findings_section_is_not_gated_on_memory():
     """Session state, not long-term memory: an agent that delegates needs it
-    whether or not it keeps a memory (memory_enabled is False in _executor)."""
-    ex = _executor(["call_agent"])          # recall_delegation NOT granted
+    whether or not it keeps a memory (memory_enabled is False in _executor).
+
+    The "not granted" half uses an agent with NO tools, because `call_agent`
+    alone can no longer produce one (see the next case)."""
+    ex = _executor([])                      # recall_delegation NOT granted
     assert ex.agent.memory_enabled is False
     ex._delegations = delegation_history(_session_with(1))
     sec = ex._build_findings_section()
@@ -151,6 +154,41 @@ def test_findings_section_is_not_gated_on_memory():
     # The pointer is only advertised when the tool is actually granted.
     assert "recall_delegation" not in sec, sec
     print("ok: findings survive memory_enabled=False; tool line only when granted")
+
+
+def test_call_agent_implies_recall_delegation():
+    """`call_agent` carries `recall_delegation` with it, in the registry.
+
+    The UI pairs the two behind the *can delegate* switch, but that only
+    reaches an agent someone opens and re-saves: every agent written before
+    the pairing — and every agent file written by manage_agents or by hand —
+    kept `call_agent` alone, and so delegated with a findings block that
+    declares a truncation nothing can undo. The rule therefore lives in
+    ToolRegistry.expand_tool_ids, where both _granted_tools() and the schemas
+    sent to the model read it.
+    """
+    ex = _executor(["call_agent"])
+    assert ex.agent.tools == ["call_agent"], "the stored grant is left alone"
+    assert "recall_delegation" in ex._granted_tools()
+
+    # Not just claimed: the model is actually sent the schema, or the prompt
+    # would advertise a tool whose call comes back "unknown tool".
+    names = {d["id"] for d in
+             ex.tool_registry.get_definitions_for_agent(ex.agent.tools)}
+    assert names == {"call_agent", "recall_delegation"}, names
+
+    # And the findings block offers the way to the full text.
+    ex._delegations = delegation_history(_session_with(1))
+    assert "recall_delegation" in ex._build_findings_section()
+
+    # It works the other way round too: holding both explicitly is unchanged,
+    # and the implied id is never listed twice.
+    both = ex.tool_registry.expand_tool_ids(["call_agent", "recall_delegation"])
+    assert both == ["call_agent", "recall_delegation"], both
+
+    # An agent that does NOT delegate gains nothing.
+    assert "recall_delegation" not in _executor(["shell_exec"])._granted_tools()
+    print("ok: call_agent implies recall_delegation without rewriting the agent")
 
 
 async def test_recall_tool():
@@ -280,6 +318,7 @@ if __name__ == "__main__":
     test_history_extraction_and_stable_ids()
     test_findings_section()
     test_findings_section_is_not_gated_on_memory()
+    test_call_agent_implies_recall_delegation()
     asyncio.run(test_recall_tool())
     asyncio.run(test_cancellation())
     test_call_sites()

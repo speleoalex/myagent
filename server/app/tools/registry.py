@@ -610,11 +610,27 @@ class ToolRegistry:
         log.info("Created override for native tool %s at %s", tool_id, dst)
         return dst
 
+    #: Grants that carry another tool with them: holding the key implies
+    #: holding the values. ONLY for a tool that is meaningless on its own and
+    #: adds no reach of its own — ``recall_delegation`` reads back what an
+    #: earlier ``call_agent`` in this same chat returned, so an agent that
+    #: delegates without it has a truncated findings block and no way to
+    #: recover the rest. The UI pairs the two behind the *can delegate* switch,
+    #: but that pairing only applies to an agent someone re-saves; the rule
+    #: belongs here so agents written before it (and agent files written by
+    #: manage_agents, or by hand) behave the same without being touched.
+    #: Anything that WIDENS what an agent may reach does not go in here.
+    IMPLIED_TOOLS = {"call_agent": ("recall_delegation",)}
+
     def expand_tool_ids(self, tool_ids: list[str]) -> list[str]:
-        """Expand ``<category>/*`` grants into the enabled tool ids of that
-        group; every other entry (plain ids, ``mcp:`` entries) passes through
-        verbatim. For code that asks "does this agent hold tool X?" — the
-        wildcard-aware replacement for ``x in agent.tools``."""
+        """Expand an agent's grants into plain tool ids.
+
+        ``<category>/*`` becomes the enabled tool ids of that group, a grant in
+        :attr:`IMPLIED_TOOLS` pulls in its companion, and every other entry
+        (plain ids, ``mcp:`` entries) passes through verbatim. For code that
+        asks "does this agent hold tool X?" — the replacement for
+        ``x in agent.tools``, and the single place where a grant means more
+        than its own string."""
         self._scan()
         out: list[str] = []
         seen: set[str] = set()
@@ -631,6 +647,17 @@ class ToolRegistry:
                 if tid not in seen:
                     seen.add(tid)
                     out.append(tid)
+                # Implied only if the companion really exists and is enabled:
+                # claiming a grant the registry cannot serve would make the
+                # prompt advertise a tool that answers "unknown tool".
+                for implied in self.IMPLIED_TOOLS.get(tid, ()):
+                    meta = self._cache.get(implied)
+                    if implied in seen or meta is None:
+                        continue
+                    if not meta.get("enabled", True):
+                        continue
+                    seen.add(implied)
+                    out.append(implied)
         return out
 
     def get_all_definitions(self, include_mcp: bool = False) -> list[dict]:

@@ -90,7 +90,9 @@ switched on.
 Some grants are managed rather than picked: the three memory tools follow the
 single *memory* switch, and `call_agent` (with `recall_delegation`, which reads
 what an earlier `call_agent` returned and is useless alone) follows *can
-delegate*. The autonomy tools stay individually selectable, because
+delegate*. That last pair is also joined in the server: an agent whose file
+grants `call_agent` alone gets `recall_delegation` anyway, so it holds whoever
+wrote the file. The autonomy tools stay individually selectable, because
 `autonomy_control` is genuinely useful with `live` off.
 
 Two groups are moved out of the tool list into a box of their own, where each

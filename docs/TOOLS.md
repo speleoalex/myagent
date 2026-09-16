@@ -118,6 +118,16 @@ each tool can be ticked individually.
 > them one by one, in their own box under the tool list; grant them the same
 > way by hand (`"tools": ["manage_tools"]`), never `"self_management/*"`.
 
+One grant carries a second tool with it: `call_agent` always brings
+`recall_delegation`, which reads back in full what an agent replied earlier in
+the same chat and can answer nothing without it. The registry applies the pair
+when it expands an agent's grants, so a `tools` list holding only `call_agent`
+— written by hand, written by `manage_agents`, or saved before the two were
+joined — still delegates with a findings block that can be read to the end.
+That is the only implied grant, and the rule for adding another is narrow: the
+companion must be useless on its own and must not extend what the agent can
+reach. Anything that widens reach is always written out.
+
 ### `group.json` — describing a group
 
 A group folder may hold a **`group.json`** next to its tool folders. It is
