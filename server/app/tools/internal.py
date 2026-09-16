@@ -47,6 +47,40 @@ def _forward_sub_event(executor, agent_id: str, event: dict) -> None:
         }})
 
 
+def _trace_resources(trace: dict | None) -> list[dict]:
+    """Every file the called agent's turn delivered (its steps' ``resources``),
+    deepest delegations included, in order and without duplicates by path."""
+    out, seen = [], set()
+    for step in (trace or {}).get("steps") or []:
+        found = list(step.get("resources") or [])
+        found.extend(_trace_resources(step.get("sub_trace")))
+        for res in found:
+            path = res.get("path")
+            if path and path not in seen:
+                seen.add(path)
+                out.append(res)
+    return out
+
+
+def _produced_files_note(agent_id: str, resources: list[dict]) -> str:
+    """The line appended to a sub-agent's reply naming the files it produced.
+
+    Born from the heart-on-Telegram task: the illustrator drew the picture,
+    generate_image told it "do not paste the path", and its prose reply was ALL
+    the master got back — so the master, asked to send the picture with
+    notify_user, invented ``/workspace/heart_image.png`` twice and gave up on the
+    attachment the third time. The resources travel in the sub-trace for the
+    UI, but the calling MODEL reads only the reply text; this is where the
+    names reach it."""
+    names = ", ".join(
+        f"{r.get('path')} ({r.get('mime')})" if r.get("mime") else str(r.get("path"))
+        for r in resources)
+    return (f"\n\n[files produced by '{agent_id}', in the workspace: {names}. "
+            "In a chat they are already shown to the user, so refer to them by "
+            "name and do not paste the path; to send one to somebody, pass its "
+            "name in notify_user's attachments.]")
+
+
 def _resolve_attachments(executor, indices) -> list[dict]:
     """Map attachment_indices (from a call_agent tool-call) to the parent turn's
     actual attachments. The tool-call only carries small integer indices, so the
@@ -143,6 +177,12 @@ async def call_agent_handler(
             }
         )
 
+        # The reply is all the calling model sees of this turn (the trace goes
+        # to the UI, not to the prompt): name the files the sub-agent produced,
+        # or the caller cannot attach them to a notification.
+        produced = _trace_resources(response.trace)
+        if produced:
+            return (response.reply or "") + _produced_files_note(agent_id, produced)
         return response.reply
     except Exception as e:
         return f"ERROR: Failed to call agent '{agent_id}': {e}"

@@ -114,6 +114,11 @@ serves them.
   call, so the advertised list and the permitted list cannot drift. Between
   agents only the essentials travel: the caller's `message` in, the sub-agent's
   `reply` out — a sub-agent never receives the parent's conversation history.
+  One thing is added to the reply: when the sub-agent's turn delivered files
+  (an image it drew, a document it wrote), a closing note names them, because
+  the trace carrying them goes to the UI and not to the calling model — without
+  it a master asked to *send* the picture has no file name to give
+  `notify_user`, and invents one.
   The sub-agent's *activity* streams live: `call_agent_handler` passes an
   `event_sink` to the sub-executor's `run()`, which forwards every token /
   tool event as an `agent_event` envelope onto the parent's queue
