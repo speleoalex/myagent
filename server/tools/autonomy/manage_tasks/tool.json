@@ -16,11 +16,11 @@
       },
       "cron": {
         "type": "string",
-        "description": "Recurring: 5 fields 'minute hour day month weekday' (0=Sunday). '*/20 * * * *' every 20 minutes, '0 9 * * 1' Mondays at 09:00, '30 7 * * 1-5' weekdays at 07:30."
+        "description": "Recurring: 5 fields 'minute hour day month weekday' (0=Sunday). '*/20 * * * *' every 20 minutes, '0 9 * * 1' Mondays at 09:00, '30 7 * * 1-5' weekdays at 07:30. Never build one out of a delay: 'in 10 minutes' is in_s=600, NOT '0 10 * * *'."
       },
       "in_s": {
         "type": "integer",
-        "description": "One-off, this many seconds from now ('in one hour' = 3600). Use this for every relative time."
+        "description": "One-off, this many seconds from now ('in 10 minutes' = 600). Use this for a DELAY, never for a time of day that repeats."
       },
       "at": {
         "type": "string",
