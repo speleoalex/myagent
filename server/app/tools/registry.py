@@ -364,6 +364,38 @@ class ToolRegistry:
         self._scan()
         return self._groups.get(category)
 
+    _SUMMARY_LIMIT = 100  # characters, about 25 tokens
+
+    @staticmethod
+    def _catalogue_summary(text: str | None) -> str:
+        """The one line a tool gets in the activation catalogue.
+
+        A catalogue is read to CHOOSE, never to call, so it carries what a
+        description leads with and stops there: the first sentence, capped at
+        _SUMMARY_LIMIT on a word boundary. Tools state their purpose first and
+        spend the rest of the description on arguments and caveats, which is
+        exactly the weight lazy activation exists to defer."""
+        text = " ".join((text or "").split())
+        if not text:
+            return ""
+        m = re.match(r"(.+?[.!?])(?:\s|$)", text)
+        if m:
+            text = m.group(1)
+        if len(text) > ToolRegistry._SUMMARY_LIMIT:
+            cut = text[: ToolRegistry._SUMMARY_LIMIT].rsplit(" ", 1)[0]
+            text = (cut or text[: ToolRegistry._SUMMARY_LIMIT]).rstrip(",;:-— ")
+            text += "\u2026"
+        return text
+
+    def _category_members(self, category: str) -> set[str]:
+        """Every enabled tool the category holds, granted or not — the yardstick
+        for whether a grant covers the whole group."""
+        return {
+            tid
+            for tid, meta in self._cache.items()
+            if meta.get("category") == category and meta.get("enabled", True)
+        }
+
     def activation_catalogue(self, tool_ids: list[str]) -> list[dict]:
         """The lazy-activation catalogue for an agent's grants.
 
@@ -371,10 +403,17 @@ class ToolRegistry:
         ``{"key", "description", "tool_ids"}``:
 
         - a **group**, keyed by category name — described by its ``group.json``
-          when it has one, by its granted members' names otherwise;
-        - a **flat tool**, keyed by its own id and carrying no description: the
-          id is the name the model will call, and spending the tool's
-          description here would rebuild most of what the flag exists to avoid;
+          when it has one AND the agent holds the whole group, by its granted
+          members' names otherwise. A partial grant falls back deliberately:
+          ``group.json`` describes the group entire, so an agent holding only
+          ``list_dir`` would read "read, write, edit, append, list, search and
+          show files", switch the category on expecting ``file_write``, and get
+          a directory listing. Names of what it actually has cannot lie;
+        - a **flat tool**, keyed by its own id and described by the FIRST
+          SENTENCE of its own description, capped — a bare id reads fine for
+          ``get_current_time`` and tells a small model nothing about
+          ``recall_delegation``, while the full text would rebuild most of the
+          weight the flag exists to avoid;
         - an **MCP server**, keyed ``mcp:<server>`` and described by its
           granted tools' names, like an undescribed group.
 
@@ -409,10 +448,21 @@ class ToolRegistry:
         for key in sorted(groups):
             ids = sorted(groups.pop(key) + flat.pop(key, []))
             info = self._groups.get(key)
-            description = (info or {}).get("description") or ", ".join(ids)
-            out.append({"key": key, "description": description, "tool_ids": ids})
+            description = ""
+            if set(ids) >= self._category_members(key):
+                description = (info or {}).get("description") or ""
+            out.append({
+                "key": key,
+                "description": description or ", ".join(ids),
+                "tool_ids": ids,
+            })
         for key in sorted(flat):
-            out.append({"key": key, "description": "", "tool_ids": [key]})
+            meta = self._cache.get(key) or {}
+            out.append({
+                "key": key,
+                "description": self._catalogue_summary(meta.get("description")),
+                "tool_ids": [key],
+            })
         for key in sorted(mcp):
             ids = sorted(mcp[key])
             out.append({
