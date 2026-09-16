@@ -50,6 +50,12 @@ _NOTIFY_TARGETS_MAX = 20
 # prose can never disagree.
 _SCHEDULING_TOOLS = ("manage_tasks", "autonomy_control")
 
+# The gate of Agent.lazy_tools: the one schema an agent with the flag on
+# starts its turn with. Named here rather than looked up, because three
+# separate rules key on it (it is exempt from max_tool_calls, its round is
+# refunded, and it is injected without a grant).
+_ACTIVATE_TOOLS = "activate_tools"
+
 # Cap (chars) on the quoted transcript of history turns another agent answered
 # (see _split_history). Generous on purpose: the user's rule is that the agent
 # sees the whole conversation, and this is the channel those turns travel on.
@@ -216,6 +222,22 @@ class AgentExecutor:
         # The chat's per-request model pick (ChatRequest.model_override),
         # carried so call_agent propagates it to "default" sub-agents.
         self.model_override: str | None = None
+        # ---- Agent.lazy_tools turn state (all inert when the flag is off) ----
+        # Every definition this agent was granted, whether or not it is being
+        # sent right now. The text-protocol parser and the safety net read THIS,
+        # never the filtered list: a model that names a tool it holds must be
+        # obeyed, or a lazy agent would lose calls a non-lazy one executes.
+        self._full_tool_defs: list[dict] = []
+        # What can still be switched on, in catalogue order (see
+        # ToolRegistry.activation_catalogue). Empty = the flag is off for this
+        # turn, which is the single test the rest of the code uses.
+        self._lazy_catalogue: list[dict] = []
+        # Catalogue keys switched on so far. Grows only, and is cleared at the
+        # start of every turn: an activation lasts the turn, no longer.
+        self._lazy_active: set[str] = set()
+        # An activation happened since the last rebuild, so the loop has to
+        # recompute the payload before the next LLM call.
+        self._lazy_dirty: bool = False
 
     # ------------------------------------------------------------------
     # Small helpers
@@ -599,6 +621,14 @@ class AgentExecutor:
         or a delegated sub-agent would keep generating headless after the
         user stopped the turn — hence the finally.
         """
+        # The lazy-tools safety net, on the single funnel every execution
+        # passes through. A model that names a tool its agent HOLDS gets it run
+        # whether or not it remembered to switch the category on first — the
+        # registry never gated execution on the definitions, and this keeps a
+        # missed activation a round trip instead of a refusal. Loading it here
+        # also means the schema is in the next payload, so the model can correct
+        # a bad argument.
+        self._lazy_autoload(func_name)
         task = asyncio.create_task(
             self.tool_registry.execute(func_name, func_args, executor=self))
         try:
@@ -753,6 +783,181 @@ class AgentExecutor:
                 props["channel"]["enum"] = channels
             out.append(td)
         return out
+
+    # ------------------------------------------------------------------
+    # Lazy tool activation (Agent.lazy_tools)
+    # ------------------------------------------------------------------
+    #
+    # The schemas are the fixed cost of a turn: every iteration resends the
+    # whole array, and LLMProvider.context_state charges it twice, to `used`
+    # AND to `reserve`. Measured over the 29 bundled tools the full schemas are
+    # 7.9k tokens, 63% of which is `parameters` — the half that only matters at
+    # the instant a tool is called. So the flag splits the catalogue (what I can
+    # do) from the schema (how I call it), sends the first always and the second
+    # on request.
+    #
+    # It is a VISIBILITY filter and nothing else. ToolRegistry.execute is not
+    # gated by the definitions, _granted_tools() keeps returning the full
+    # expanded grant, and a call to a tool that is held but not yet loaded is
+    # honoured (see _execute_streaming). A mistake here costs a round trip,
+    # never a capability.
+
+    def _lazy_begin_turn(self, full_defs: list[dict]) -> None:
+        """Reset the per-turn activation state and build the catalogue.
+
+        Called once per turn, before the first payload. Leaves the catalogue
+        empty — which every other method reads as "the flag is off" — when the
+        agent did not ask for it, when it holds no tools, or when the gate tool
+        itself is missing from the registry."""
+        self._full_tool_defs = list(full_defs)
+        self._lazy_active = set()
+        self._lazy_catalogue = []
+        self._lazy_dirty = False
+        if not getattr(self.agent, "lazy_tools", False) or not full_defs:
+            return
+        if self.tool_registry.get_definition(_ACTIVATE_TOOLS) is None:
+            log.warning(
+                "Agent '%s' asks for lazy tools but '%s' is not installed — "
+                "sending every schema instead", self.agent.id, _ACTIVATE_TOOLS)
+            return
+        known = {d["id"] for d in full_defs}
+        catalogue = []
+        for entry in self.tool_registry.activation_catalogue(self.agent.tools):
+            # A catalogue entry that promises a tool this turn cannot serve (an
+            # MCP server that failed to connect, a disabled tool) would be a
+            # dead switch, so it is dropped rather than advertised.
+            ids = [t for t in entry["tool_ids"] if t in known]
+            if ids:
+                catalogue.append({**entry, "tool_ids": ids})
+        self._lazy_catalogue = catalogue
+
+    def _lazy_gate_def(self) -> dict | None:
+        """The ``activate_tools`` definition for right now, or None when there
+        is nothing left to switch on (at which point the payload is simply the
+        full set, exactly as without the flag).
+
+        The catalogue rides in the ``category`` parameter: the keys as an
+        ``enum`` so the model cannot invent one, the descriptions in the
+        parameter's own description. That placement is what makes the text
+        protocol work for free — _build_tools_prompt already renders an enum as
+        ``(one of: …)``. Deep-copied, like every other schema rewrite here: the
+        definitions live in the registry's cache, and an enum written in place
+        would follow another agent into its turn."""
+        remaining = [e for e in self._lazy_catalogue
+                     if e["key"] not in self._lazy_active]
+        if not remaining:
+            return None
+        base = self.tool_registry.get_definition(_ACTIVATE_TOOLS)
+        if base is None:
+            return None
+        td = copy.deepcopy(base)
+        props = td.setdefault("parameters", {}).setdefault("properties", {})
+        prop = props.get("category")
+        if not isinstance(prop, dict):
+            prop = {"type": "string"}
+            props["category"] = prop
+        prop["enum"] = [e["key"] for e in remaining]
+        lines = [
+            f"{e['key']}: {e['description']}" if e["description"] else e["key"]
+            for e in remaining
+        ]
+        prop["description"] = ("The category to switch on. Pick by what you "
+                               "need to DO:\n" + "\n".join(lines))
+        return td
+
+    def _lazy_filter(self, full_defs: list[dict]) -> list[dict]:
+        """What to actually SEND: the gate plus the schemas already switched on.
+
+        A no-op when the flag is off. The gate goes first because on the first
+        iteration it is the only thing the model can do."""
+        if not self._lazy_catalogue:
+            return full_defs
+        visible: set[str] = set()
+        for entry in self._lazy_catalogue:
+            if entry["key"] in self._lazy_active:
+                visible.update(entry["tool_ids"])
+        out = [d for d in full_defs if d["id"] in visible]
+        gate = self._lazy_gate_def()
+        return [gate] + out if gate is not None else out
+
+    def _lazy_callable_defs(self, tool_defs: list[dict]) -> list[dict]:
+        """Everything the model may INVOKE right now — wider than what is sent.
+
+        The text-protocol parser and _looks_like_tool_call must work off this:
+        scoped to the sent list, a local model that names a tool its agent holds
+        but has not loaded would have its call silently read as prose, and the
+        turn would end with an apology instead of the work."""
+        if not self._lazy_catalogue:
+            return tool_defs
+        out = list(self._full_tool_defs)
+        known = {d["id"] for d in out}
+        out += [d for d in tool_defs if d["id"] not in known]
+        return out
+
+    def _is_gate_call(self, tool_call: dict) -> bool:
+        """True for a call to the activation gate — the one tool that is free.
+
+        It buys the model nothing on its own, so charging it against
+        max_tool_calls (5 by default) would let the flag halve an agent's real
+        work."""
+        if not self._lazy_catalogue:
+            return False
+        return (tool_call.get("function") or {}).get("name") == _ACTIVATE_TOOLS
+
+    def activate_tool_categories(self, keys: list[str]) -> tuple[list[str], list[str]]:
+        """Switch categories on for the rest of this turn.
+
+        Returns (newly activated keys, unknown keys). Public because the
+        ``activate_tools`` handler is the caller — internal handlers receive
+        ``executor=self`` and this is the state they mutate."""
+        activated: list[str] = []
+        unknown: list[str] = []
+        by_key = {e["key"]: e for e in self._lazy_catalogue}
+        for key in keys:
+            key = (key or "").strip()
+            if not key:
+                continue
+            if key not in by_key:
+                unknown.append(key)
+                continue
+            if key in self._lazy_active:
+                continue
+            self._lazy_active.add(key)
+            activated.append(key)
+        if activated:
+            self._lazy_dirty = True
+        return activated, unknown
+
+    def lazy_tool_names(self, keys: list[str]) -> list[str]:
+        """The tool ids the given catalogue keys make callable."""
+        by_key = {e["key"]: e for e in self._lazy_catalogue}
+        out: list[str] = []
+        for key in keys:
+            for tid in (by_key.get(key) or {}).get("tool_ids", []):
+                if tid not in out:
+                    out.append(tid)
+        return out
+
+    def lazy_catalogue_keys(self) -> list[str]:
+        """Every switchable key, activated or not (for an error message)."""
+        return [e["key"] for e in self._lazy_catalogue]
+
+    def _lazy_autoload(self, tool_id: str) -> list[str]:
+        """Safety net: switch on whatever a tool needs to be visible.
+
+        Called on the way into every execution. A model that names a tool it
+        holds gets it run, activated or not — this is what keeps a missed
+        activation a round trip rather than a failure, and it is REQUIRED in
+        text mode, where _parse_text_tool_calls works off the full grant.
+        Returns the keys it had to turn on (empty when nothing was needed)."""
+        if not self._lazy_catalogue:
+            return []
+        needed = [e["key"] for e in self._lazy_catalogue
+                  if e["key"] not in self._lazy_active and tool_id in e["tool_ids"]]
+        if needed:
+            self.activate_tool_categories(needed)
+            self._debug_log(f"  LAZY autoload for {tool_id}: {', '.join(needed)}")
+        return needed
 
     @staticmethod
     def _flatten_content(content):
@@ -1548,6 +1753,12 @@ class AgentExecutor:
         # which run their own _run_stream_inner), and it never raises.
         await self.tool_registry.ensure_mcp(self.agent.tools)
         tool_defs = self.tool_registry.get_definitions_for_agent(self.agent.tools)
+        # Agent.lazy_tools: the CONNECTION stays eager (ensure_mcp above runs on
+        # the whole grant — a server that is down must be known now, not
+        # halfway through the turn), only the VISIBILITY is deferred. Inert
+        # unless the agent asked for it.
+        self._lazy_begin_turn(tool_defs)
+        tool_defs = self._lazy_filter(tool_defs)
 
         # Prior conversation (cleaned of tool-call artifacts). Memory-enabled
         # agents get a wide safety net: their real limit is the token-based
@@ -1741,10 +1952,14 @@ class AgentExecutor:
             # tool names (e.g. «retrieve it with memory_read(s-000014)») must
             # survive as the answer, not get eaten and replayed as junk calls.
             # In text mode the reply is the only call channel, so parse always.
+            # Scoped to everything the agent HOLDS, not to what was sent: with
+            # lazy tools the two differ, and a call to a held-but-unloaded tool
+            # has to be recognised here or it would be read as prose.
+            callable_defs = self._lazy_callable_defs(tool_defs)
             if not tool_calls and tool_defs and full_content and (
                     self.provider.supports_tools is False
-                    or self._looks_like_tool_call(full_content, tool_defs)):
-                parsed = self._parse_text_tool_calls(full_content, tool_defs)
+                    or self._looks_like_tool_call(full_content, callable_defs)):
+                parsed = self._parse_text_tool_calls(full_content, callable_defs)
                 if parsed:
                     log.info("Stream fallback: parsed %d tool call(s) from text", len(parsed))
                     self._debug_log(f"  Parsed from text: {json.dumps(parsed, ensure_ascii=False)}")
@@ -1754,7 +1969,7 @@ class AgentExecutor:
                     yield {"type": "clear_tokens"}
                 elif (self.provider.supports_tools is False
                         and malformed_retries < _MAX_MALFORMED_RETRIES
-                        and self._looks_like_tool_call(full_content, tool_defs)):
+                        and self._looks_like_tool_call(full_content, callable_defs)):
                     # The model decided on a tool but its JSON doesn't parse — one
                     # stray quote inside a message is enough. Treating that as the
                     # final answer silently drops the step it had decided on (and
@@ -1820,11 +2035,17 @@ class AgentExecutor:
                         continue
                 tool_calls = unique or None
 
-            # Check hard limit on total tool calls
+            # Check hard limit on total tool calls. The activation gate is
+            # exempt: it executes nothing, and counting it would let the flag
+            # spend an agent's whole budget on switching tools on. With the
+            # flag off _is_gate_call is always False, so this drops to the
+            # historical "forget every call".
             if tool_calls and total_tool_calls >= max_tool_calls:
-                self._debug_log(f"  MAX TOOL CALLS reached ({max_tool_calls}), forcing answer")
-                log.warning("Agent '%s' hit max_tool_calls limit (%d)", self.agent.id, max_tool_calls)
-                tool_calls = None
+                free = [tc for tc in tool_calls if self._is_gate_call(tc)]
+                if len(free) < len(tool_calls):
+                    self._debug_log(f"  MAX TOOL CALLS reached ({max_tool_calls}), forcing answer")
+                    log.warning("Agent '%s' hit max_tool_calls limit (%d)", self.agent.id, max_tool_calls)
+                tool_calls = free or None
 
             assistant_msg = {"role": "assistant", "content": full_content or None}
             if tool_calls:
@@ -1855,7 +2076,8 @@ class AgentExecutor:
 
                 if not isinstance(func_args, dict):
                     result = f"ERROR: Could not parse tool arguments: {raw_args}"
-                    total_tool_calls += 1
+                    if not self._is_gate_call(tc):
+                        total_tool_calls += 1
                     executed_calls.add(_tool_call_key(tc))
                     step = self._make_step(func_name, {}, result)
                     trace_steps.append(step)
@@ -1878,7 +2100,8 @@ class AgentExecutor:
                         yield item
                     else:
                         result = item
-                total_tool_calls += 1
+                if not self._is_gate_call(tc):
+                    total_tool_calls += 1
 
                 # Resource markers come out HERE, before the result flows
                 # anywhere: the model (and the text protocol's replay) sees the
@@ -1953,6 +2176,29 @@ class AgentExecutor:
                 if total_tool_calls >= max_tool_calls or iterations + 1 >= self.agent.max_iterations:
                     use_response_temp = True
                 self._debug_log("  Added 'decide: next tool or answer' nudge")
+
+            # Something was switched on this round: rebuild the payload so the
+            # next call carries the schemas that just became visible.
+            # _prepare_turn is called whole rather than reproduced — it is the
+            # single place where the enum rewrites, the system suffix and
+            # to_openai_format compose, and a second copy of that order would
+            # drift. Its other arguments are turn constants, so the rebuilt
+            # prompt differs from the first one only in its tool list.
+            if self._lazy_dirty:
+                self._lazy_dirty = False
+                system_content, tool_defs, openai_tools = self._prepare_turn(
+                    self._lazy_filter(self._full_tool_defs), attachments,
+                    memory_context, transcribed=transcribed,
+                    foreign_context=foreign_context)
+                messages[0] = {"role": "system", "content": system_content}
+                self._debug_log(
+                    f"  LAZY activated: {', '.join(sorted(self._lazy_active))}"
+                    f" -> {len(tool_defs)} schema(s) now visible")
+                # A round spent only on switching tools on did no work, so it is
+                # not charged. Bounded by construction: the active set only
+                # grows, so this can happen at most once per catalogue entry.
+                if all(self._is_gate_call(tc) for tc in tool_calls):
+                    iterations -= 1
 
         # Final response: last assistant content produced THIS turn only (never
         # reach into injected prior-turn history — see turn_start).

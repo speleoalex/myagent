@@ -45,6 +45,7 @@ from app.storage.memory import MemoryStore
 from app.storage.tasks import TaskStore
 from app.tools.registry import ToolRegistry
 from app.tools.internal import (
+    activate_tools_handler,
     autonomy_control_handler,
     call_agent_handler,
     manage_tasks_handler,
@@ -201,6 +202,10 @@ tool_registry.register_internal("call_agent", call_agent_handler)
 # nowhere in conversation[] (a `tool` message never survives the scaffolding
 # filter), so it is read back from the session on demand.
 tool_registry.register_internal("recall_delegation", recall_delegation_handler)
+# The gate of Agent.lazy_tools. Registered unconditionally and granted to
+# nobody: the executor injects it into the turn of the agents that asked for
+# lazy tools, which is why it is hidden from the tool picker.
+tool_registry.register_internal("activate_tools", activate_tools_handler)
 tool_registry.register_internal("memory_search", memory_search_handler)
 tool_registry.register_internal("memory_read", memory_read_handler)
 tool_registry.register_internal("memory_note", memory_note_handler)

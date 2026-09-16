@@ -75,6 +75,8 @@ I18n.translations.en = {
     'agents.mcpManyTools': '{n} tools: selecting them one by one, or restricting them on the server, keeps the prompt small.',
     'agents.toolsMissing': 'No longer available, kept so they are not lost:',
     'agents.toolsManagedElsewhere': 'Memory and autonomy tools are not listed here: they are granted from the Memory and Autonomous agent tabs.',
+    'agents.lazyTools': 'Activate automatically only when needed',
+    'agents.lazyToolsHelp': 'The agent keeps all the tools selected below. It just does not receive their instructions until it asks for them: the turn opens with the list of categories it can switch on, and the tools arrive on the first request. It frees a lot of context on small models, at the cost of one extra round when a tool is needed.',
     'agents.maxIterations': 'Max Iterations',
     'agents.maxToolCalls': 'Max Tool Calls',
     'agents.temperature': 'Temperature',

@@ -277,6 +277,15 @@ const AgentsPage = {
         { category: 'autonomy', expand: 'autonomy/*' },
     ],
 
+    /** Tools the SERVER injects into a turn, which therefore must never appear
+     *  in the picker: granting one would be meaningless (the executor adds it on
+     *  its own when the agent's flag asks for it) and unchecking it would not
+     *  take it away. A third source beside DERIVED_TOOLS and RELOCATED_TOOLS
+     *  because both of those own a grant — these own none, they are hidden and
+     *  nothing else. `activate_tools` is the gate of `lazy_tools`
+     *  (server/app/engine/executor.py). */
+    INJECTED_TOOLS: ['activate_tools'],
+
     /** AutonomousConfig defaults — mirrors server/app/models.py.
      *
      *  ONE table drives three things that used to be three separate copies: the
@@ -474,6 +483,7 @@ const AgentsPage = {
             if (d.hideCategory) categories.add(d.hideCategory);
         });
         this.RELOCATED_TOOLS.forEach(r => categories.add(r.category));
+        this.INJECTED_TOOLS.forEach(i => ids.add(i));
         return { ids, categories };
     },
 
@@ -768,7 +778,7 @@ const AgentsPage = {
     async renderForm(agentId, sourceId = '') {
         // callable_agents defaults to [] (no delegation) for NEW agents only:
         // the user opts in explicitly. Existing agents keep their stored value.
-        let agent = { id: '', name: '', description: '', model_id: '', system_prompt: '', tools: [], max_iterations: 10, max_tool_calls: 5, temperature: 0.7, enabled: true, callable: true, callable_agents: [], memory_enabled: false, memory_threshold: 4000, live: false, schedule_others: false, autonomous: null };
+        let agent = { id: '', name: '', description: '', model_id: '', system_prompt: '', tools: [], lazy_tools: false, max_iterations: 10, max_tool_calls: 5, temperature: 0.7, enabled: true, callable: true, callable_agents: [], memory_enabled: false, memory_threshold: 4000, live: false, schedule_others: false, autonomous: null };
         let isEdit = false;
 
         if (agentId) {
@@ -1003,6 +1013,11 @@ const AgentsPage = {
                             ${pane('tools', `
                                 <div class="mb-3">
                                     <label class="form-label">${i18n('agents.tools')}</label>
+                                    <div class="form-check form-switch mb-2">
+                                        <input class="form-check-input" type="checkbox" id="f-lazy-tools" ${agent.lazy_tools ? 'checked' : ''}>
+                                        <label class="form-check-label" for="f-lazy-tools"><strong>${i18n('agents.lazyTools')}</strong></label>
+                                        <div class="form-text">${i18n('agents.lazyToolsHelp')}</div>
+                                    </div>
                                     <div class="border rounded p-2" style="max-height:min(60vh,420px);overflow-y:auto">
                                         ${this.toolPicker(tools, agentTools, mcpStatus, hidden)}
                                     </div>
@@ -1203,6 +1218,10 @@ const AgentsPage = {
                 // never be contributed twice (it is not rendered, so it cannot be
                 // picked — the Set is insurance, not the mechanism).
                 tools: [...new Set([...picked, ...this.derivedGrants(state)])],
+                // WHEN the tools above are sent to the model, never WHICH ones it
+                // holds: with it on the turn opens with a catalogue of activatable
+                // categories and the schemas arrive on demand. Same grant either way.
+                lazy_tools: document.getElementById('f-lazy-tools').checked,
                 // RangeField.read, not `parseInt(...) || dflt`: 0 is a legitimate
                 // value here (temperature 0 = greedy decoding) and the old idiom
                 // silently turned it into the default.

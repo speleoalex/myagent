@@ -75,6 +75,8 @@ I18n.translations.it = {
     'agents.mcpManyTools': '{n} strumenti: selezionarli uno per uno, o restringerli sul server, tiene il prompt piccolo.',
     'agents.toolsMissing': 'Non più disponibili, conservati per non perderli:',
     'agents.toolsManagedElsewhere': 'Gli strumenti di memoria e autonomia non sono elencati qui: si assegnano dalle schede Memoria e Agente autonomo.',
+    'agents.lazyTools': 'Attiva automaticamente solo se necessari',
+    'agents.lazyToolsHelp': 'L\'agente conserva tutti gli strumenti selezionati qui sotto. Semplicemente non ne riceve le istruzioni finché non le chiede: il turno si apre con l\'elenco delle categorie che può accendere, e gli strumenti arrivano alla prima richiesta. Libera molto contesto sui modelli piccoli, al prezzo di un giro in più quando serve uno strumento.',
     'agents.maxIterations': 'Iterazioni Massime',
     'agents.maxToolCalls': 'Max Chiamate Tool',
     'agents.temperature': 'Temperatura',

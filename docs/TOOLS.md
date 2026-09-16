@@ -103,6 +103,46 @@ that moment*, so a tool later added to the folder is picked up automatically.
 In the agent form the group appears with a master checkbox (the wildcard) or
 each tool can be ticked individually.
 
+### `group.json` — describing a group
+
+A group folder may hold a **`group.json`** next to its tool folders. It is
+optional, and the only file name that would break the layout rule is
+`tool.json` (that is what makes a folder a tool), so there is no conflict:
+
+```json
+{
+  "name": "Files",
+  "description": "read, write, edit, append, list, search and show files and folders in the workspace."
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `name` | human-readable group name |
+| `description` | one line saying what the group is **for**, in terms of what the agent would want to do |
+
+It is read by the agent flag **«Activate automatically only when needed»**
+(`Agent.lazy_tools`, the Tools tab of the agent form). With that flag on, the
+turn opens with the list of categories the agent may switch on instead of the
+tool schemas themselves, and this `description` is the line the model reads to
+choose one — so write it as a purpose, not as an inventory.
+
+Without a `group.json` the category still appears, described by the **names**
+of the agent's tools inside it. That is never wrong, only terser. A malformed
+file is ignored with a warning and falls back to the same names.
+
+The same fallback applies when the agent holds only **part** of the group: this
+`description` describes the group entire, so an agent granted just `list_dir`
+would otherwise read "read, write, edit, append, list, search and show files",
+switch the category on and get a directory listing. Names of what it really
+holds cannot mislead it. A **flat** tool (one outside any group) is its own
+catalogue entry, described by the **first sentence** of its own `tool.json`
+description, capped at 100 characters — enough to choose by, far short of the
+parameters the flag exists to defer.
+
+The user layer wins a group described in both layers, like the tools, and the
+file is mtime-cached and hot-reloaded like `tool.json`.
+
 ## The `run` contract
 
 - `run` must be executable (`chmod +x`) and start with a shebang

@@ -55,6 +55,12 @@ _AGENT_DEFAULTS = {
     "live": False,
     "schedule_others": False,
     "autonomous": None,
+    # Cost switch, not a capability: it delays WHEN the granted tool schemas
+    # reach the model, never WHICH tools the agent holds — so unlike
+    # schedule_others it is left out of tool.json for cost, not for safety.
+    # Every extra parameter there is schema weight on every turn of every agent
+    # that can write agents, and this one is a tuning choice the UI owns.
+    "lazy_tools": False,
 }
 
 

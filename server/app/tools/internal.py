@@ -269,6 +269,62 @@ async def recall_delegation_handler(id: str = "", agent_id: str = "",
                      + ["Call recall_delegation with id=<id> for the full reply."])
 
 
+# ----------------------------------------------------------------------
+# activate_tools — the gate of Agent.lazy_tools
+# ----------------------------------------------------------------------
+
+# Same lesson as manage_tasks' _NOT_SCHEDULED and recall_delegation's
+# _NOT_RECALLED: a bare "ERROR: ..." makes a small model give up and tell the
+# user the capability is missing. Every refusal here names the valid keys and
+# asks for the retry in the SAME turn.
+_NOT_ACTIVATED = "NOTHING ACTIVATED — "
+
+
+async def activate_tools_handler(category: str = "", executor=None,
+                                 **kwargs) -> str:
+    """Switch a category of tools on for the rest of this turn.
+
+    The schema advertises ONE category, because that is what a small model
+    handles reliably and the round it costs is refunded. The handler still
+    accepts a comma- or space-separated list: models write one anyway, and
+    rejecting it would spend a real iteration teaching syntax.
+
+    The executor does the work (activate_tool_categories); this only talks. The
+    reply names the tools that just became callable, so the model can call one
+    immediately instead of asking what it got.
+    """
+    if executor is None:
+        return "ERROR: No executor context available for activate_tools"
+    keys = [k for k in re.split(r"[,\s]+", (category or "").strip()) if k]
+    available = executor.lazy_catalogue_keys()
+    if not available:
+        # The flag is off, or every category is already on. Either way the
+        # schemas are already there — say so rather than looking broken.
+        return ("Every tool you hold is already available. Call the one you "
+                "need directly, without activating anything.")
+    if not keys:
+        return (_NOT_ACTIVATED + "no category was given. Call activate_tools "
+                f"again with category set to one of: {', '.join(available)}.")
+
+    activated, unknown = executor.activate_tool_categories(keys)
+    if unknown and not activated:
+        return (_NOT_ACTIVATED + f"unknown category: {', '.join(unknown)}. "
+                f"Call activate_tools again with one of: {', '.join(available)}.")
+
+    parts = []
+    if activated:
+        names = executor.lazy_tool_names(activated)
+        parts.append(f"Activated {', '.join(activated)}. You can now call: "
+                     f"{', '.join(names)}. Their full parameters are in your "
+                     "tool list from the next message on — call one now.")
+    else:
+        parts.append(f"Already active: {', '.join(keys)}. Call its tools "
+                     "directly.")
+    if unknown:
+        parts.append(f"Ignored unknown category: {', '.join(unknown)}.")
+    return " ".join(parts)
+
+
 # Values a model types when the schema says "omit this to use the default" — it
 # helpfully writes the word instead of leaving the argument out. Observed live:
 # a wake passed binding_id="default", which is truthy, so it beat the agent's
