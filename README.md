@@ -103,7 +103,7 @@ years. Even when the internet doesn't.
 | Feature | Description |
 | ------- | ----------- |
 | **Any LLM backend** | llama.cpp, Ollama, any OpenAI-compatible API and the Anthropic API, spoken natively; the context window is *probed*, not guessed |
-| **Built for small local models** | tool calls parsed from plain text for models without native function calling, loop protection, malformed-call retries ([why](docs/DESIGN.md)) |
+| **Built for small local models** | tool calls parsed from plain text for models without native function calling, loop protection, malformed-call retries, and tool schemas sent only when the model asks for them, so they stop eating half a 16k context ([why](docs/DESIGN.md)) |
 | **Offline library** | Wikipedia ZIM archives and your own documents in `~/myagent/library/` (PDF, Word, Excel, PowerPoint, Markdown), searched full-text; full articles and documents deliverable into the chat as files ([details](library/README.md)) |
 | **Semantic search** | opt-in: pick a local embedding model and your own documents are matched by meaning as well as by words, across languages — the index builds in the background and never leaves the machine ([details](docs/CONFIGURATION.md#semantic-search-optional)) |
 | **Atomic agents** | an agent is just `model + system prompt + tools`, editable from the UI and stored as a JSON file |
