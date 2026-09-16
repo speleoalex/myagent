@@ -376,6 +376,22 @@ fi
 echo "[3/5] Tools..."
 find "$INSTALL_DIR/server/tools" -name "run" -exec chmod +x {} \;
 
+# Upgrading from before the web/ and self_management/ groups: these tools moved
+# into group folders, but rsync --delete never removes an EXCLUDED path, so the
+# old flat folders survive holding nothing but their node_modules. In the
+# bundled catalog a folder without a tool.json is a GROUP, so what is left over
+# reads as an empty category — plus a duplicate puppeteer tree on disk. The
+# missing tool.json is exactly what proves it is a leftover and not a tool, so
+# that is the condition, and the loop touches only the install dir, never the
+# user's own tools.
+for stale in browse_web web_search web_research manage_agents manage_tools; do
+    d="$INSTALL_DIR/server/tools/$stale"
+    if [ -d "$d" ] && [ ! -e "$d/tool.json" ]; then
+        rm -rf "$d"
+        echo "  Removed the pre-group leftover server/tools/$stale/"
+    fi
+done
+
 # browse_web / web_search are Node scripts that need puppeteer-core. web_search
 # shares browse_web's node_modules through a relative symlink (git does not
 # preserve it: node_modules/ is ignored). A function because the optional
