@@ -18,6 +18,9 @@ function findChromePath() {
         '/usr/bin/chromium-browser',
         '/usr/bin/google-chrome-stable',
         '/usr/bin/google-chrome',
+        // Ubuntu 24.04+ ships chromium ONLY as a snap; last, so a real
+        // deb/tarball install still wins. Mirrors browse_web's list.
+        '/snap/bin/chromium',
     ];
     for (const bin of systemBinaries) {
         if (bin && fs.existsSync(bin)) return bin;

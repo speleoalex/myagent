@@ -15,7 +15,7 @@ from pathlib import Path
 TOOLS_DIR = Path(__file__).resolve().parent.parent
 MAX_PAGES = 2          # how many top results to actually read
 PER_PAGE_CHARS = 2500  # keep the returned context bounded/atomic
-SUBTOOL_TIMEOUT = 45
+SUBTOOL_TIMEOUT = 120  # a cold headless Chromium on a small ARM board needs it
 
 
 def run_tool(name: str, payload: dict, timeout: int) -> str:
