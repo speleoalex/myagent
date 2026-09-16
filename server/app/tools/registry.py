@@ -387,6 +387,22 @@ class ToolRegistry:
             text += "\u2026"
         return text
 
+    def _members_summary(self, ids: list[str], descriptions: dict[str, str]) -> str:
+        """What an entry says when it cannot speak as a whole: each member's own
+        first sentence, behind its id.
+
+        A group speaks through its ``group.json`` only when the agent holds it
+        entire; a partial grant, and an MCP server (which has no group file at
+        all), fall back here. The ids alone were ambiguous in exactly the case
+        the fallback exists for — ``manage_tools`` next to ``manage_agents``
+        tells a small model nothing about which one writes an agent — so each
+        id carries the one sentence its own tool leads with."""
+        parts = []
+        for tid in ids:
+            summary = self._catalogue_summary(descriptions.get(tid))
+            parts.append(f"{tid}: {summary}" if summary else tid)
+        return "; ".join(parts)
+
     def _category_members(self, category: str) -> set[str]:
         """Every enabled tool the category holds, granted or not — the yardstick
         for whether a grant covers the whole group."""
@@ -404,18 +420,19 @@ class ToolRegistry:
 
         - a **group**, keyed by category name — described by its ``group.json``
           when it has one AND the agent holds the whole group, by its granted
-          members' names otherwise. A partial grant falls back deliberately:
-          ``group.json`` describes the group entire, so an agent holding only
-          ``list_dir`` would read "read, write, edit, append, list, search and
-          show files", switch the category on expecting ``file_write``, and get
-          a directory listing. Names of what it actually has cannot lie;
+          members' own first sentences otherwise. A partial grant falls back
+          deliberately: ``group.json`` describes the group entire, so an agent
+          holding only ``list_dir`` would read "read, write, edit, append,
+          list, search and show files", switch the category on expecting
+          ``file_write``, and get a directory listing. Only what it actually
+          holds may describe it;
         - a **flat tool**, keyed by its own id and described by the FIRST
           SENTENCE of its own description, capped — a bare id reads fine for
           ``get_current_time`` and tells a small model nothing about
           ``recall_delegation``, while the full text would rebuild most of the
           weight the flag exists to avoid;
         - an **MCP server**, keyed ``mcp:<server>`` and described by its
-          granted tools' names, like an undescribed group.
+          granted tools' first sentences, like a partially granted group.
 
         On a group/flat-id collision the group wins and the flat tool is folded
         into it, so no grant can ever become unreachable. Order is stable
@@ -437,12 +454,14 @@ class ToolRegistry:
                 flat.setdefault(tid, []).append(tid)
 
         mcp: dict[str, list[str]] = {}
+        mcp_descriptions: dict[str, str] = {}
         if self.mcp_manager is not None:
             for meta in self.mcp_manager.defs_for_tool_ids(tool_ids):
                 if meta["id"] in self._cache:
                     continue  # a filesystem tool owns that id
                 server = ((meta.get("mcp") or {}).get("server")) or "?"
                 mcp.setdefault(f"mcp:{server}", []).append(meta["id"])
+                mcp_descriptions[meta["id"]] = meta.get("description")
 
         out: list[dict] = []
         for key in sorted(groups):
@@ -453,7 +472,8 @@ class ToolRegistry:
                 description = (info or {}).get("description") or ""
             out.append({
                 "key": key,
-                "description": description or ", ".join(ids),
+                "description": description or self._members_summary(
+                    ids, {t: (self._cache.get(t) or {}).get("description") for t in ids}),
                 "tool_ids": ids,
             })
         for key in sorted(flat):
@@ -466,7 +486,9 @@ class ToolRegistry:
         for key in sorted(mcp):
             ids = sorted(mcp[key])
             out.append({
-                "key": key, "description": ", ".join(ids), "tool_ids": ids,
+                "key": key,
+                "description": self._members_summary(ids, mcp_descriptions),
+                "tool_ids": ids,
             })
         return out
 

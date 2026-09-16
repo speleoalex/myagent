@@ -217,10 +217,10 @@ def test_per_agent_enum_does_not_leak():
     print("ok: each agent's enum is its own, the registry's copy stays pristine")
 
 
-def test_group_description_falls_back_to_names():
+def test_group_description_falls_back_to_members():
     """`group.json` is optional. Without one a category describes itself with
-    its members' names — terse, deterministic, and exactly the names the model
-    will see once it activates."""
+    its members — each id followed by the first sentence of its own tool.json,
+    which is exactly what the model gets to call once it activates."""
     user = Path(_TMP) / "userlayer"
     (user / "gadgets" / "widget").mkdir(parents=True, exist_ok=True)
     (user / "gadgets" / "widget" / "tool.json").write_text(json.dumps({
@@ -234,10 +234,10 @@ def test_group_description_falls_back_to_names():
     assert registry.group_meta("gadgets") is None
     entry = [e for e in registry.activation_catalogue(["gadgets/*"])
              if e["key"] == "gadgets"][0]
-    assert entry["description"] == "widget", entry
+    assert entry["description"] == "widget: does widget things", entry
     assert entry["tool_ids"] == ["widget"], entry
 
-    # With one, the category speaks for itself and the names stay out.
+    # With one, the category speaks for itself and the members stay out.
     (user / "gadgets" / "group.json").write_text(json.dumps(
         {"name": "Gadgets", "description": "fiddle with gadgets."}))
     registry.mark_dirty()
@@ -252,14 +252,14 @@ def test_group_description_falls_back_to_names():
     assert registry.group_meta("gadgets") is None
     entry = [e for e in registry.activation_catalogue(["gadgets/*"])
              if e["key"] == "gadgets"][0]
-    assert entry["description"] == "widget", entry
+    assert entry["description"] == "widget: does widget things", entry
     print("ok: group.json is optional, wins when present, and never breaks the scan")
 
 
 def test_partial_group_grant_drops_the_group_description():
     """`group.json` describes the group ENTIRE. An agent holding one member of
     it must not read the whole group's purpose and switch the category on
-    expecting tools it was never granted."""
+    expecting tools it was never granted — it reads its own members instead."""
     registry = _registry()
     whole = [e for e in registry.activation_catalogue(["file_management/*"])
              if e["key"] == "file_management"][0]
@@ -269,8 +269,20 @@ def test_partial_group_grant_drops_the_group_description():
     part = [e for e in registry.activation_catalogue(["list_dir"])
             if e["key"] == "file_management"][0]
     assert part["tool_ids"] == ["list_dir"], part
-    assert part["description"] == "list_dir", part
-    print("ok: a partial grant describes itself with the names it really holds")
+    assert part["description"] == (
+        "list_dir: List what a folder contains: sub-folders with their item "
+        "count, files with size and date."), part
+
+    # Two members: each speaks for itself, behind its own id. Ids alone said
+    # nothing — this is the case the fallback exists for.
+    pair = [e for e in registry.activation_catalogue(["file_read", "list_dir"])
+            if e["key"] == "file_management"][0]
+    assert pair["tool_ids"] == ["file_read", "list_dir"], pair
+    assert pair["description"] == (
+        "file_read: Read the contents of a file and return it as text.; "
+        "list_dir: List what a folder contains: sub-folders with their item "
+        "count, files with size and date."), pair
+    print("ok: a partial grant describes itself with what it really holds")
 
 
 def test_flat_tool_carries_its_first_sentence():
@@ -331,7 +343,7 @@ if __name__ == "__main__":
     asyncio.run(test_activation_is_not_charged_and_stays_for_the_turn())
     test_unloaded_tool_still_runs()
     test_per_agent_enum_does_not_leak()
-    test_group_description_falls_back_to_names()
+    test_group_description_falls_back_to_members()
     test_partial_group_grant_drops_the_group_description()
     test_flat_tool_carries_its_first_sentence()
     test_bundled_groups_describe_themselves()

@@ -127,17 +127,21 @@ turn opens with the list of categories the agent may switch on instead of the
 tool schemas themselves, and this `description` is the line the model reads to
 choose one — so write it as a purpose, not as an inventory.
 
-Without a `group.json` the category still appears, described by the **names**
-of the agent's tools inside it. That is never wrong, only terser. A malformed
-file is ignored with a warning and falls back to the same names.
+Without a `group.json` the category still appears, described by its **members**
+— each tool id followed by the first sentence of its own `tool.json`. That is
+never wrong, only longer. A malformed file is ignored with a warning and falls
+back to the same members.
 
-The same fallback applies when the agent holds only **part** of the group: this
-`description` describes the group entire, so an agent granted just `list_dir`
-would otherwise read "read, write, edit, append, list, search and show files",
-switch the category on and get a directory listing. Names of what it really
-holds cannot mislead it. A **flat** tool (one outside any group) is its own
-catalogue entry, described by the **first sentence** of its own `tool.json`
-description, capped at 100 characters — enough to choose by, far short of the
+The same fallback applies when the agent holds only **part** of the group,
+because this `description` describes the group entire: an agent granted just
+`list_dir` would otherwise read "read, write, edit, append, list, search and
+show files", switch the category on and get a directory listing. Only what the
+agent actually holds may describe it.
+
+A **flat** tool (one outside any group) is its own catalogue entry, described
+by the **first sentence** of its own `tool.json` description. Every sentence
+the catalogue prints, in a group fallback or on its own, is capped at 100
+characters on a word boundary — enough to choose by, far short of the
 parameters the flag exists to defer.
 
 The user layer wins a group described in both layers, like the tools, and the
