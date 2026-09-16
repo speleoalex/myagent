@@ -248,12 +248,22 @@ const AgentsPage = {
         },
         {
             key: 'delegate',
-            // Flat internal tool — no category wildcard covers it. The executor
-            // injects the agents directory only when it is granted, and
-            // internal.py's call_agent handler is the real gate, so delegation
-            // must be granted explicitly and can never be merely implied.
-            hideIds: ['call_agent'],
-            grant: (s) => (s.delegate ? ['call_agent'] : []),
+            // Flat internal tools — no category wildcard covers them. The
+            // executor injects the agents directory only when call_agent is
+            // granted, and internal.py's call_agent handler is the real gate,
+            // so delegation must be granted explicitly and can never be merely
+            // implied.
+            //
+            // recall_delegation rides WITH it because the two are one concept
+            // split in half: it reads executor.delegations, which nothing but
+            // call_agent ever fills. Alone it is a schema sent every iteration
+            // that can only ever answer "no agent has been called". Missing
+            // while call_agent is granted is the worse half: _build_findings
+            // checks for it (can_recall) and silently drops the "recall for the
+            // rest" pointer at a truncation, so a long sub-agent reply becomes
+            // unrecoverable — the exact bug this tool was written for.
+            hideIds: ['call_agent', 'recall_delegation'],
+            grant: (s) => (s.delegate ? ['call_agent', 'recall_delegation'] : []),
         },
     ],
 

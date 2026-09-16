@@ -103,7 +103,7 @@ I18n.translations.it = {
     'agents.callableAll': 'Tutti gli agenti (*)',
     'agents.callableHint': 'Vale solo se la delega è attiva. Un agente non richiamabile è bloccato anche se inserito in un\'allowlist esplicita.',
     'agents.canDelegate': 'Può delegare ad altri agenti',
-    'agents.canDelegateHelp': 'Assegna il tool call_agent e aggiunge al suo prompt l\'elenco degli agenti raggiungibili. Disattivato = lavora da solo.',
+    'agents.canDelegateHelp': 'Assegna i tool call_agent e recall_delegation, e aggiunge al suo prompt l\'elenco degli agenti raggiungibili. Il secondo rilegge per intero le risposte ricevute nei turni precedenti: senza, una risposta lunga viene troncata nel prompt e non è più recuperabile. Disattivato = lavora da solo.',
     'agents.delegateAutoOn': 'Scegliere un agente qui attiva la delega.',
     'agents.delegateNoTargets': 'La delega è attiva ma nessun agente è consentito: ogni chiamata verrebbe rifiutata.',
     'agents.memory': 'Memoria',

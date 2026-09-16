@@ -103,7 +103,7 @@ I18n.translations.en = {
     'agents.callableAll': 'All agents (*)',
     'agents.callableHint': 'Only applies when delegation is on. A non-callable agent is blocked even when added to an explicit allowlist.',
     'agents.canDelegate': 'Can delegate to other agents',
-    'agents.canDelegateHelp': 'Grants the call_agent tool and adds the directory of reachable agents to its prompt. Off = it works alone.',
+    'agents.canDelegateHelp': 'Grants the call_agent and recall_delegation tools, and adds the directory of reachable agents to its prompt. The second one reads back in full what agents replied in earlier turns: without it a long reply is truncated in the prompt and cannot be recovered. Off = it works alone.',
     'agents.delegateAutoOn': 'Picking an agent here turns delegation on.',
     'agents.delegateNoTargets': 'Delegation is on but no agent is allowed: every call would be refused.',
     'agents.memory': 'Memory',
