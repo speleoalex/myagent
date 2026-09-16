@@ -88,9 +88,25 @@ in the tab labels, so you can see from the outside which panes have something
 switched on.
 
 Some grants are managed rather than picked: the three memory tools follow the
-single *memory* switch, and `call_agent` follows *can delegate*. The autonomy
-tools stay individually selectable, because `autonomy_control` is genuinely
-useful with `live` off.
+single *memory* switch, and `call_agent` (with `recall_delegation`, which reads
+what an earlier `call_agent` returned and is useless alone) follows *can
+delegate*. The autonomy tools stay individually selectable, because
+`autonomy_control` is genuinely useful with `live` off.
+
+Two groups are moved out of the tool list into a box of their own, where each
+member gets a sentence saying what granting it really means: **autonomy**
+(*Autonomy* tab) and **self management** — `manage_agents` and `manage_tools`,
+under the tool list. The second box is the one to read twice: an agent that can
+write agents can give itself any permission, and an agent that can write tools
+can run new code on the machine. Both are granted one tool at a time, never as
+a whole category, so a tool added to the group later cannot widen an agent that
+already exists.
+
+*Activate automatically only when needed* (Tools tab) does not change what an
+agent may call, only when its schemas are sent: the turn opens with a one-line
+catalogue of the categories the agent holds, and the full schemas arrive when
+the model asks for one. It pays off on small local models, where the tool
+schemas can be half the context window.
 
 ### Working folder
 

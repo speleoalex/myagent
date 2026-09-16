@@ -126,8 +126,8 @@ if [ ${#INSTANCES[@]} -eq 0 ]; then
         echo "This checkout has a dev venv ($SOURCE_DIR/server/.venv)."
         if ask "Remove the venv and the web tools' node_modules from the checkout?"; then
             run rm -rf "$SOURCE_DIR/server/.venv" \
-                       "$SOURCE_DIR/server/tools/browse_web/node_modules" \
-                       "$SOURCE_DIR/server/tools/web_search/node_modules"
+                       "$SOURCE_DIR/server/tools/web/browse_web/node_modules" \
+                       "$SOURCE_DIR/server/tools/web/web_search/node_modules"
             echo "Done. Your data under ~/myagent was not touched."
         fi
     fi
@@ -213,8 +213,8 @@ for entry in "${PLAN_DIRS[@]}"; do
     run pkill -f "$code/server/.venv/bin/python .*main\.py" 2>/dev/null || true
     if [ "$how" = inplace ]; then
         run rm -rf "$code/server/.venv" \
-                   "$code/server/tools/browse_web/node_modules" \
-                   "$code/server/tools/web_search/node_modules"
+                   "$code/server/tools/web/browse_web/node_modules" \
+                   "$code/server/tools/web/web_search/node_modules"
     else
         run rm -rf "$code"
     fi

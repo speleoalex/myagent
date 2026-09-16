@@ -91,9 +91,15 @@ def bundled_dir() -> Path | None:
     """The app's read-only native catalog (server/tools). Located through
     MYAGENT_APP_DIR (exported by the registry to every tool subprocess); when
     absent, fall back to this script's own location, which IS the bundled
-    catalog unless the user has an override copy of manage_agents."""
+    catalog unless the user has an override copy of manage_agents. That location is
+    one level up when the tool ships flat and two when it ships inside a group
+    folder, so the root is the nearest ancestor named `tools`."""
     app_dir = os.environ.get("MYAGENT_APP_DIR")
-    root = Path(app_dir) / "tools" if app_dir else Path(__file__).resolve().parent.parent
+    if app_dir:
+        root = Path(app_dir) / "tools"
+    else:
+        here = Path(__file__).resolve().parent
+        root = next((a for a in here.parents if a.name == "tools"), here.parent)
     try:
         if not root.is_dir() or root.resolve() == tools_dir().resolve():
             return None

@@ -274,7 +274,17 @@ const AgentsPage = {
      *  per-tool state on load, because the three tools mean three different
      *  things and collapsing them back would flatten that. */
     RELOCATED_TOOLS: [
-        { category: 'autonomy', expand: 'autonomy/*' },
+        { category: 'autonomy', expand: 'autonomy/*', pane: 'autonomy',
+          label: 'agents.autoTools', hint: 'agents.autoToolsHint' },
+        // Self-modification. Relocated for the usual reason (writing an agent
+        // and writing a tool are two capabilities, and most agents should hold
+        // neither) and, unlike every other group, it must NEVER be granted as
+        // `self_management/*`: a category wildcard re-expands against the
+        // folder's CURRENT contents at every turn, so a tool added to this
+        // group later would silently widen what an existing agent may do to
+        // MyAgent itself. Per-tool grants are the whole point of the box.
+        { category: 'self_management', expand: 'self_management/*', pane: 'tools',
+          label: 'agents.selfTools', hint: 'agents.selfToolsHint' },
     ],
 
     /** Tools the SERVER injects into a turn, which therefore must never appear
@@ -490,6 +500,36 @@ const AgentsPage = {
     /** Tool grants implied by `state`, in table order. */
     derivedGrants(state) {
         return this.DERIVED_TOOLS.flatMap(d => d.grant(state));
+    },
+
+    /** ONE relocated group's checkboxes, in whichever pane owns it.
+     *
+     *  The rows are deliberately the same `.tool-check` shape toolPicker's row()
+     *  produces, so readForm() reads them without knowing they were moved — and
+     *  so a member that leaves the group keeps its grant readable. `extra` is
+     *  markup that belongs INSIDE the same frame because it qualifies these
+     *  tools (autonomy's "may schedule for others"), not beside it. An empty
+     *  group renders nothing at all rather than an empty frame: on a machine
+     *  whose user layer disabled the tools, a titled box with no rows reads
+     *  like a bug.
+     */
+    relocatedBox(group, isOn, extra = '') {
+        if (!group || group.tools.length === 0) return '';
+        return `
+            <div class="border rounded p-2 mb-3">
+                <label class="form-label small mb-1">${i18n(group.label)}</label>
+                ${group.tools.map(t => `
+                    <div class="form-check">
+                        <input class="form-check-input tool-check" type="checkbox" value="${App.escAttr(t.id)}"
+                               id="tool-${App.escAttr(t.id)}" ${isOn(group, t.id) ? 'checked' : ''}>
+                        <label class="form-check-label" for="tool-${App.escAttr(t.id)}">
+                            ${App.esc(this.toolText('toolLabel', t, t.name))}
+                        </label>
+                        <div class="form-text">${App.esc(this.toolText('toolHint', t, t.description))}</div>
+                    </div>`).join('')}
+                <div class="form-text">${i18n(group.hint)}</div>
+                ${extra}
+            </div>`;
     },
 
     /** Label / explanation for a relocated tool. I18n.t() returns the KEY when a
@@ -869,11 +909,13 @@ const AgentsPage = {
         // Relocated groups: rendered in their own tab instead of the picker. A
         // stored group wildcard is expanded into per-tool state here, since the
         // members are independently meaningful (see RELOCATED_TOOLS).
-        const relocated = this.RELOCATED_TOOLS.map(r => ({
+        // Keyed by category, not a list: each group renders in the pane where
+        // its meaning lives, so the markup asks for one by name.
+        const relocated = Object.fromEntries(this.RELOCATED_TOOLS.map(r => [r.category, {
             ...r,
             tools: tools.filter(t => t.category === r.category),
             all: agentTools.includes(r.expand),
-        }));
+        }]));
         const isRelocatedOn = (group, id) => group.all || agentTools.includes(id);
 
         // An unset model_id and the "default" sentinel mean the same thing to the
@@ -1023,6 +1065,7 @@ const AgentsPage = {
                                     </div>
                                     <div class="form-text"><i class="bi bi-magic"></i> ${i18n('agents.toolsManagedElsewhere')}</div>
                                 </div>
+                                ${this.relocatedBox(relocated.self_management, isRelocatedOn)}
                                 <div class="mb-3">
                                     <label class="form-label">${i18n('agents.delegation')}</label>
                                     <div class="border rounded p-2">
@@ -1093,19 +1136,7 @@ const AgentsPage = {
                                     <div class="form-text">${i18n('agents.wakeNowHint')}</div>
                                 </div>` : ''}
                                 ${this.taskBox(agentId, agentTasks)}
-                                ${relocated.map(group => group.tools.length === 0 ? '' : `
-                                    <div class="border rounded p-2 mb-3">
-                                        <label class="form-label small mb-1">${i18n('agents.autoTools')}</label>
-                                        ${group.tools.map(t => `
-                                            <div class="form-check">
-                                                <input class="form-check-input tool-check" type="checkbox" value="${App.escAttr(t.id)}"
-                                                       id="tool-${App.escAttr(t.id)}" ${isRelocatedOn(group, t.id) ? 'checked' : ''}>
-                                                <label class="form-check-label" for="tool-${App.escAttr(t.id)}">
-                                                    ${App.esc(this.toolText('toolLabel', t, t.name))}
-                                                </label>
-                                                <div class="form-text">${App.esc(this.toolText('toolHint', t, t.description))}</div>
-                                            </div>`).join('')}
-                                        <div class="form-text">${i18n('agents.autoToolsHint')}</div>
+                                ${this.relocatedBox(relocated.autonomy, isRelocatedOn, `
                                         <div id="live-warn" class="form-text text-warning-emphasis d-none">
                                             <i class="bi bi-exclamation-triangle"></i> ${i18n('agents.liveNoNotify')}
                                         </div>
@@ -1124,8 +1155,7 @@ const AgentsPage = {
                                         </div>
                                         <div id="schedule-others-warn" class="form-text text-warning-emphasis d-none">
                                             <i class="bi bi-exclamation-triangle"></i> ${i18n('agents.scheduleOthersNoTools')}
-                                        </div>
-                                    </div>`).join('')}
+                                        </div>`)}
                                 <h6 class="small text-secondary">${i18n('agents.autonomySettings')}</h6>
                                 <div class="row g-3">
                                     ${this.autoGrid(auto, specs)}

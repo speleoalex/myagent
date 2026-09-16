@@ -222,7 +222,7 @@ check("live.is_active is re-checked after the classification (twin-run race)",
 check("the id 'auto' is reserved at both agent creation paths",
       "RESERVED_AGENT_ID" in (ROOT / "server" / "app" / "routers" / "agents.py").read_text(encoding="utf-8")
       and "reserved for automatic agent selection" in
-      (ROOT / "server" / "tools" / "manage_agents" / "run").read_text(encoding="utf-8"))
+      (ROOT / "server" / "tools" / "self_management" / "manage_agents" / "run").read_text(encoding="utf-8"))
 check("the bindings form offers Auto",
       'value="auto"' in (ROOT / "ui" / "js" / "connectors.js").read_text(encoding="utf-8"))
 check("the chat's model pick reaches the classifier",

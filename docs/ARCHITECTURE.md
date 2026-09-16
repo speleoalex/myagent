@@ -301,7 +301,9 @@ Each tool is a folder with two files:
 level deep (e.g. the bundled `file_management/` holds `file_read`,
 `file_write`, `file_edit`, `list_dir`, `file_search`, `file_append`,
 `make_dir`, `show_file`; `library/` holds `local_search` and `local_read`;
-`images/` holds `generate_image`, `edit_image` and `remove_background`).
+`images/` holds `generate_image`, `edit_image` and `remove_background`;
+`web/` holds `web_search`, `browse_web` and `web_research`;
+`self_management/` holds `manage_agents` and `manage_tools`).
 The group name becomes the tools'
 `category`; ids stay global (the leaf folder name), so grouping a tool
 changes nothing for the agents that reference it. An agent's `tools` list can
@@ -309,6 +311,15 @@ grant a whole group with the `<group>/*` wildcard (e.g. `file_management/*`)
 — the folder analogue of `mcp:<server>/*` — expanded per turn by the
 registry, so nothing downstream ever sees a wildcard. The UI shows a group
 as one block: a master checkbox for the wildcard, or per-tool checkboxes.
+
+`self_management/` is granted per tool and **never** by wildcard: the wildcard
+re-expands against the folder's current contents every turn, so a member added
+later would silently widen an agent's power over MyAgent itself. The agent form
+enforces it by relocating the group out of the picker into its own box
+(`RELOCATED_TOOLS` in `ui/js/agents.js`), which only ever emits explicit ids.
+
+An optional `group.json` (`{name, description}`) gives a group the one line the
+lazy-activation catalogue shows for it; see `docs/TOOLS.md`.
 
 Internal tools (`"internal": true`) are async Python handlers registered via
 `registry.register_internal()`: `call_agent`, `recall_delegation` (the other

@@ -282,6 +282,11 @@ def test_partial_group_grant_drops_the_group_description():
         "file_read: Read the contents of a file and return it as text.; "
         "list_dir: List what a folder contains: sub-folders with their item "
         "count, files with size and date."), pair
+
+    # Holding every member is holding the group: the group.json comes back.
+    both = [e for e in registry.activation_catalogue(["manage_tools", "manage_agents"])
+            if e["key"] == "self_management"][0]
+    assert both["description"].startswith("inspect and change MyAgent itself"), both
     print("ok: a partial grant describes itself with what it really holds")
 
 
@@ -292,18 +297,18 @@ def test_flat_tool_carries_its_first_sentence():
     registry = _registry()
     entries = {e["key"]: e["description"]
                for e in registry.activation_catalogue(
-                   ["shell_exec", "recall_delegation", "web_research"])}
+                   ["shell_exec", "recall_delegation", "document_extract"])}
     assert entries["shell_exec"] == (
         "Execute a shell command on the local system and return stdout/stderr.")
     assert entries["recall_delegation"].startswith("Look up what another agent")
     assert entries["recall_delegation"].endswith("chat."), entries
     # Long first sentences are capped on a word boundary, never mid-word.
-    long = entries["web_research"]
+    long = entries["document_extract"]
     assert len(long) <= ToolRegistry._SUMMARY_LIMIT + 1, long
     assert long.endswith("\u2026") and " " in long, long
     assert not long.rstrip("\u2026").endswith(" "), long
     # And the cap is a summary, not the schema: no parameter names leak in.
-    assert "query" not in long.lower(), long
+    assert "path" not in long.lower(), long
     print("ok: flat entries carry one capped sentence of their own description")
 
 

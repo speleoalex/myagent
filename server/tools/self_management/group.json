@@ -1,0 +1,4 @@
+{
+  "name": "Self management",
+  "description": "inspect and change MyAgent itself: the agents it runs and the tools they call."
+}

@@ -87,6 +87,13 @@ Related tools can share a **group folder**: a subfolder of the tools dir
 │   ├── generate_image/
 │   ├── edit_image/
 │   └── remove_background/
+├── web/                    # search, browse, research
+│   ├── web_search/
+│   ├── browse_web/
+│   └── web_research/
+├── self_management/        # MyAgent editing MyAgent — see the warning below
+│   ├── manage_agents/
+│   └── manage_tools/
 └── shell_exec/             # ungrouped tool, same as before
 ```
 
@@ -102,6 +109,14 @@ its `tools` list — e.g. `"file_management/*"` — the analogue of the MCP
 that moment*, so a tool later added to the folder is picked up automatically.
 In the agent form the group appears with a master checkbox (the wildcard) or
 each tool can be ticked individually.
+
+> **`self_management/` is the exception: never grant it as a wildcard.** The
+> wildcard re-expands against the folder's *current* contents at every turn, so
+> a tool added to that group later would widen, on its own, what an agent may
+> do to MyAgent itself — and these two tools write agents and executable tool
+> scripts. The agent form therefore takes them out of the picker and offers
+> them one by one, in their own box under the tool list; grant them the same
+> way by hand (`"tools": ["manage_tools"]`), never `"self_management/*"`.
 
 ### `group.json` — describing a group
 
@@ -317,7 +332,7 @@ exec "$PY" "$DIR/main.py"
 ```
 
 Node tools resolve `node_modules` relative to their own folder (`__dirname`),
-not the working directory — see `server/tools/browse_web/`.
+not the working directory — see `server/tools/web/browse_web/`.
 
 ## Shipping a tool with the app
 

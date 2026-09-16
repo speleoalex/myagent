@@ -382,8 +382,8 @@ find "$INSTALL_DIR/server/tools" -name "run" -exec chmod +x {} \;
 # package step may install npm and has to come back here.
 install_web_deps() {
     echo "  Installing web-tool dependencies (puppeteer-core)..."
-    (cd "$INSTALL_DIR/server/tools/browse_web" && npm install --omit=dev --no-fund --no-audit --loglevel=error)
-    ln -sfn ../browse_web/node_modules "$INSTALL_DIR/server/tools/web_search/node_modules"
+    (cd "$INSTALL_DIR/server/tools/web/browse_web" && npm install --omit=dev --no-fund --no-audit --loglevel=error)
+    ln -sfn ../browse_web/node_modules "$INSTALL_DIR/server/tools/web/web_search/node_modules"
 }
 if has npm; then
     install_web_deps
@@ -452,7 +452,7 @@ else
         # Unquoted on purpose: the package list is passed by word splitting.
         if ${SUDO}${PKG_CMD} ${PKGS}; then
             hash -r          # bash caches command lookups; refresh has()
-            if has npm && [ ! -e "$INSTALL_DIR/server/tools/browse_web/node_modules" ]; then
+            if has npm && [ ! -e "$INSTALL_DIR/server/tools/web/browse_web/node_modules" ]; then
                 install_web_deps
             fi
         else

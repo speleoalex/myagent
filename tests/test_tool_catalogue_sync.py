@@ -35,8 +35,8 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-TOOLS = ROOT / "server" / "tools" / "manage_tools" / "run"
-AGENTS = ROOT / "server" / "tools" / "manage_agents" / "run"
+TOOLS = ROOT / "server" / "tools" / "self_management" / "manage_tools" / "run"
+AGENTS = ROOT / "server" / "tools" / "self_management" / "manage_agents" / "run"
 REGISTRY = ROOT / "server" / "app" / "tools" / "registry.py"
 
 # The catalogue layer, duplicated verbatim. These decide WHICH tools exist and
