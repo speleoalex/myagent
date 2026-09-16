@@ -550,7 +550,13 @@ async def notify_user_handler(
     1. ``to`` (+ optional ``channel``) — a name from the address book, resolved
        by the connectors plugin. This is what makes *"message Alessandro on
        Telegram"* work without the model knowing any numeric id.
-    2. ``chat_id`` passed in this call — the model already knows the id.
+    2. ``chat_id`` passed in this call — the caller already knows the id. This
+       one and ``binding_id`` are NOT in the schema the model sees any more:
+       together they were 141 tokens whose whole content was "do not use this",
+       and every real send resolves by name or falls back to the configured
+       target. They stay in the signature because an older user-layer copy of
+       tool.json may still declare them, and because a model did pass them —
+       that is what ``_PLACEHOLDER_ARGS`` was written for.
     3. the agent's configured ``notify_to`` — a FALLBACK for when the caller
        named nobody. It goes through the SAME resolver as (1), so it may hold a
        person's name and not only a number: one definition of "who is the

@@ -1,6 +1,6 @@
 {
   "name": "Manage Tasks",
-  "description": "Your own scheduled tasks: what you will do unattended, and when. 'list' answers \"what is my next task / what am I supposed to do?\". 'add' schedules new work — use in_s for a delay ('in one hour' = in_s 3600), cron for anything recurring ('every 20 minutes' = */20 * * * *, 'every Monday at 9' = 0 9 * * 1, 'weekdays at 7:30' = 30 7 * * 1-5). 'update' changes the schedule or the text of an existing task, 'delete' cancels one. Tasks only run while your autonomous mode is on.",
+  "description": "Your own scheduled tasks: what you will do unattended, and when. 'list' answers \"what is my next task?\", 'add' schedules new work, 'update' changes one, 'delete' cancels one. Tasks only run while your autonomous mode is on.",
   "internal": true,
   "parameters": {
     "type": "object",
@@ -8,7 +8,7 @@
       "action": {
         "type": "string",
         "enum": ["list", "add", "update", "delete"],
-        "description": "list = show your scheduled tasks; add = create one; update = change one; delete = cancel one"
+        "description": "What to do with your tasks."
       },
       "prompt": {
         "type": "string",
@@ -16,15 +16,15 @@
       },
       "cron": {
         "type": "string",
-        "description": "Recurring schedule, 5 cron fields 'minute hour day month weekday' (weekday 0=Sunday). Examples: '*/20 * * * *' every 20 minutes, '0 9 * * 1' Mondays at 09:00, '30 7 * * 1-5' weekdays at 07:30, '0 8 1 * *' the 1st of each month at 08:00."
+        "description": "Recurring: 5 fields 'minute hour day month weekday' (0=Sunday). '*/20 * * * *' every 20 minutes, '0 9 * * 1' Mondays at 09:00, '30 7 * * 1-5' weekdays at 07:30."
       },
       "in_s": {
         "type": "integer",
-        "description": "One-off: run once after this many seconds from now (3600 = in one hour). Prefer this over 'at' for relative times."
+        "description": "One-off, this many seconds from now ('in one hour' = 3600). Use this for every relative time."
       },
       "at": {
         "type": "string",
-        "description": "One-off: run once at this ISO timestamp (e.g. '2026-07-30T18:15'). Only for a wall-clock time the user actually named; it must be in the future, and you do not reliably know the current time — prefer in_s."
+        "description": "One-off at an ISO timestamp, e.g. '2026-07-30T18:15'. Only for a wall-clock time the user named: you do not reliably know the current time."
       },
       "task_id": {
         "type": "string",
