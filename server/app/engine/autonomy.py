@@ -144,6 +144,16 @@ def _when(task: dict) -> str:
                         if task.get("next_at") else "")
 
 
+# The tools the wake prompt names by name below. They are handed to the executor
+# as `preload_tools` so their schemas are in the payload from the first
+# iteration even when the agent runs with Agent.lazy_tools: a prompt that says
+# "use the notify_user tool" while notify_user is only a catalogue entry makes
+# the turn hinge on one guess, and there is no user here to notice the wrong one
+# and repeat the question. Kept beside the prompt that names them — a name added
+# there and not here silently goes back to being a guess.
+WAKE_PROMPT_TOOLS = ("notify_user", "manage_tasks", "call_agent")
+
+
 def build_wake_prompt(agent: Agent, tasks: list[dict],
                       granted_tools: set[str] | None = None,
                       next_task: dict | None = None) -> str:
@@ -167,10 +177,15 @@ def build_wake_prompt(agent: Agent, tasks: list[dict],
             lines.append(f"{i}. [{_when(t)}] {_short(t.get('prompt') or '', 300)}")
         # "Last chance" is literally true (a successful turn advances the task
         # to its next occurrence) and it is what stops the model from deferring.
+        # The tool is named only when the agent holds it: this text is what
+        # WAKE_PROMPT_TOOLS preloads against, and naming a tool that will not
+        # be in the payload is the failure that list exists to prevent.
+        deliver = ("send it with notify_user now"
+                   if "notify_user" in granted else "deal with it now")
         lines.append(
             "Each one was scheduled earlier, usually by you on the user's behalf. "
-            "If a task carries or asks for something the user should see, send it "
-            "with notify_user now: once this wake ends the task moves on and you "
+            f"If a task carries or asks for something the user should see, {deliver}: "
+            "once this wake ends the task moves on and you "
             "will not be shown it again.")
         if "manage_tasks" in granted:
             # Observed: given "handle it now", the model re-queued the very task
@@ -377,6 +392,7 @@ class AutonomyService:
                              and t["id"] not in due_ids), None)
             executor = await AgentExecutor.create_for_agent(
                 aid, self.tool_registry, self.stores)
+            granted = set(self.tool_registry.expand_tool_ids(agent.tools))
             # Nothing renders this turn — the same statement the wake prompt
             # opens with, told where the TOOL results are phrased: a file the
             # agent produces is saved in the workspace and seen by nobody
@@ -384,10 +400,10 @@ class AutonomyService:
             # this identical prompt, which already says so.
             executor.unattended = True
             executor.due_task_ids = due_ids
+            executor.preload_tools = {t for t in WAKE_PROMPT_TOOLS
+                                      if t in granted}
             prompt = build_wake_prompt(
-                agent, wake_tasks,
-                set(self.tool_registry.expand_tool_ids(agent.tools)),
-                next_task=upcoming)
+                agent, wake_tasks, granted, next_task=upcoming)
             drive = self._make_autonomous_drive(agent, executor, sid, prompt, result)
             run = self.live.start(sid, drive)
             try:

@@ -237,6 +237,17 @@ class AgentExecutor:
         # mid-run it says the job is done. Set alongside `unattended`, by the
         # same caller and for the same reason.
         self.due_task_ids: set[str] = set()
+        # Tools whose schemas must be in the payload from the FIRST iteration,
+        # even under Agent.lazy_tools: the caller's prompt names them, and a
+        # prompt that says "use notify_user" while notify_user is not in the
+        # list makes the whole turn hinge on the model guessing the right
+        # category first. Measured on the Orin over 7 real wakes of `master`:
+        # when its opening activate_tools picked 'autonomy' the task was
+        # delivered 4/4, when it picked 'web' 0/3 — and in the failures it never
+        # called notify_user at all, it researched how to send a Telegram photo
+        # until max_tool_calls ran out. Ids, not categories: the caller knows
+        # what it named, not where those tools happen to live.
+        self.preload_tools: set[str] = set()
         # ---- Agent.lazy_tools turn state (all inert when the flag is off) ----
         # Every definition this agent was granted, whether or not it is being
         # sent right now. The text-protocol parser and the safety net read THIS,
@@ -850,6 +861,13 @@ class AgentExecutor:
             if ids:
                 catalogue.append({**entry, "tool_ids": ids})
         self._lazy_catalogue = catalogue
+        # Switch on whatever holds a preloaded tool, before the first payload.
+        # Whole categories, because that is the only unit the filter has: asking
+        # for notify_user brings its two neighbours, which is the price of the
+        # guarantee and still a fraction of the full set.
+        for entry in catalogue:
+            if any(t in self.preload_tools for t in entry["tool_ids"]):
+                self._lazy_active.add(entry["key"])
 
     def _lazy_gate_def(self) -> dict | None:
         """The ``activate_tools`` definition for right now, or None when there
