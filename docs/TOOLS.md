@@ -246,8 +246,10 @@ print("Chart generated from 42 data points.")
 What happens to it:
 
 - the marker line never reaches the model: the executor replaces it with a
-  short note ("file delivered to the user …") and hands the UI the structured
-  reference; the file itself is served by `GET /api/files/<path>`;
+  short note ("file delivered to the user …", or "file saved in the workspace
+  … nobody has seen it" when the turn is unattended — see below) and hands the
+  UI the structured reference; the file itself is served by
+  `GET /api/files/<path>`;
 - output truncation (`max_output`) cuts the prose but **never** the marker
   lines;
 - prefer `_resources/` as the destination: it is never auto-cleaned (unlike
@@ -273,7 +275,15 @@ How the user receives it depends on where they are:
 - **Telegram** — after the text reply, the bot sends the files themselves:
   images as photos, everything else as documents (max 5 per reply);
 - **voice satellite** — nothing is sent (it's a speaker); the spoken reply
-  names the file, and the conversation in the web UI shows it.
+  names the file, and the conversation in the web UI shows it;
+- **an autonomous wake** — nobody receives it. The reply of a wake is logged,
+  not sent, so a file only reaches somebody as an attachment of `notify_user`.
+  The note the model reads says exactly that instead of "delivered to the
+  user", and a tool that phrases its own delivery line in prose can do the
+  same: `MYAGENT_UNATTENDED=1` is in the environment of every tool call of
+  such a turn (the three `images/` tools use it). Without this an agent draws
+  the picture it was asked to send and then sends a caption alone, which is
+  what happened on 2026-09-17.
 
 ## Minimal example
 

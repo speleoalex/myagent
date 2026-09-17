@@ -62,7 +62,8 @@ def _trace_resources(trace: dict | None) -> list[dict]:
     return out
 
 
-def _produced_files_note(agent_id: str, resources: list[dict]) -> str:
+def _produced_files_note(agent_id: str, resources: list[dict],
+                         unattended: bool = False) -> str:
     """The line appended to a sub-agent's reply naming the files it produced.
 
     Born from the heart-on-Telegram task: the illustrator drew the picture,
@@ -75,10 +76,17 @@ def _produced_files_note(agent_id: str, resources: list[dict]) -> str:
     names = ", ".join(
         f"{r.get('path')} ({r.get('mime')})" if r.get("mime") else str(r.get("path"))
         for r in resources)
-    return (f"\n\n[files produced by '{agent_id}', in the workspace: {names}. "
-            "In a chat they are already shown to the user, so refer to them by "
-            "name and do not paste the path; to send one to somebody, pass its "
-            "name in notify_user's attachments.]")
+    head = f"\n\n[files produced by '{agent_id}', in the workspace: {names}. "
+    if unattended:
+        # Same correction as resources._note, one level up: during a wake the
+        # sub-agent's files were shown to nobody either, and this line is all
+        # the caller reads of them.
+        return head + ("Nobody has seen them: this turn is unattended. To let "
+                       "the user see one, pass its name in notify_user's "
+                       "attachments.]")
+    return head + ("In a chat they are already shown to the user, so refer to "
+                   "them by name and do not paste the path; to send one to "
+                   "somebody, pass its name in notify_user's attachments.]")
 
 
 def _resolve_attachments(executor, indices) -> list[dict]:
@@ -156,6 +164,10 @@ async def call_agent_handler(
             # "default" runs on the same model the user chose for this chat.
             model_override=executor.model_override,
         )
+        # A wake delegating to another agent is still a wake: the sub-agent
+        # must not be told its files reached anybody either.
+        unattended = bool(getattr(executor, "unattended", False))
+        sub_executor.unattended = unattended
         forwarded = _resolve_attachments(executor, attachment_indices)
         # The event_sink streams the sub-agent's activity (tokens + tools)
         # into the parent's SSE stream WHILE it runs — the parent's tool loop
@@ -182,7 +194,8 @@ async def call_agent_handler(
         # or the caller cannot attach them to a notification.
         produced = _trace_resources(response.trace)
         if produced:
-            return (response.reply or "") + _produced_files_note(agent_id, produced)
+            return (response.reply or "") + _produced_files_note(
+                agent_id, produced, unattended)
         return response.reply
     except Exception as e:
         return f"ERROR: Failed to call agent '{agent_id}': {e}"

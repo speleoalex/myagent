@@ -222,6 +222,15 @@ class AgentExecutor:
         # The chat's per-request model pick (ChatRequest.model_override),
         # carried so call_agent propagates it to "default" sub-agents.
         self.model_override: str | None = None
+        # True when nothing renders this turn: an autonomous wake, where the
+        # reply is only logged and a file produced by a tool reaches the user
+        # ONLY through notify_user(attachments=[...]). Set by the caller that
+        # knows (AutonomyService._wake) and propagated to sub-agents by
+        # call_agent_handler. It changes what the tool results CLAIM, never
+        # what runs: "already displayed in the chat" is true of a web chat and
+        # of a messaging channel, and is what talked the model out of
+        # attaching the file it had just drawn (tools/resources.py:_note).
+        self.unattended: bool = False
         # ---- Agent.lazy_tools turn state (all inert when the flag is off) ----
         # Every definition this agent was granted, whether or not it is being
         # sent right now. The text-protocol parser and the safety net read THIS,
@@ -569,6 +578,11 @@ class AgentExecutor:
         # in the tool's parameters — those are written by the model and handed
         # straight back to it in the turn's trace.
         env.update(imagegen.resolve_image_env(self.stores.models))
+        # Same statement as the resource note, for the tools that phrase their
+        # own delivery line in prose (the three image tools). A tool that does
+        # not read it keeps printing what it prints today.
+        if self.unattended:
+            env["MYAGENT_UNATTENDED"] = "1"
         return env
 
 
@@ -2107,7 +2121,7 @@ class AgentExecutor:
                 # anywhere: the model (and the text protocol's replay) sees the
                 # short note, the UI gets {path, mime, title, size} on the step.
                 result, step_resources = resource_channel.extract(
-                    result, config.WORKSPACE_DIR
+                    result, config.WORKSPACE_DIR, unattended=self.unattended
                 )
 
                 executed_calls.add(_tool_call_key(tc))

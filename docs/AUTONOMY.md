@@ -56,7 +56,11 @@ agent needs more.
   workspace, such as a report the agent just wrote): on email they become the
   Subject header and real attachments, on Telegram the first line and one
   upload per file; a voice device speaks the text and the tool result tells the
-  agent which files could not be delivered (max 5 files, 15 MB each).
+  agent which files could not be delivered (max 5 files, 15 MB each). During a
+  wake this is the ONLY way out: a picture the agent draws or a page it writes
+  is saved in the workspace and shown to nobody until it is attached here, and
+  the tools say so rather than the "already displayed in the chat" they say in
+  a live chat.
 - **Memory** (`memory_enabled`) — so it remembers what it did across wakes.
 - **`POST /api/tasks`** — trigger one from a script or a webhook. A task with
   no schedule is due immediately and runs once, which makes it a clean external

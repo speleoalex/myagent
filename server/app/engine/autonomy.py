@@ -367,6 +367,12 @@ class AutonomyService:
                              and t["id"] not in due_ids), None)
             executor = await AgentExecutor.create_for_agent(
                 aid, self.tool_registry, self.stores)
+            # Nothing renders this turn — the same statement the wake prompt
+            # opens with, told where the TOOL results are phrased: a file the
+            # agent produces is saved in the workspace and seen by nobody
+            # until notify_user carries it. Manual wakes included: they run
+            # this identical prompt, which already says so.
+            executor.unattended = True
             prompt = build_wake_prompt(
                 agent, wake_tasks,
                 set(self.tool_registry.expand_tool_ids(agent.tools)),

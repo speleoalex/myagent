@@ -94,6 +94,20 @@ def multipart(fields, files):
     return bytes(out), f"multipart/form-data; boundary={boundary}"
 
 
+
+# MYAGENT_UNATTENDED is set by the executor for a turn nobody is watching (an
+# autonomous wake): there the picture is NOT displayed anywhere, and saying it
+# is makes the agent send a caption without the file. One definition per tool
+# on purpose — these run as standalone subprocesses, with no shared import.
+def _delivery_line(what="it", also="a change"):
+    if os.environ.get("MYAGENT_UNATTENDED") == "1":
+        return (f"Nobody has seen {what}: this turn is unattended, nothing is "
+                "displayed anywhere. To let the user see it, pass the file "
+                "name in notify_user's attachments.")
+    return (f"It is already displayed to the user: describe it or offer "
+            f"{also}, do not paste the path.")
+
+
 def main():
     try:
         params = json.load(sys.stdin)
@@ -256,9 +270,8 @@ def main():
     how = (f"ONLY inside the white area of {mask[0].name}, everything else is kept "
            "unchanged" if mask else f"at strength {strength:.2f}, whole picture reworked")
     print(f"Image edited by {backend} in {elapsed:.0f}s ({how}) and saved as "
-          f"{name} ({kb} KB); the original {src.name} is unchanged. The result "
-          "is already displayed to the user: describe it or offer a further "
-          "change, do not paste the path.")
+          f"{name} ({kb} KB); the original {src.name} is unchanged. "
+          + _delivery_line("the result", "a further change"))
     if ignored:
         print(f"NOTE: this backend speaks the OpenAI image API, which has no "
               f"field for {', '.join(ignored)} — that parameter was ignored. "

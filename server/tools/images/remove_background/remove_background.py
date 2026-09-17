@@ -301,6 +301,20 @@ def prefetch():
     print(f"{'Downloaded' if downloaded else 'Already present'}: {path} ({mb} MB)")
 
 
+
+# MYAGENT_UNATTENDED is set by the executor for a turn nobody is watching (an
+# autonomous wake): there the picture is NOT displayed anywhere, and saying it
+# is makes the agent send a caption without the file. One definition per tool
+# on purpose — these run as standalone subprocesses, with no shared import.
+def _delivery_line(what="it", also="a change"):
+    if os.environ.get("MYAGENT_UNATTENDED") == "1":
+        return (f"Nobody has seen {what}: this turn is unattended, nothing is "
+                "displayed anywhere. To let the user see it, pass the file "
+                "name in notify_user's attachments.")
+    return (f"It is already displayed to the user: describe it or offer "
+            f"{also}, do not paste the path.")
+
+
 def main():
     if sys.argv[1:] == ["--prefetch"]:
         prefetch()
@@ -376,8 +390,7 @@ def main():
     print(f"Mask of the background saved as {mask_name} (white = background): pass it to "
           "edit_image as 'mask' to have the image model paint a new scene ONLY behind the "
           "subject, which stays untouched.")
-    print("The result is already displayed to the user: describe it or offer a further "
-          "change, do not paste the path.")
+    print(_delivery_line("the result", "a further change"))
     print(f"[[resource:{out_name}|image/png|{Path(out_name).stem}]]")
 
 

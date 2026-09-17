@@ -103,6 +103,48 @@ check("sketch.png" in out, "a file from a deeper delegation is named too")
 check("notify_user" in out and "attachments" in out,
       "the note says how to send a file to somebody")
 check(parent.sub_traces == [trace], "the sub-trace reaches the parent unchanged")
+check("already shown to the user" in out, "in a chat the files are said to be shown")
+
+# --- the same delegation during an autonomous wake --------------------------
+# The note is the ONLY thing the calling model reads about those files, and
+# during a wake nothing was shown to anybody: saying it was is what produced a
+# caption with no picture (Orin, 2026-09-17).
+subs: list = []
+
+
+def install_recording_sub(response: ChatResponse):
+    class FakeSub:
+        unattended = None
+
+        async def run(self, message, attachments=None, event_sink=None):
+            return response
+
+    async def create_for_agent(*a, **k):
+        sub = FakeSub()
+        subs.append(sub)
+        return sub
+
+    executor_mod.AgentExecutor.create_for_agent = staticmethod(create_for_agent)
+
+
+install_recording_sub(ChatResponse(reply="Ecco il cuore.", iterations=1,
+                                   trace=trace))
+wake_parent = FakeParent()
+wake_parent.unattended = True
+out = asyncio.run(internal.call_agent_handler("illustrator", "draw a heart",
+                                              executor=wake_parent))
+print(out)
+check("already shown" not in out, "unattended: the note does not claim delivery")
+check("Nobody has seen them" in out, "unattended: the note says nobody saw them")
+check("notify_user" in out and "a-glowing-red-heart.png" in out,
+      "unattended: the names and the way to send them are still there")
+check(subs and subs[-1].unattended is True, "the sub-agent inherits the flag")
+
+install_fake_sub(ChatResponse(reply="Ecco il cuore.", iterations=1, trace=trace))
+out = asyncio.run(internal.call_agent_handler("illustrator", "draw a heart",
+                                              executor=FakeParent()))
+check("already shown to the user" in out,
+      "a parent without the attribute keeps the chat wording")
 
 # --- no files -> reply untouched --------------------------------------------
 install_fake_sub(ChatResponse(reply="Rome is the capital of Italy.", iterations=1,

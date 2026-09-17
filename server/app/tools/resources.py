@@ -51,7 +51,8 @@ def marker(path: str, mime: str, title: str = "") -> str:
     return f"[[resource:{path}|{mime or 'application/octet-stream'}|{clean}]]"
 
 
-def extract(text: str, workspace: Path) -> tuple[str, list[dict]]:
+def extract(text: str, workspace: Path,
+            unattended: bool = False) -> tuple[str, list[dict]]:
     """Pull the resource markers out of a tool result.
 
     Returns ``(clean_text, resources)`` where every marker line has been
@@ -59,6 +60,10 @@ def extract(text: str, workspace: Path) -> tuple[str, list[dict]]:
     list for the UI. A marker whose file is missing, escapes the workspace or
     exceeds :data:`MAX_RESOURCES` is dropped with a warning — the tool said
     something that isn't true, and a broken reference must not reach the UI.
+
+    ``unattended`` flips what that note CLAIMS (see :func:`_note`). The
+    resources themselves are collected either way: they ride the trace, which
+    is what the session file and the UI read afterwards.
     """
     if "[[resource:" not in (text or ""):
         return text, []
@@ -93,7 +98,7 @@ def extract(text: str, workspace: Path) -> tuple[str, list[dict]]:
                 "title": title,
                 "size": size,
             })
-        return _note(path, mime, title)
+        return _note(path, mime, title, unattended)
 
     return MARKER_RE.sub(_replace, text).strip(), resources
 
@@ -119,11 +124,29 @@ def truncate_keep_markers(text: str, limit: int) -> str:
     return out
 
 
-def _note(path: str, mime: str, title: str) -> str:
+def _note(path: str, mime: str, title: str, unattended: bool = False) -> str:
     """What the model reads in place of the marker: citable (title first),
-    actionable (the path still works with document_extract), and explicit that
-    the user has already received the file — or the model re-sends it in prose."""
+    actionable (the path still works with document_extract), and explicit about
+    whether the user has already received the file — or the model re-sends it
+    in prose.
+
+    The delivered/not-delivered half is NOT cosmetic. "already displayed in the
+    chat" is true of a web chat and of a messaging channel (the connector sends
+    the resources of the turn as photos or documents), and FALSE of an
+    autonomous wake, where the reply reaches nobody and the only way out is
+    ``notify_user(attachments=[...])``. Told the file was already delivered,
+    the model writes a caption and attaches nothing — observed on the Orin,
+    2026-09-17: a scheduled task drew a heart, called notify_user without
+    ``attachments`` and reported success, having sent bare text.
+    """
     label = f'"{title}" ' if title else ""
+    if unattended:
+        return (
+            f"[file saved in the workspace: {label}({path}, {mime}) — nobody "
+            f"has seen it: this turn is unattended, so nothing you write or "
+            f"produce is displayed anywhere. To let the user see it, pass "
+            f"'{path}' in notify_user's attachments]"
+        )
     return (
         f"[file delivered to the user: {label}({path}, {mime}) — already "
         f"displayed in the chat; refer to it by name, and use document_extract "
