@@ -11,7 +11,7 @@
     "recall_delegation"
   ],
   "max_iterations": 50,
-  "max_tool_calls": 5,
+  "max_tool_calls": 10,
   "temperature": 0.1,
   "response_temperature": 0.4,
   "enabled": true,
