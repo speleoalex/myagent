@@ -231,6 +231,12 @@ class AgentExecutor:
         # of a messaging channel, and is what talked the model out of
         # attaching the file it had just drawn (tools/resources.py:_note).
         self.unattended: bool = False
+        # The tasks THIS wake was handed, so manage_tasks can stop reporting a
+        # recurring task's previous occurrence as its current state (see
+        # _task_line): that row is the agent's own memory of the job, and read
+        # mid-run it says the job is done. Set alongside `unattended`, by the
+        # same caller and for the same reason.
+        self.due_task_ids: set[str] = set()
         # ---- Agent.lazy_tools turn state (all inert when the flag is off) ----
         # Every definition this agent was granted, whether or not it is being
         # sent right now. The text-protocol parser and the safety net read THIS,

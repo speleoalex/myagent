@@ -179,6 +179,16 @@ def build_wake_prompt(agent: Agent, tasks: list[dict],
             # only correct time is now.
             lines.append("Do NOT schedule a new task for anything listed above: "
                          "it is due now, so carry it out in this wake.")
+        # Measured, 2026-09-17, Qwen3-VL-4B on the Orin: a RECURRING task whose
+        # own history says "Task completed: Sent a heart image" makes the model
+        # report the delivery again without producing anything — it reads its
+        # predecessor's success as this run's. Reproduced 0/3 without this line
+        # and 3/3 with it, and removing the misleading history line instead was
+        # NOT enough (0/3): the model has to be told that making the thing is
+        # part of the job, not just sending it.
+        lines.append("Whatever a task asks you to produce, produce it in THIS "
+                     "wake with your own tools: an earlier run of the same "
+                     "recurring task does not count, and its output is gone.")
         lines.append("(After a failure, a task may be presented again.)")
     else:
         lines.append("\nNo task is due — this is a manual wake.")
@@ -373,6 +383,7 @@ class AutonomyService:
             # until notify_user carries it. Manual wakes included: they run
             # this identical prompt, which already says so.
             executor.unattended = True
+            executor.due_task_ids = due_ids
             prompt = build_wake_prompt(
                 agent, wake_tasks,
                 set(self.tool_registry.expand_tool_ids(agent.tools)),

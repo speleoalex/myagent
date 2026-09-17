@@ -968,8 +968,17 @@ def _when_summary(data: dict) -> str:
     return f"{dt.strftime('%a %d %b %H:%M')} ({rel})"
 
 
-def _task_line(t: dict) -> str:
+def _task_line(t: dict, due_now: bool = False) -> str:
     when = f"cron {t['cron']}" if t.get("cron") else "once"
+    # The task the current wake was handed. Its stored `last_run` is the
+    # PREVIOUS occurrence of a recurring task, and reported here as-is it reads
+    # as this run's outcome: shown "last run 07:31: acted — Task completed:
+    # Sent a heart image", the 17:01 wake sent the confirmation again and drew
+    # nothing. Neither field is true of the run in progress, so neither is shown.
+    if due_now:
+        return (f"- {t['id']} | RUNNING NOW — this is the wake that must carry "
+                f"it out, nothing has been done for it yet | {when} | "
+                f"{t.get('prompt', '')}")
     # Spelled out, not raw ISO: handed "2026-08-03" the model narrated it to the
     # user as "Saturday 3 August" (it is a Monday). It cannot do calendar
     # arithmetic, so it must not be asked to.
@@ -1038,7 +1047,10 @@ async def manage_tasks_handler(
         if not is_live:
             head += (f" NOTE: {off_note}, so none of them will run until it is "
                      f"started.{off_fix}")
-        return head + "\n" + "\n".join(_task_line(t) for t in rows)
+        # Only the caller's OWN due tasks: another agent's wake is not this turn.
+        due = set(getattr(executor, "due_task_ids", None) or ()) if mine else set()
+        return head + "\n" + "\n".join(
+            _task_line(t, t.get("id") in due) for t in rows)
 
     # -- the task being changed must exist and belong to the target agent
     current = None
