@@ -115,6 +115,20 @@ MALFORMED_CALL = (
     "If you meant to answer the user, write plain prose with no JSON at all."
 )
 
+#: Unattended turn that spent its whole tool budget before delivering. The
+#: reply of a wake is only logged, so a forced answer here would reach nobody;
+#: this buys one more round with notify_user as the only tool. The two
+#: instructions that matter: deliver what there IS (a partial report beats
+#: none), and say what is missing rather than pretend.
+DELIVERY_ROUND = (
+    "TOOL BUDGET EXHAUSTED: that call was not run and no other tool will run in "
+    "this turn, with ONE exception: notify_user. Nobody reads this reply, so "
+    "deliver NOW, with notify_user, what you have gathered so far — the findings "
+    "or the partial report, plus one line naming what could not be completed and "
+    "why (the tool budget ran out). One call per recipient. Do not call anything "
+    "else. If everything was already delivered, just summarise what you did."
+)
+
 #: Shown as the reply when the loop ran out of iterations without answering.
 NO_FINAL_RESPONSE = "[Agent reached maximum iterations without a final response]"
 

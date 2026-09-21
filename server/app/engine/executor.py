@@ -56,6 +56,18 @@ _SCHEDULING_TOOLS = ("manage_tasks", "autonomy_control")
 # refunded, and it is injected without a grant).
 _ACTIVATE_TOOLS = "activate_tools"
 
+# The delivery tool of an unattended turn. When a wake spends its whole
+# max_tool_calls on gathering, the reply it is forced into reaches nobody (the
+# wake prompt says so: the reply is only logged). So the budget check offers ONE
+# extra round in which this is the only tool, and lets up to _DELIVERY_CALLS_MAX
+# calls to it through — one per recipient, `to` takes a single name. Measured
+# on tmind, 2026-09-21: sistemista-techmakers hit the limit at call 21 in both
+# runs of its daily report (6 of the 22 calls were the same Float query cut in
+# 2-day windows), wrote "non ho potuto inviare la notifica" and the report
+# stayed in the log. Attended turns are untouched: the user reads the reply.
+_NOTIFY_USER = "notify_user"
+_DELIVERY_CALLS_MAX = 3
+
 # Cap (chars) on the quoted transcript of history turns another agent answered
 # (see _split_history). Generous on purpose: the user's rule is that the agent
 # sees the whole conversation, and this is the channel those turns travel on.
@@ -94,6 +106,10 @@ def _step_summary(step: dict) -> dict:
     if step.get("resources"):
         out["resources"] = step["resources"]
     return out
+
+
+def _tool_call_name(tc: dict) -> str:
+    return ((tc.get("function") or {}).get("name") or "")
 
 
 def _tool_call_key(tc: dict) -> tuple[str, str]:
@@ -941,6 +957,14 @@ class AgentExecutor:
         if not self._lazy_catalogue:
             return False
         return (tool_call.get("function") or {}).get("name") == _ACTIVATE_TOOLS
+
+    @staticmethod
+    def _delivery_defs(tool_defs: list[dict]) -> list[dict]:
+        """The payload of the reserved round: notify_user and nothing else.
+
+        The model is told that one tool is left; sending it the others as well
+        would contradict the prompt with the schema, and the schema wins."""
+        return [d for d in tool_defs if d["id"] == _NOTIFY_USER]
 
     def activate_tool_categories(self, keys: list[str]) -> tuple[list[str], list[str]]:
         """Switch categories on for the rest of this turn.
@@ -1851,6 +1875,12 @@ class AgentExecutor:
         tools_downgrade_retried = False  # one free redo when the endpoint rejects `tools` mid-run
         use_response_temp = False  # switch to response_temperature after tool results
         stream_error: str | None = None  # last LLM failure, surfaced if no reply
+        # Unattended turns only: the reserved notify_user round (see the budget
+        # check). Offered once; while it lasts, notify_user alone is let past
+        # max_tool_calls, at most _DELIVERY_CALLS_MAX times.
+        delivery_round = False
+        delivery_offered = False
+        delivery_calls = 0
 
         while iterations < self.agent.max_iterations:
             iterations += 1
@@ -2079,8 +2109,43 @@ class AgentExecutor:
             # flag off _is_gate_call is always False, so this drops to the
             # historical "forget every call".
             if tool_calls and total_tool_calls >= max_tool_calls:
-                free = [tc for tc in tool_calls if self._is_gate_call(tc)]
+                free = []
+                for tc in tool_calls:
+                    if self._is_gate_call(tc):
+                        free.append(tc)
+                    elif (delivery_round and _tool_call_name(tc) == _NOTIFY_USER
+                            and delivery_calls < _DELIVERY_CALLS_MAX):
+                        delivery_calls += 1
+                        self._debug_log(f"  DELIVERY: {_NOTIFY_USER} let past the budget "
+                                        f"({delivery_calls}/{_DELIVERY_CALLS_MAX})")
+                        free.append(tc)
                 if len(free) < len(tool_calls):
+                    # Unattended and the agent holds notify_user: do not force
+                    # the answer yet — nobody would read it. Drop the refused
+                    # calls, tell the model the budget is gone and that ONE tool
+                    # is left, and send it that schema alone. Once per turn, and
+                    # only while a round is still available to spend.
+                    if (self.unattended and not delivery_offered
+                            and iterations < self.agent.max_iterations
+                            and any(d["id"] == _NOTIFY_USER for d in callable_defs)):
+                        delivery_offered = delivery_round = True
+                        refused = ", ".join(_tool_call_name(tc) for tc in tool_calls
+                                            if tc not in free)
+                        self._debug_log(f"  MAX TOOL CALLS reached ({max_tool_calls}): "
+                                        f"refused {refused}; unattended -> reserving a "
+                                        f"{_NOTIFY_USER} round")
+                        log.warning("Agent '%s' hit max_tool_calls limit (%d) unattended; "
+                                    "offering a %s round", self.agent.id, max_tool_calls,
+                                    _NOTIFY_USER)
+                        if full_content.strip():
+                            messages.append({"role": "assistant", "content": full_content})
+                        messages.append({"role": "user", "content": prompts.DELIVERY_ROUND})
+                        system_content, tool_defs, openai_tools = self._prepare_turn(
+                            self._delivery_defs(callable_defs), attachments,
+                            memory_context, transcribed=transcribed,
+                            foreign_context=foreign_context)
+                        messages[0] = {"role": "system", "content": system_content}
+                        continue
                     self._debug_log(f"  MAX TOOL CALLS reached ({max_tool_calls}), forcing answer")
                     log.warning("Agent '%s' hit max_tool_calls limit (%d)", self.agent.id, max_tool_calls)
                 tool_calls = free or None
@@ -2211,7 +2276,8 @@ class AgentExecutor:
                 # The answering temperature belongs to the answer. While the
                 # budget still allows a tool call, the next turn is a DECISION,
                 # so keep the tool-calling temperature for it.
-                if total_tool_calls >= max_tool_calls or iterations + 1 >= self.agent.max_iterations:
+                if ((total_tool_calls >= max_tool_calls and not delivery_round)
+                        or iterations + 1 >= self.agent.max_iterations):
                     use_response_temp = True
                 self._debug_log("  Added 'decide: next tool or answer' nudge")
 
@@ -2224,8 +2290,11 @@ class AgentExecutor:
             # prompt differs from the first one only in its tool list.
             if self._lazy_dirty:
                 self._lazy_dirty = False
+                rebuilt = self._lazy_filter(self._full_tool_defs)
+                if delivery_round:
+                    rebuilt = self._delivery_defs(rebuilt)
                 system_content, tool_defs, openai_tools = self._prepare_turn(
-                    self._lazy_filter(self._full_tool_defs), attachments,
+                    rebuilt, attachments,
                     memory_context, transcribed=transcribed,
                     foreign_context=foreign_context)
                 messages[0] = {"role": "system", "content": system_content}
