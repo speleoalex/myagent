@@ -15,6 +15,10 @@ from app.tools import resources
 
 log = logging.getLogger(__name__)
 
+# (tool id, ignored folder) pairs already reported by _walk_layer. Module-level
+# so the staticmethod stays state-free; a NEW collision still gets its line.
+_DUP_WARNED: set[tuple[str, str]] = set()
+
 # Shebang interpreter -> label shown as the tool's language badge. An
 # interpreter that is not listed falls back to its own name, so an exotic
 # shebang still gets a badge instead of a hole.
@@ -193,7 +197,10 @@ class ToolRegistry:
         ``category -> group.json path`` for the groups that describe themselves.
 
         Flat tools are collected before group folders, so on an id collision
-        within the layer the flat copy deterministically wins.
+        within the layer the flat copy deterministically wins. The collision is
+        logged ONCE per process per (id, ignored folder): _scan() runs on every
+        query, debounced only to _SCAN_TTL, so a leftover folder on disk would
+        otherwise warn at every chat turn while saying nothing new.
 
         A group is a subfolder WITHOUT a ``tool.json`` — that test is the whole
         rule, which is why the optional group metadata file is called
@@ -209,7 +216,14 @@ class ToolRegistry:
             if "/" in tool_id or ".." in tool_id:
                 return
             if tool_id in out:
-                log.warning("Duplicate tool id %r: ignoring %s", tool_id, entry)
+                key = (tool_id, str(entry))
+                if key not in _DUP_WARNED:
+                    _DUP_WARNED.add(key)
+                    log.warning(
+                        "Duplicate tool id %r: keeping %s, ignoring %s "
+                        "(reported once; a flat leftover beside its grouped "
+                        "copy is what install.sh's sweep removes)",
+                        tool_id, out[tool_id][0], entry)
                 return
             out[tool_id] = (entry, category)
 

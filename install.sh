@@ -378,15 +378,23 @@ find "$INSTALL_DIR/server/tools" -name "run" -exec chmod +x {} \;
 
 # Upgrading from before the web/ and self_management/ groups: these tools moved
 # into group folders, but rsync --delete never removes an EXCLUDED path, so the
-# old flat folders survive holding nothing but their node_modules. In the
-# bundled catalog a folder without a tool.json is a GROUP, so what is left over
-# reads as an empty category — plus a duplicate puppeteer tree on disk. The
-# missing tool.json is exactly what proves it is a leftover and not a tool, so
-# that is the condition, and the loop touches only the install dir, never the
-# user's own tools.
-for stale in browse_web web_search web_research manage_agents manage_tools; do
+# old flat folders survive. Two shapes, both touching only the install dir:
+#  - holding nothing but their node_modules: in the bundled catalog a folder
+#    without a tool.json is a GROUP, so the leftover reads as an empty category
+#    (plus a duplicate puppeteer tree on disk). No tool.json = not a tool.
+#  - COMPLETE, old tool.json and run included: when the CHECKOUT itself still
+#    has the ignored server/tools/browse_web/node_modules, `git ls-files
+#    --ignored --directory` above lists the whole server/tools/browse_web/ as
+#    an exclude, so rsync neither copies nor deletes anything under it. The
+#    registry then serves the OLD flat copy (flat wins a duplicate id) and
+#    warns at every scan. The grouped tool.json rsync just wrote is the proof
+#    that the flat one is the leftover, so that is the second condition.
+for pair in web/browse_web web/web_search web/web_research \
+            self_management/manage_agents self_management/manage_tools; do
+    stale="${pair#*/}"
     d="$INSTALL_DIR/server/tools/$stale"
-    if [ -d "$d" ] && [ ! -e "$d/tool.json" ]; then
+    [ -d "$d" ] || continue
+    if [ ! -e "$d/tool.json" ] || [ -e "$INSTALL_DIR/server/tools/$pair/tool.json" ]; then
         rm -rf "$d"
         echo "  Removed the pre-group leftover server/tools/$stale/"
     fi
