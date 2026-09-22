@@ -130,10 +130,20 @@ def walk(root, depth, pats, stats):
 
 
 def render(rows, limit):
-    shown = rows[:limit]
-    width = min(max((len(r[0]) + (1 if r[1] else 0) for r in shown), default=0), 46)
+    """One line per entry: ``name | size date`` (``name | (N items)`` for a
+    folder).
+
+    NOT aligned into columns. The reader is a model, which gains nothing from a
+    tidy right edge and pays for every space: measured on server/app at depth 2,
+    the ljust padding plus the size's right-justification were 969 of 3710 bytes
+    — 26% of the answer spent on whitespace. The ' | ' separator survives the
+    cut because names contain spaces and sizes do not delimit themselves; the
+    single space between size and date is safe, both being fixed shapes.
+    """
     out = []
-    for rel, is_dir, size, mtime, items in shown:
+    for rel, is_dir, size, mtime, items in rows[:limit]:
+        # Names are NEVER shortened: a truncated name is a path that cannot be
+        # reused.
         name = rel + "/" if is_dir else rel
         if is_dir:
             tail = ("(empty)" if items == 0 else
@@ -142,10 +152,8 @@ def render(rows, limit):
         elif size < 0:
             tail = "(unreadable)"
         else:
-            tail = f"{human(size):>7}  {datetime.fromtimestamp(mtime):%Y-%m-%d %H:%M}"
-        # Names are NEVER shortened: a truncated name is a path that cannot be
-        # reused. Wide entries just push their own column out.
-        out.append(f"{name.ljust(width)}  {tail}")
+            tail = f"{human(size)} {datetime.fromtimestamp(mtime):%Y-%m-%d %H:%M}"
+        out.append(f"{name} | {tail}")
     return out
 
 
