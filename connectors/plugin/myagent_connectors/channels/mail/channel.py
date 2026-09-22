@@ -161,6 +161,14 @@ _QUOTE_MARKERS = [
 _RE_SUBJECT = re.compile(r"^\s*((re|r|aw|sv|antw|ref|fwd?|fw|wg|tr|i|vs)\s*:\s*)+",
                          re.IGNORECASE)
 
+# What makes an outgoing body markup rather than prose: see looks_like_html().
+_RE_HTML_OPEN = re.compile(
+    r"<(?:!doctype\s+html|html|body|head|table|div|p|h[1-6]|ul|ol|section|"
+    r"article|center|pre|blockquote|font)[\s>/]", re.IGNORECASE)
+_RE_HTML_CLOSE = re.compile(
+    r"</(?:html|body|table|div|p|h[1-6]|ul|ol|li|tr|td|th|section|article|"
+    r"center|pre|blockquote|font|span|b|i|strong|em|a)\s*>", re.IGNORECASE)
+
 
 # ----------------------------------------------------------------- settings
 def _as_bool(v) -> bool:
@@ -246,6 +254,26 @@ def html_to_text(markup: str) -> str:
     except Exception:
         return re.sub(r"<[^>]+>", " ", markup or "").strip()
     return p.text()
+
+
+def looks_like_html(text: str) -> bool:
+    """Whether an OUTGOING body is markup rather than prose.
+
+    An agent asked for a report writes HTML on its own initiative — nothing in
+    ``notify_user``'s schema asks for it — and ``set_content()`` would then
+    ship the source, tags and all, to the reader. So the body is sniffed
+    instead of declared: no parameter for the model to get wrong, and the
+    prose case is untouched.
+
+    Deliberately narrow, because the cost of the two errors is not the same:
+    prose misread as markup arrives stripped of its punctuation, while markup
+    misread as prose only arrives as it does today. So BOTH ends must agree —
+    a structural tag opening the very first line, and some closing tag further
+    down. A mail that merely mentions ``<div>`` mid-sentence, or ends a word
+    with ``<b>bold</b>``, stays plain text.
+    """
+    body = (text or "").lstrip("\ufeff \t\r\n")
+    return bool(_RE_HTML_OPEN.match(body) and _RE_HTML_CLOSE.search(body))
 
 
 def strip_quoted(text: str) -> str:
@@ -996,7 +1024,16 @@ class MailConnector(BaseConnector):
         # is how two bots facing each other stop after one round.
         msg["Auto-Submitted"] = "auto-replied"
         msg["X-Auto-Response-Suppress"] = "All"
-        msg.set_content(text or "(no reply)")
+        body = text or "(no reply)"
+        if looks_like_html(body):
+            # multipart/alternative, not a bare text/html part: a reader that
+            # refuses HTML (or a digest, or a screen reader) still gets the
+            # report, and html_to_text() is the same renderer that reads the
+            # INBOUND mail, so the fallback cannot drift from it.
+            msg.set_content(html_to_text(body) or "(no reply)")
+            msg.add_alternative(body, subtype="html")
+        else:
+            msg.set_content(body)
         for name, data, mime in files:
             maintype, _, subtype = (mime or "application/octet-stream").partition("/")
             if not subtype:

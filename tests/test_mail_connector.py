@@ -22,6 +22,8 @@ Pinned properties, each of which fails silently in production:
   * a notify_user with a subject is ONE new mail under that Subject, with the
     files attached and NOT threaded; without a subject it behaves as send()
     (a threaded reply, or buffered into the turn's single reply);
+  * a body the agent wrote as HTML goes out as multipart/alternative with a
+    rendered text twin, while prose stays a single text/plain part;
   * verify() maps a socket failure to Unreachable (the manager keeps
     retrying) and a refused login to a plain error (it stops).
 
@@ -641,6 +643,57 @@ async def test_base_notify():
           "text refused: nothing uploaded, all files reported")
 
 
+async def test_html_body():
+    """An agent that writes its report in HTML must not deliver the tags.
+
+    Sniffed, never declared: the bar is a structural tag opening the body AND
+    a closing tag later, so prose that merely mentions a tag stays text/plain
+    (rendering prose as HTML would eat its punctuation)."""
+    print("HTML body detection:")
+    cases = [
+        ('<html><body style="font:Arial"><h2>Report</h2><p>ciao</p></body></html>', True),
+        ('<h3>1. Stato server</h3>\n<table border="1"><tr><td>a</td></tr></table>', True),
+        ('\n  <div style="x">ciao</div>', True),
+        ('Ciao, ecco il report.\n- uno\n- due', False),
+        ('Il tag <div> raggruppa, si chiude con </div>.', False),
+        ("<b>Nota</b>: testo normale con un grassetto.", False),
+        ('<p>aperto e mai chiuso', False),
+        ('', False),
+    ]
+    for text, want in cases:
+        got = mail.looks_like_html(text)
+        check(got is want, f"{'markup' if want else 'prose  '}: {text[:44]!r}")
+
+    mail.smtp_send, orig_send = FakeSMTP.send, mail.smtp_send
+    try:
+        FakeSMTP.sent.clear()
+        conn = make(binding(id="mailbot4"))
+        html = ('<html><body><h2>Report</h2><p>Server <b>OK</b>: 24/25.</p>'
+                '</body></html>')
+        ok, lost = await conn.notify("mario@example.com", html, subject="Report",
+                                     files=[("d.csv", b"a,b\n1,2", "text/csv")])
+        _, _, msg = FakeSMTP.sent[0]
+        check(ok and msg.get_content_type() == "multipart/mixed",
+              f"with an attachment the mail is multipart/mixed: {msg.get_content_type()}")
+        html_part = msg.get_body(preferencelist=("html",))
+        check(html_part is not None and html_part.get_content().strip() == html,
+              "the HTML travels as text/html, verbatim")
+        plain = msg.get_body(preferencelist=("plain",))
+        check(plain is not None and "<h2>" not in plain.get_content()
+              and "Report" in plain.get_content(),
+              "…with a rendered text/plain twin for readers that refuse HTML")
+        check([a.get_filename() for a in msg.iter_attachments()] == ["d.csv"],
+              "the attachment survives the alternative")
+
+        FakeSMTP.sent.clear()
+        await conn.notify("mario@example.com", "Ciao, report di oggi.", subject="Report")
+        _, _, msg = FakeSMTP.sent[0]
+        check(msg.get_content_type() == "text/plain",
+              f"prose is still ONE text/plain part: {msg.get_content_type()}")
+    finally:
+        mail.smtp_send = orig_send
+
+
 async def main():
     await test_base_notify()
     test_parsing()
@@ -649,6 +702,7 @@ async def main():
     await test_polling()
     await test_pipeline_and_reply()
     await test_notify()
+    await test_html_body()
     await test_verify()
     test_address_book()
 
