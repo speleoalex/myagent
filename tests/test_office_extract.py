@@ -235,6 +235,72 @@ def test_xlsx_1904_epoch():
     assert "2030-02-17" in text, [ln for ln in text.splitlines() if "20" in ln] or text
 
 
+def test_xlsx_sparse_row_keeps_its_columns():
+    """A row stores only the cells that hold something; 'r' says which ones.
+
+    Row 2 here is A, C, E with B and D empty. Read in document order alone the
+    three values come out adjacent, so the cost lands under the header of the
+    quantity and the date under the header of the cost — a silent, plausible,
+    completely wrong table. The header row is dense, which is exactly why
+    nothing in the text would give it away.
+    """
+    sheet = (f'<worksheet xmlns="{S}"><sheetData>'
+             f'<row r="1"><c r="A1" t="str"><v>voce</v></c>'
+             f'<c r="B1" t="str"><v>qta</v></c>'
+             f'<c r="C1" t="str"><v>costo</v></c>'
+             f'<c r="D1" t="str"><v>note</v></c>'
+             f'<c r="E1" t="str"><v>data</v></c></row>'
+             f'<row r="2"><c r="A2" t="str"><v>bullone</v></c>'
+             f'<c r="C2"><v>12.5</v></c>'
+             f'<c r="E2" t="str"><v>2026-03-01</v></c></row>'
+             f'</sheetData></worksheet>')
+    path = _zip("sparse.xlsx", {
+        "xl/workbook.xml": f'<workbook xmlns="{S}" xmlns:r="{R}"><sheets>'
+                           f'<sheet name="S" sheetId="1" r:id="rId1"/>'
+                           f'</sheets></workbook>',
+        "xl/_rels/workbook.xml.rels": f'<Relationships xmlns="{PKG_R}">'
+                                      f'<Relationship Id="rId1" '
+                                      f'Target="worksheets/sheet1.xml"/>'
+                                      f'</Relationships>',
+        "xl/worksheets/sheet1.xml": sheet,
+    })
+    for mod in (search, read, extract):
+        sep = mod.CELL_SEP
+        text = mod.office_text(path)
+        row = [ln for ln in text.splitlines() if ln.startswith("bullone")]
+        assert row == [f"bullone{sep}{sep}12.5{sep}{sep}2026-03-01"], (mod, text)
+        # Same number of fields as the header, which is what makes them line up.
+        head = [ln for ln in text.splitlines() if ln.startswith("voce")][0]
+        assert len(row[0].split(sep)) == len(head.split(sep)) == 5, (mod, text)
+
+
+def test_xlsx_column_index():
+    for mod in (search, read, extract):
+        assert mod._xlsx_col_index("A1") == 0, mod
+        assert mod._xlsx_col_index("Z9") == 25, mod
+        assert mod._xlsx_col_index("AA1") == 26, mod
+        assert mod._xlsx_col_index("XFD1048576") == 16383, mod
+        # No reference at all, or a malformed one: the caller falls back to
+        # document order rather than guessing a column.
+        assert mod._xlsx_col_index("") is None, mod
+        assert mod._xlsx_col_index("12") is None, mod
+
+
+def test_xlsx_absurd_column_does_not_pad_the_sheet_away():
+    """A single cell parked at XFD would otherwise pad 16383 separators."""
+    sheet = (f'<worksheet xmlns="{S}"><sheetData>'
+             f'<row r="1"><c r="A1" t="str"><v>here</v></c>'
+             f'<c r="XFD1" t="str"><v>far</v></c></row>'
+             f'</sheetData></worksheet>')
+    path = _zip("wide.xlsx", {
+        "xl/worksheets/sheet1.xml": sheet,
+    })
+    for mod in (search, read, extract):
+        text = mod.office_text(path)
+        assert text.count(mod.CELL_SEP) == 1, (mod, len(text))
+        assert "here" in text and "far" in text, (mod, text)
+
+
 # --------------------------------------------------------------------------- #
 # Failure modes
 # --------------------------------------------------------------------------- #
@@ -330,11 +396,12 @@ def test_office_files_are_collected_and_chunked():
 # drift this guards, so the list is written down.
 OFFICE_SHARED = [
     "OFFICE_EXTS", "MAX_OFFICE_CHARS", "MAX_OFFICE_UNCOMPRESSED", "CELL_SEP",
-    "_XLS_EPOCH_1900", "_XLS_EPOCH_1904", "_XLS_DATE_FMT_IDS",
+    "_XLS_EPOCH_1900", "_XLS_EPOCH_1904", "_XLS_DATE_FMT_IDS", "_XLS_MAX_PAD",
     "_xml_tag", "_xml_root", "_docx_para_text", "_docx_heading_level",
     "_docx_text", "_pptx_slide_order", "_pptx_text", "_xlsx_shared_strings",
     "_xlsx_date_styles", "_xlsx_serial_to_date", "_xlsx_sheets",
-    "_xlsx_epoch_1904", "_xlsx_text", "_xlsx_cell_text", "office_text",
+    "_xlsx_epoch_1904", "_xlsx_col_index", "_xlsx_text", "_xlsx_cell_text",
+    "office_text",
 ]
 
 COPIES = {

@@ -836,6 +836,12 @@ _XLS_EPOCH_1900 = "1899-12-30"
 _XLS_EPOCH_1904 = "1904-01-01"
 # Builtin numFmt ids that mean "this number is a date/time" (ECMA-376 18.8.30).
 _XLS_DATE_FMT_IDS = frozenset(list(range(14, 23)) + list(range(45, 48)))
+# How far a row may be padded to put a cell in its own column (see
+# _xlsx_text). Excel's own ceiling is XFD = 16384, but a row whose next value
+# sits further than this along is a scatter of isolated cells, not a table with
+# a header to line up against, and padding it would spend the whole character
+# budget on separators.
+_XLS_MAX_PAD = 1024
 
 
 def _xml_tag(elem):
@@ -1091,12 +1097,26 @@ def _xlsx_epoch_1904(zf):
     return False
 
 
+def _xlsx_col_index(ref):
+    """0-based column from a cell reference like "AB12"; None if unreadable.
+
+    Base-26 with no zero digit, so A..Z is 0..25 and AA is 26.
+    """
+    n = 0
+    for ch in ref:
+        if not ("A" <= ch <= "Z" or "a" <= ch <= "z"):
+            break
+        n = n * 26 + (ord(ch.upper()) - 64)
+    return n - 1 if n else None
+
+
 def _xlsx_text(zf):
     """Cell values of a .xlsx, one "## Sheet: name" section per sheet.
 
-    One line per row, cells joined by CELL_SEP; empty rows and empty trailing
-    cells are dropped, or a spreadsheet whose used range is wider than its data
-    (very common) pads every line with separators.
+    One line per row, cells joined by CELL_SEP at the column their 'r' says;
+    empty rows and empty trailing cells are dropped, or a spreadsheet whose
+    used range is wider than its data (very common) pads every line with
+    separators.
     """
     strings = _xlsx_shared_strings(zf)
     dated = _xlsx_date_styles(zf)
@@ -1114,6 +1134,15 @@ def _xlsx_text(zf):
             for cell in row:
                 if _xml_tag(cell) != "c":
                     continue
+                # A row stores ONLY the cells that hold something, and <c r="C3">
+                # is what says where they sit. Taken in document order alone, a
+                # row holding A, C and E renders as three ADJACENT values, each
+                # sliding under the wrong heading — and since the header row is
+                # normally dense, nothing in the text shows it happened. Padding
+                # from 'r' is what keeps a figure under its own column.
+                col = _xlsx_col_index(cell.attrib.get("r") or "")
+                if col is not None and len(cells) <= col <= len(cells) + _XLS_MAX_PAD:
+                    cells.extend([""] * (col - len(cells)))
                 cells.append(_xlsx_cell_text(cell, strings, dated, epoch_1904))
             while cells and not cells[-1]:
                 cells.pop()

@@ -72,6 +72,7 @@ OFFICE_FUNCS = [
     "_xlsx_date_styles",
     "_xlsx_serial_to_date",
     "_xlsx_epoch_1904",
+    "_xlsx_col_index",
 ]
 
 # Module-level constants the shared code reads. Identical bodies are not enough
@@ -79,7 +80,7 @@ OFFICE_FUNCS = [
 SHARED_CONSTS = ["MAX_TEXT_BYTES", "PDF_CACHE_MAX_BYTES", "BLOCK_TAGS", "SKIP_TAGS"]
 OFFICE_CONSTS = ["OFFICE_EXTS", "MAX_OFFICE_CHARS", "MAX_OFFICE_UNCOMPRESSED",
                  "CELL_SEP", "_XLS_EPOCH_1900", "_XLS_EPOCH_1904",
-                 "_XLS_DATE_FMT_IDS"]
+                 "_XLS_DATE_FMT_IDS", "_XLS_MAX_PAD"]
 
 # (tool A, tool B, names that must agree between them)
 PAIRS = [
