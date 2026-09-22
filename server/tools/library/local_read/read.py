@@ -827,7 +827,10 @@ MAX_OFFICE_UNCOMPRESSED = 80_000_000
 # Cells and table cells are joined with this, never a newline: a table of
 # torque values stops saying which figure belongs to which bolt when every
 # cell lands on its own line. Same lesson as keeping pdftotext's -layout.
-CELL_SEP = "  |  "
+# ONE space a side, not two: the reader is a model, and the wide form spent 5
+# characters on every boundary — 45 per row on a 10-column sheet, for nothing.
+# " | " is also the spelling it has seen a million times in markdown tables.
+CELL_SEP = " | "
 # Excel serial dates. 1899-12-30 is the epoch that makes serial 1 = 1900-01-01
 # while absorbing the Lotus fake leap day (serial 60 = "1900-02-29", which does
 # not exist); serials at or below it are off by one and rare enough to be left
