@@ -54,6 +54,21 @@ _MAX_TOKENS_CAPS: dict[tuple[str, str], int] = {}
 # and this is the value a provider falls back to when it could not ask.
 FALLBACK_MAX_OUTPUT = 8192
 
+# The runaway backstop for LOCAL models, as a FRACTION of the probed window
+# rather than one number for every model. A fixed 2048 was a sane guess when the
+# window was 4k and a silent mutilation at 64k: on 2026-09-22 a scheduled report
+# died because the HTML mail it was writing stopped mid-attribute, and llama.cpp
+# with --jinja answers a half-written tool call with a 500, so the turn had no
+# reply at all. A quarter of the window is the most the answer may claim: it is
+# also the reserve subtracted from the room left for messages (_payload_overhead),
+# and beyond that the model starts losing the conversation to make space for a
+# reply it will not write. The floor keeps the old value for small windows; the
+# ceiling is there because past ~8k tokens a single reply is a repetition loop,
+# which is the thing this cap exists to stop.
+_LOCAL_OUTPUT_DIVISOR = 4
+_LOCAL_OUTPUT_MIN = 2048
+_LOCAL_OUTPUT_MAX = 8192
+
 # Anthropic names the model's real ceiling when it refuses: "max_tokens: 100000 >
 # 64000, which is the maximum allowed number of output tokens for <model>".
 _MAX_TOKENS_LIMIT_RE = re.compile(r"max_tokens:\s*(\d+)\s*>\s*(\d+)")
@@ -494,6 +509,16 @@ class LLMProvider:
                       self.config.id, self._max_out)
         return self._max_out
 
+    @staticmethod
+    def _local_output_cap(max_ctx: int) -> int:
+        """The runaway backstop for a local model, sized to its window.
+
+        A pure function of the ALREADY-narrowed window, so it is the same
+        whether the number came from the probe or from a refusal.
+        """
+        return max(_LOCAL_OUTPUT_MIN,
+                   min(_LOCAL_OUTPUT_MAX, max_ctx // _LOCAL_OUTPUT_DIVISOR))
+
     def _build_payload(
         self,
         messages: list[dict],
@@ -535,12 +560,22 @@ class LLMProvider:
         if self.config.provider == "ollama" and self.config.context_window:
             payload["num_ctx"] = self.config.context_window
 
+        # The window this call actually gets. Narrowed here, above the output
+        # cap, because the cap is derived FROM it: a ceiling learned from a 400
+        # has to shrink the answer too, not just the messages.
+        learned = _CTX_CAPS.get(self._caps_key)
+        if learned:
+            max_ctx = min(max_ctx, learned)
+
         # Cap a single response so a small LOCAL model can't run away into an
         # infinite repetition loop (a hard backstop even without a repeat
-        # penalty). Remote providers don't need this crutch and some reject a
-        # low cap or the `max_tokens` name outright, so it's only applied when
-        # explicitly set for them. Overridable per model via options; 0 disables.
-        default_max = None if remote else 2048
+        # penalty). Scaled to the window — see _LOCAL_OUTPUT_DIVISOR — because
+        # the same number cannot be both a backstop on a 4k model and enough
+        # room on a 64k one. Remote providers don't need this crutch and some
+        # reject a low cap or the `max_tokens` name outright, so it's only
+        # applied when explicitly set for them. Overridable per model via
+        # options; 0 disables.
+        default_max = None if remote else self._local_output_cap(max_ctx)
         max_tokens = self.config.options.get("max_tokens", default_max)
         if max_tokens:
             payload["max_tokens"] = max_tokens
@@ -563,9 +598,6 @@ class LLMProvider:
         # Fit the context window (probed, not guessed) — LAST, so the reserve
         # can be measured against the finished payload: the tool definitions are
         # part of the prompt, and the answer needs room beside it.
-        learned = _CTX_CAPS.get(self._caps_key)
-        if learned:
-            max_ctx = min(max_ctx, learned)
         payload["messages"] = self._truncate_messages(
             payload["messages"], max_ctx, reserve=self._payload_overhead(payload))
         return payload

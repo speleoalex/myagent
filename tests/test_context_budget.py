@@ -40,6 +40,15 @@ The contract, one case each:
      schemas — the existing formula divided the WHOLE request cost by a
      messages-only estimate, yielding 1.39 where the truth was 1.135 and taxing
      every later payload by ~14% of the window.
+  9. The output cap for a LOCAL model is a FRACTION of that same window, clamped.
+     One number cannot be both a runaway backstop on a 4k model and enough room
+     for an HTML mail on a 64k one: on 2026-09-22 a flat 2048 cut a mail mid-
+     attribute, and llama.cpp with --jinja answers a half-written tool call with
+     a 500 — so the turn had no reply at all, not even a truncated one.
+ 10. That cap is derived from the window AFTER the learned clamp, and is counted
+     into the overhead: it is room RESERVED from the messages, not free space.
+ 11. An explicit `options.max_tokens` still wins, 0 still disables, and a remote
+     provider still gets no cap — some reject a low one, or the name itself.
 """
 
 import asyncio
@@ -61,7 +70,9 @@ from app.engine import prompts                                  # noqa: E402
 from app.engine.executor import AgentExecutor, Stores, _tool_call_key  # noqa: E402
 from app.engine.llm_provider import (                            # noqa: E402
     LLMProvider, _TOKEN_RATIOS, _RATIO_FLOOR,
+    _CTX_CAPS, _LOCAL_OUTPUT_MAX, _LOCAL_OUTPUT_MIN,
 )
+from app.models import ModelConfig                               # noqa: E402
 from app.storage.store import JsonStore                         # noqa: E402
 from app.tools.registry import ToolRegistry                     # noqa: E402
 
@@ -301,6 +312,73 @@ def test_threshold_comes_from_settings_and_is_clamped():
         assert state["threshold"] == 0.5
     finally:
         config.settings.context_compact_at = original
+
+
+# ----------------------------------------------------------------------
+# The output cap (contract 9-11)
+
+
+def _provider(window, *, provider="llamacpp", options=None):
+    """A provider whose window is pinned, so no probe and no server."""
+    cfg = ModelConfig(id="p", name="P", provider=provider, model="m",
+                      base_url="http://localhost:8080", options=options or {})
+    p = LLMProvider(cfg)
+    p._ctx_budget = window
+    return p
+
+
+def test_the_cap_scales_with_the_window():
+    # Below the floor the old constant still applies: on a small window a
+    # quarter would be less of a backstop than the one that already worked.
+    assert _provider(4096)._local_output_cap(4096) == _LOCAL_OUTPUT_MIN
+    assert _provider(16384)._local_output_cap(16384) == 4096
+    # And it stops climbing: past ~8k a single reply is a repetition loop,
+    # which is the thing this cap exists to stop.
+    assert _provider(65536)._local_output_cap(65536) == _LOCAL_OUTPUT_MAX
+    assert _provider(200000)._local_output_cap(200000) == _LOCAL_OUTPUT_MAX
+
+
+def test_the_cap_lands_in_the_payload_and_in_the_reserve():
+    p = _provider(65536)
+    payload = p._build_payload([{"role": "user", "content": "x"}], None,
+                               None, stream=True, max_ctx=65536)
+    assert payload["max_tokens"] == _LOCAL_OUTPUT_MAX
+    # Room reserved for the answer is room the messages do not get.
+    assert p._payload_overhead(payload) >= _LOCAL_OUTPUT_MAX
+
+
+def test_a_learned_ceiling_shrinks_the_answer_too():
+    """A 400 narrows the window; the cap must follow it down.
+
+    Derived from the post-clamp number, so it is the same whether the window
+    came from the probe or from a refusal — otherwise a model that had just
+    been told it has 8k would still be promised a 16k answer.
+    """
+    p = _provider(65536)
+    _CTX_CAPS[p._caps_key] = 8192
+    try:
+        payload = p._build_payload([{"role": "user", "content": "x"}], None,
+                                   None, stream=True, max_ctx=65536)
+        assert payload["max_tokens"] == _LOCAL_OUTPUT_MIN, payload["max_tokens"]
+    finally:
+        _CTX_CAPS.pop(p._caps_key, None)
+
+
+def test_explicit_and_remote_are_untouched():
+    explicit = _provider(65536, options={"max_tokens": 512})
+    payload = explicit._build_payload([{"role": "user", "content": "x"}], None,
+                                      None, stream=True, max_ctx=65536)
+    assert payload["max_tokens"] == 512
+
+    disabled = _provider(65536, options={"max_tokens": 0})
+    payload = disabled._build_payload([{"role": "user", "content": "x"}], None,
+                                      None, stream=True, max_ctx=65536)
+    assert "max_tokens" not in payload
+
+    remote = _provider(65536, provider="openai")
+    payload = remote._build_payload([{"role": "user", "content": "x"}], None,
+                                    None, stream=True, max_ctx=65536)
+    assert "max_tokens" not in payload
 
 
 if __name__ == "__main__":
