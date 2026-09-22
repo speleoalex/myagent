@@ -1155,3 +1155,81 @@ body {
 .tool-section[open] > summary::after {
     content: "\25BE";  /* ▾ */
 }
+
+/* Full-screen viewer for the images in a message (resource thumbnails and the
+   model-embedded ![](_resources/…) ones).
+
+   It exists because of the INSTALLED app. A thumbnail used to be nothing but an
+   <a target="_blank"> to the file, and in a standalone PWA a same-origin link
+   navigates the app's OWN window: the picture fills the screen with no chrome
+   to leave it by, and the back gesture — the only thing left — quits the app
+   instead of returning to the chat. The overlay is drawn OVER the SPA, so
+   closing it is a button, and the back gesture is made to work rather than
+   fought (see ImageViewer in chat.js).
+
+   Above Bootstrap's modal layer (1055): the chat history window may be open. */
+.img-viewer {
+    position: fixed;
+    inset: 0;
+    z-index: 1080;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.92);
+    /* viewport-fit=cover: the bar must clear the notch and the home indicator. */
+    padding: calc(2.6rem + env(safe-area-inset-top)) 0.5rem
+             calc(0.5rem + env(safe-area-inset-bottom));
+}
+.img-viewer-img {
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
+    display: block;
+}
+.img-viewer-bar {
+    position: absolute;
+    top: env(safe-area-inset-top);
+    left: 0;
+    right: 0;
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0.3rem 0.5rem;
+    color: #fff;
+    /* A gradient, not a solid bar: a picture that reaches the top edge stays
+       visible under the controls instead of being cropped by them. */
+    background: linear-gradient(rgba(0, 0, 0, 0.75), rgba(0, 0, 0, 0));
+}
+.img-viewer-title {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 0.85rem;
+    opacity: 0.85;
+}
+.img-viewer-btn {
+    flex: none;
+    /* 44px: the touch target this is most often used on. */
+    width: 44px;
+    height: 44px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: #fff;
+    font-size: 1.1rem;
+    text-decoration: none;
+}
+.img-viewer-btn:hover,
+.img-viewer-btn:focus-visible {
+    background: rgba(255, 255, 255, 0.15);
+    color: #fff;
+}
+.res-thumb,
+.msg-content .md-img {
+    cursor: zoom-in;
+}

@@ -1613,6 +1613,11 @@ const ChatPage = {
         if (mime.startsWith('image/')) {
             const a = document.createElement('a');
             a.className = 'res-thumb';
+            // Still a real link — middle-click and "open in new tab" must keep
+            // working — but a plain click is taken by ImageViewer, which can be
+            // closed. 'path' is what lets it rebuild the url with a fresh api
+            // key and offer the download.
+            a.dataset.path = r.path;
             a.href = App.fileUrl(r.path);
             a.target = '_blank';
             a.rel = 'noopener';
@@ -1898,6 +1903,7 @@ const ChatPage = {
             // path stay escaped text: no tracking pixels, no traversal.
             .replace(/!\[([^\]]*)\]\((_resources\/[A-Za-z0-9_.-]+)\)/g, (m, alt, path) =>
                 `<img class="md-img" src="${App.fileUrl(path).replace(/"/g, '%22')}"` +
+                ` data-path="${path}"` +
                 ` alt="${alt.replace(/"/g, '&quot;')}" loading="lazy">`)
             // Links: the URL is untrusted (model/tool output). App.esc only
             // escapes <>&, NOT quotes, so a " in the URL could break out of the
@@ -2019,3 +2025,165 @@ const ChatPage = {
         return html;
     },
 };
+
+/* Full-screen viewer for the images inside a message.
+ *
+ * WHY it is not simply a link to the file. A thumbnail used to be an
+ * <a target="_blank"> to /api/files/…, which in a browser tab is fine and in an
+ * INSTALLED PWA is a trap: a same-origin link navigates the app's own window,
+ * so the picture arrives full-screen with no chrome to close it by, and the
+ * back gesture — the only thing left to try — leaves the app entirely instead
+ * of returning to the chat.
+ *
+ * So the picture is drawn OVER the SPA and the back gesture is made to work
+ * rather than fought: opening pushes a history entry, and both the ✕ and the
+ * gesture go through the same pop. The pushed entry keeps the CURRENT url
+ * (pushState with no third argument), so no hashchange fires and App.route()
+ * never re-runs — the conversation underneath is not re-rendered and its scroll
+ * position survives.
+ *
+ * It also keeps the api key out of the address bar: App.fileUrl() carries it as
+ * a query param because an <img> cannot send an Authorization header, which is
+ * harmless in a src attribute and not harmless in a tab's history. Opening in a
+ * real new tab is still offered — as a deliberate choice, not as the default.
+ */
+const ImageViewer = {
+    _el: null,
+    _pushed: false,
+    _installed: false,
+
+    /** Wire the chat once, by delegation from the document: streamed messages,
+     * reloaded history and re-rendered pages then need no wiring of their own. */
+    install() {
+        if (this._installed) return;
+        this._installed = true;
+
+        document.addEventListener('click', (e) => {
+            const el = e.target.closest('.res-thumb, .msg-content .md-img');
+            if (!el || e.button || e.metaKey || e.ctrlKey || e.shiftKey) return;
+            const img = el.tagName === 'IMG' ? el : el.querySelector('img');
+            if (!img) return;
+            // .res-thumb stays a real <a href>: only the plain left click is
+            // taken, so middle-click and "open link in new tab" keep working.
+            e.preventDefault();
+            this.open(el.dataset.path || '', img.src, img.alt || el.title || '');
+        });
+
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && this._el) {
+                e.preventDefault();
+                this.close();
+            }
+        });
+
+        // The back button/gesture pops the entry open() pushed. Nothing else
+        // can be clicked while the overlay is up, so the entry on top is ours;
+        // when it is not (browser forward/back across pages), _el is null and
+        // this does nothing.
+        window.addEventListener('popstate', () => {
+            if (this._el) this._destroy();
+        });
+        // Belt and braces: a hash navigation that somehow happens while the
+        // overlay is up must not leave it floating over the next page.
+        window.addEventListener('hashchange', () => {
+            if (this._el) this._destroy();
+        });
+    },
+
+    /** `path` is the workspace path when we know it (it buys the download link
+     * and a correct api key); `src` is what the thumbnail already loaded. */
+    open(path, src, title) {
+        if (this._el) return this._show(path, src, title);
+
+        const box = document.createElement('div');
+        box.className = 'img-viewer';
+        box.setAttribute('role', 'dialog');
+        box.setAttribute('aria-modal', 'true');
+
+        const bar = document.createElement('div');
+        bar.className = 'img-viewer-bar';
+        const label = document.createElement('span');
+        label.className = 'img-viewer-title';
+        bar.appendChild(label);
+
+        const tab = document.createElement('a');
+        tab.className = 'img-viewer-btn';
+        tab.target = '_blank';
+        tab.rel = 'noopener';
+        tab.title = i18n('chat.imageNewTab');
+        tab.innerHTML = '<i class="bi bi-box-arrow-up-right"></i>';
+        bar.appendChild(tab);
+
+        const dl = document.createElement('a');
+        dl.className = 'img-viewer-btn';
+        dl.title = i18n('chat.resourceDownload');
+        dl.innerHTML = '<i class="bi bi-download"></i>';
+        bar.appendChild(dl);
+
+        const close = document.createElement('button');
+        close.type = 'button';
+        close.className = 'img-viewer-btn';
+        close.title = i18n('chat.imageClose');
+        close.innerHTML = '<i class="bi bi-x-lg"></i>';
+        close.onclick = () => this.close();
+        bar.appendChild(close);
+
+        const img = document.createElement('img');
+        img.className = 'img-viewer-img';
+
+        box.append(bar, img);
+        // Clicking the backdrop closes; clicking the picture or the bar does
+        // not, or the buttons would be unusable on a small screen.
+        box.onclick = (e) => { if (e.target === box) this.close(); };
+
+        document.body.appendChild(box);
+        document.body.style.overflow = 'hidden';
+        this._el = box;
+        this._show(path, src, title);
+        close.focus();
+
+        try {
+            history.pushState({ myagentImage: true }, '');
+            this._pushed = true;
+        } catch (e) {
+            // No history entry means no back-to-close, but ✕ and Escape still
+            // work — never let this stop the picture from opening.
+            this._pushed = false;
+        }
+    },
+
+    _show(path, src, title) {
+        const box = this._el;
+        const full = path ? App.fileUrl(path) : src;
+        box.querySelector('.img-viewer-title').textContent = title || '';
+        box.querySelector('.img-viewer-img').src = full;
+        box.querySelector('.img-viewer-img').alt = title || '';
+        const [tab, dl] = box.querySelectorAll('.img-viewer-bar a');
+        tab.href = full;
+        dl.href = path ? App.fileUrl(path, true) : src;
+        // Only meaningful same-origin; with a remote server the download=1
+        // query param above is what makes the server send the disposition.
+        dl.download = (path || src).split('/').pop().split('?')[0];
+    },
+
+    close() {
+        if (!this._el) return;
+        if (this._pushed) {
+            // Go through the pop so the button and the back gesture leave the
+            // history in the same state; the popstate handler destroys.
+            this._pushed = false;
+            history.back();
+            return;
+        }
+        this._destroy();
+    },
+
+    _destroy() {
+        if (this._el) this._el.remove();
+        this._el = null;
+        this._pushed = false;
+        document.body.style.removeProperty('overflow');
+    },
+};
+
+ImageViewer.install();

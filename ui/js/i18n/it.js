@@ -619,6 +619,8 @@ I18n.translations.it = {
     'chat.reasoningLive': 'Sta ragionando...',
     'chat.resourceOpen': 'Apri',
     'chat.resourceDownload': 'Scarica',
+    'chat.imageClose': 'Chiudi',
+    'chat.imageNewTab': 'Apri in una nuova scheda',
     'chat.resourceMissing': 'file non più disponibile',
     'chat.errorPrefix': 'Errore: {msg}',
     'chat.copyMarkdown': 'Copia in Markdown',
