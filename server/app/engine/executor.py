@@ -1300,6 +1300,32 @@ class AgentExecutor:
             lines.append(f"- [{i}] {kind}: {name} ({tag}){extra}")
         return "\n".join(lines)
 
+    def _build_now_section(self) -> str:
+        """The '## Current date' block. Empty unless the agent opted in.
+
+        Resolved HERE and not once at startup because a long-lived server
+        crosses midnight: a date computed at import time is wrong for every
+        turn after the first day, and wrong in the one way nobody checks.
+
+        The clock line is a separate opt-in on purpose. It is not extra prose
+        under the same switch: the date is identical for a whole day, so the
+        cached prefix survives, while the time differs every turn and costs a
+        full re-process of the prompt. Agents that only need to say which day
+        it is must not pay that.
+        """
+        if not getattr(self.agent, "date_in_prompt", False):
+            return ""
+        # astimezone() attaches the SYSTEM zone, which is what %Z needs: a naive
+        # now() prints an empty tz and the model gets an hour with no anchor.
+        now = datetime.now().astimezone()
+        lines = [prompts.NOW_DATE.format(
+            date=now.strftime("%Y-%m-%d"), weekday=now.strftime("%A"))]
+        if getattr(self.agent, "time_in_prompt", False):
+            lines.append(prompts.NOW_TIME.format(
+                time=now.strftime("%H:%M"), tz=now.strftime("%Z") or now.strftime("%z")))
+        lines.append(prompts.NOW_NOTE)
+        return prompts.SECTION_NOW + "\n".join(lines)
+
     def _build_memory_section(self, memory_context: list | None) -> str:
         """The '## Memory' block injected into the system prompt: the agent's
         memory.md (profile prose + Notes/Recent indexes) plus the summaries of
@@ -1635,7 +1661,12 @@ class AgentExecutor:
         # as a suffix on self too: the no-tools fallback rebuilds the system
         # prompt mid-loop from _system_prompt_with_tools alone and would
         # otherwise silently drop them (llama.cpp starts in that mode).
-        suffix = self._build_memory_section(memory_context)
+        # Date first: it is the most STABLE thing in the suffix (one string for
+        # a whole day), and the prompt cache only keeps what precedes the first
+        # change. Behind the memory digest it would be re-processed every turn
+        # for nothing.
+        suffix = self._build_now_section()
+        suffix += self._build_memory_section(memory_context)
         suffix += self._build_findings_section()
         suffix += self._build_tool_results_section()
         has_attachment = bool(attachments) and any(

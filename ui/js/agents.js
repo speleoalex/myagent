@@ -680,8 +680,15 @@ const AgentsPage = {
             if (slot) slot.innerHTML = html;
         };
         set('tab-tools', `<span class="badge text-bg-secondary" title="${App.escAttr(i18n('agents.tabToolsCount', { n: d.tools.length }))}">${d.tools.length}</span>`);
-        set('tab-general', d.folder
-            ? `<span class="tab-dot" title="${App.escAttr(i18n('agents.tabFolderOn', { path: d.folder.path }))}"></span>`
+        // The General dot means "this pane has something switched on", so it has
+        // to name ALL of them: a dot that only ever meant "folder" would go on
+        // reading as "folder" once a second switch could raise it.
+        const general = [
+            d.folder ? i18n('agents.tabFolderOn', { path: d.folder.path }) : '',
+            d.date_in_prompt ? i18n('agents.tabDateOn') : '',
+        ].filter(Boolean);
+        set('tab-general', general.length
+            ? `<span class="tab-dot" title="${App.escAttr(general.join(' · '))}"></span>`
             : '');
         set('tab-memory', d.memory_enabled
             ? `<span class="tab-dot${notes.memoryWidening ? ' tab-dot-warn' : ''}" title="${App.escAttr(i18n('agents.tabMemoryOn'))}"></span>`
@@ -818,7 +825,7 @@ const AgentsPage = {
     async renderForm(agentId, sourceId = '') {
         // callable_agents defaults to [] (no delegation) for NEW agents only:
         // the user opts in explicitly. Existing agents keep their stored value.
-        let agent = { id: '', name: '', description: '', model_id: '', system_prompt: '', tools: [], lazy_tools: false, max_iterations: 10, max_tool_calls: 5, temperature: 0.7, enabled: true, callable: true, callable_agents: [], memory_enabled: false, memory_threshold: 4000, live: false, schedule_others: false, autonomous: null };
+        let agent = { id: '', name: '', description: '', model_id: '', system_prompt: '', date_in_prompt: false, time_in_prompt: false, tools: [], lazy_tools: false, max_iterations: 10, max_tool_calls: 5, temperature: 0.7, enabled: true, callable: true, callable_agents: [], memory_enabled: false, memory_threshold: 4000, live: false, schedule_others: false, autonomous: null };
         let isEdit = false;
 
         if (agentId) {
@@ -1051,6 +1058,21 @@ const AgentsPage = {
                                 <div class="mb-3">
                                     <label class="form-label" for="f-prompt">${i18n('agents.systemPrompt')}</label>
                                     <textarea class="form-control system-prompt-textarea" id="f-prompt" rows="8">${App.esc(agent.system_prompt)}</textarea>
+                                </div>
+                                <!-- Two switches and not one: see agents.dateInPromptHelp. The
+                                     time rides on the date because a clock with no day is not an
+                                     answer to "when is now", so it is nested and gated below. -->
+                                <div class="mb-3">
+                                    <div class="form-check form-switch mb-2">
+                                        <input class="form-check-input" type="checkbox" id="f-date-in-prompt" ${agent.date_in_prompt ? 'checked' : ''}>
+                                        <label class="form-check-label" for="f-date-in-prompt"><strong>${i18n('agents.dateInPrompt')}</strong></label>
+                                        <div class="form-text">${i18n('agents.dateInPromptHelp')}</div>
+                                    </div>
+                                    <div class="form-check form-switch ms-4">
+                                        <input class="form-check-input" type="checkbox" id="f-time-in-prompt" ${agent.time_in_prompt ? 'checked' : ''}>
+                                        <label class="form-check-label" for="f-time-in-prompt">${i18n('agents.timeInPrompt')}</label>
+                                        <div class="form-text">${i18n('agents.timeInPromptHelp')}</div>
+                                    </div>
                                 </div>`)}
                             ${pane('tools', `
                                 <div class="mb-3">
@@ -1252,6 +1274,11 @@ const AgentsPage = {
                 // holds: with it on the turn opens with a catalogue of activatable
                 // categories and the schemas arrive on demand. Same grant either way.
                 lazy_tools: document.getElementById('f-lazy-tools').checked,
+                date_in_prompt: document.getElementById('f-date-in-prompt').checked,
+                // Read straight from the DOM like its twin, which is why the date
+                // gate UNCHECKS this box and does not merely disable it: a disabled
+                // input still reports whatever it was last left at.
+                time_in_prompt: document.getElementById('f-time-in-prompt').checked,
                 // RangeField.read, not `parseInt(...) || dflt`: 0 is a legitimate
                 // value here (temperature 0 = greedy decoding) and the old idiom
                 // silently turned it into the default.
@@ -1485,6 +1512,18 @@ const AgentsPage = {
             master.onchange = sync;
             sync();
         });
+
+        // The clock is meaningless without the day, and a disabled checkbox still
+        // reports its last state to readForm() — so uncheck as well as disable.
+        const dateEl = document.getElementById('f-date-in-prompt');
+        const timeEl = document.getElementById('f-time-in-prompt');
+        const syncTime = () => {
+            if (!dateEl.checked) timeEl.checked = false;
+            timeEl.disabled = !dateEl.checked;
+            timeEl.closest('.form-check').style.opacity = dateEl.checked ? '1' : '0.5';
+        };
+        dateEl.addEventListener('change', syncTime);
+        syncTime();
 
         // `change` bubbles, so this fires AFTER each control's own handler (the
         // group-all sync has already run). Programmatic `.checked = x` does NOT

@@ -197,6 +197,33 @@ SECTION_VOICE = (
     "request, in the user's language, to repeat."
 )
 
+#: Turn-scoped statement of what day it is. Opt-in per agent
+#: (Agent.date_in_prompt), because a model that is never asked about "today"
+#: pays tokens for nothing — and because it is NOT free in a second way: the
+#: system prompt is the cached PREFIX of every request, so whatever goes here
+#: must stay identical as long as possible. That is why the date and the clock
+#: are two switches, not one: the date changes once a day, the time changes
+#: every turn and throws the prompt cache away with it (llama.cpp's
+#: --cache-reuse included). Date alone is the cheap, usually sufficient answer.
+#:
+#: The NOTE is the load-bearing half. Without it a model reads the line as
+#: decoration and still resolves "yesterday" against its training prior — which
+#: is how a Float report for 2026-09-21 was fetched for 2024-10-17, with every
+#: number plausible and every one of them wrong.
+SECTION_NOW = "\n\n## Current date\n"
+
+#: ISO first, weekday second: the ISO form is what tools take, and putting it
+#: first is what makes the model copy THAT rather than reformat the prose.
+NOW_DATE = "Today is {date} ({weekday})."
+NOW_TIME = "The local time is {time} ({tz})."
+NOW_NOTE = (
+    "Resolve every relative date in the request against this — \"today\", "
+    "\"yesterday\", \"this week\", \"last month\" — and pass tools the absolute "
+    "date in YYYY-MM-DD form. Never take the current date from your training "
+    "data: it is older than this line."
+)
+
+
 #: Preamble of the text-protocol tool block. Only sent when the provider has no
 #: native tool calling: in native mode the `tools` payload IS the documentation,
 #: and sending both made models emit JSON as prose at ~650 tokens per turn.

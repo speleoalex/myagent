@@ -356,6 +356,16 @@ class Agent(BaseModel):
     enabled: bool = True
     callable: bool = True             # can be called/selected by others (delegation + pickers)
     callable_agents: list[str] = ["*"]  # agents this agent may delegate to via call_agent; ["*"] = all
+    # State today's date in the system prompt (opt-in). Off by default because
+    # most agents never resolve a relative date, and the system prompt is the
+    # cached PREFIX of every request: anything that changes here is re-processed.
+    # A model without it answers "yesterday" from its training prior, silently.
+    date_in_prompt: bool = False
+    # Add the clock time beside the date. A SECOND switch rather than more text
+    # under the first, because the two cost differently: the date line is stable
+    # for a day, the time line differs every turn and invalidates the prompt
+    # cache with it. Inert while date_in_prompt is off — one block, one gate.
+    time_in_prompt: bool = False
     # Per-agent long-term memory (opt-in). False = hard exclusion: no compaction, no
     # prompt injection, and the memory_* tools refuse even if attached.
     memory_enabled: bool = False

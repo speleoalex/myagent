@@ -110,6 +110,25 @@ catalogue of the categories the agent holds, and the full schemas arrive when
 the model asks for one. It pays off on small local models, where the tool
 schemas can be half the context window.
 
+### Today's date
+
+A model does not know what day it is. Ask one for "yesterday's report" and it
+answers from the calendar it was trained on — years out of date — without
+hesitating and without saying so. That is not a rare failure: a scheduled agent
+here fetched a timesheet report for October 2024 instead of September 2026 and
+mailed it, correctly formatted, every number wrong.
+
+*General → Tell the agent today's date* adds one line to the system prompt with
+the current date, plus the instruction to resolve "today", "yesterday" or "last
+month" against it and to pass tools the absolute date. Leave it off for agents
+that never touch dates: it is a handful of tokens on every turn.
+
+*Add the time too* is a second switch because it costs more than the first. The
+date line is identical for a whole day, so the prompt is reused as it stands;
+the time changes with every message, and a prompt that changes has to be read
+again from the start — on a local model that re-read is the slowest part of the
+reply. Turn it on for agents that reason about hours, not for the rest.
+
 ### Working folder
 
 *General → Working folder* points an agent at one directory. It becomes the
