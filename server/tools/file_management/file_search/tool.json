@@ -1,6 +1,6 @@
 {
   "name": "Search in Files",
-  "description": "Search for text inside files — the grep of this toolbox. Use it to find WHERE something is (a function, a setting, a message) before reading or editing it. It returns locator lines 'path:line: matching text', never whole file contents: open the interesting one with file_read. Searches a folder tree recursively (default: the agent workspace), skipping binaries and machine-generated folders. The search is literal and case-insensitive unless you say otherwise. The result always states how many matches exist in total, so a short list never means 'that is all there is'.",
+  "description": "Search for text inside files — the grep of this toolbox. Use it to find WHERE something is (a function, a setting, a message) before reading or editing it. It returns locators grouped by file (the path on its own line, then 'line: matching text'), never whole file contents: open the interesting one with file_read. Searches a folder tree recursively (default: the agent workspace), skipping binaries and machine-generated folders. The search is literal and case-insensitive unless you say otherwise. The result always states how many matches exist in total, so a short list never means 'that is all there is'.",
   "parameters": {
     "type": "object",
     "properties": {

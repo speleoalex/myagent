@@ -205,19 +205,21 @@ def main():
                                             # already read, so it costs nothing
             if len(rows) >= limit or shown_here >= MAX_PER_FILE:
                 continue
-            rel = render_path(fpath, cwd)
+            # No path on the line: the file heads its own group (see the print
+            # loop). ':' still marks the matched line and '-' the context, which
+            # is the one bit of grep's format that carries information.
             block = []
             for j in range(max(0, i - context), i):
-                block.append(f"{rel}-{j + 1}- {clip(lines[j])}")
-            block.append(f"{rel}:{i + 1}: {clip(line)}")
+                block.append(f"{j + 1}- {clip(lines[j])}")
+            block.append(f"{i + 1}: {clip(line)}")
             for j in range(i + 1, min(len(lines), i + 1 + context)):
-                block.append(f"{rel}-{j + 1}- {clip(lines[j])}")
+                block.append(f"{j + 1}- {clip(lines[j])}")
             rows.append((fpath, "\n".join(block)))
             shown_here += 1
         if shown_here >= MAX_PER_FILE:
             extra = sum(1 for line in lines if match(line)) - shown_here
             if extra > 0:
-                rows.append((fpath, f"  (+{extra} more in {render_path(fpath, cwd)})"))
+                rows.append((fpath, f"  (+{extra} more in this file)"))
 
     where = render_path(root, cwd) if root != cwd else "."
     searched = (f"{stats['files']} files searched" if not stats["hit_file_cap"]
@@ -255,25 +257,49 @@ def main():
 
     approx = "at least " if (stats["hit_deadline"] or stats["hit_file_cap"]) else ""
     drawn = sum(1 for f, b in rows if not b.startswith("  (+"))
-    head = (f'OK: {total} match(es) for "{query}" in {where} ({searched})'
-            if drawn >= total else
-            f'OK: showing {drawn} of {approx}{total} match(es) for "{query}" '
-            f'in {where} ({searched})')
+    # The header is written AFTER the body, from what the budget actually let
+    # through: counting the rows instead of the printed blocks made it announce
+    # matches the reader never received (measured at context=2: "showing 26"
+    # over 10 printed, and a footer that said 654 more — 26 + 654 ≠ 664). This
+    # tool's whole point is that every limit it hits is declared, so the count
+    # has to come from the same place the footer's does. Only its LENGTH is
+    # reserved up front, using the longest of the two wordings.
+    def render_head(n):
+        return (f'OK: {total} match(es) for "{query}" in {where} ({searched})'
+                if n >= total else
+                f'OK: showing {n} of {approx}{total} match(es) for "{query}" '
+                f'in {where} ({searched})')
 
-    out, used, printed = [head], len(head), 0
-    for _, block in rows:
-        if used + len(block) + 1 > CHAR_BUDGET:
+    # Grouped output: the path is printed ONCE per file, as a heading, instead
+    # of on every line. Measured over server/app it is 32% of the whole result
+    # at context=0 and 47% at context=2 — and the rows of one file are already
+    # contiguous, because iter_files yields each file once.
+    out, used, printed = [None], len(render_head(drawn)), 0
+    cur = None
+    for fpath, block in rows:
+        rel = render_path(fpath, cwd)
+        # A heading with no block under it is worse than one entry less, so the
+        # two are charged to the budget together.
+        head_cost = 0 if fpath == cur else len(rel) + 2
+        if used + head_cost + len(block) + 1 > CHAR_BUDGET:
             break
+        if fpath != cur:
+            out.append(f"{rel}:")
+            used += head_cost
+            cur = fpath
         out.append(block)
         used += len(block) + 1
         if not block.startswith("  (+"):
             printed += 1
+    out[0] = render_head(printed)
 
     foot = []
     if printed < total:
         foot.append(f"{total - printed} more matches not shown — narrow with "
                     f'pattern="*.py" or a longer query, or raise limit (max {MAX_LIMIT}).')
-    foot.append("Open one with file_read. Line numbers are 1-based.")
+    foot.append("Each path heads the matches found in that file; the numbers are "
+                "its 1-based line numbers (':' matched, '-' context). "
+                "Open one with file_read.")
     print("\n".join(out + foot + notes))
 
 
