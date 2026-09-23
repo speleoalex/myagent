@@ -35,12 +35,16 @@ EMBED_KIND = "embedding"
 IMAGE_KIND = "image"
 MODEL_KINDS = (CHAT_KIND, EMBED_KIND, IMAGE_KIND)
 
-# Providers whose config may carry an api_key. The complement is not "not local"
-# but the LOCAL_PROVIDERS pair (ollama, llamacpp) specifically: an a1111 or
-# openai-compatible IMAGE endpoint usually sits on localhost yet may be behind
-# an auth proxy, so the key is kept for it and simply left empty when there is
-# none. Single definition — routers/llm_models.py enforces it on save.
-KEYED_PROVIDERS = ("openai", "anthropic", "a1111")
+# There is deliberately no list of "providers that may carry an api_key": EVERY
+# provider may. This used to exclude ollama and llamacpp as "local, therefore
+# keyless", and the server force-cleared the field on save for them. That is
+# simply not true — `llama-server --api-key` is a first-class flag, and a local
+# server is exactly what gets put behind an auth proxy or published over HTTPS
+# once it is worth reaching from another machine. The rule cost a live node its
+# key: the form hid the field for llama.cpp, so saving any other change on that
+# model sent api_key="" and wiped it, with nothing on screen to show what had
+# been lost. The key is write-only and masked either way (routers/secrets.py);
+# whether it is empty is the user's answer, not the provider's.
 
 
 class ModelConfig(BaseModel):

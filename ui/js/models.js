@@ -247,16 +247,6 @@ const ModelsPage = {
         return provider === 'openai' || provider === 'anthropic';
     },
 
-    // Whether the api_key field is offered. An image backend is usually on
-    // localhost and needs none, but it may sit behind an auth proxy and the
-    // server keeps a key for it either way (KEYED_PROVIDERS in app/models.py),
-    // so the field is shown and simply left empty when there is no key.
-    showsKey(kind, provider) {
-        if (kind === 'image') return true;
-        if (kind === 'embedding') return false;   // local only, by policy
-        return this.isRemote(provider);
-    },
-
     // Placeholder of the model-name field, per kind: an example the user can
     // copy is worth more than a generic "model name".
     modelPlaceholderKey(kind) {
@@ -464,7 +454,14 @@ const ModelsPage = {
                             <label class="form-label">${i18n('models.baseUrl')}</label>
                             <input type="text" class="form-control" id="f-url" value="${App.esc(model.base_url)}" autocomplete="url" required>
                         </div>
-                        <div class="mb-3" id="api-key-group" ${this.showsKey(kind, model.provider) ? '' : 'style="display:none"'}>
+                        <!-- Offered for EVERY kind and provider, and simply left empty when
+                             there is no key. It used to be shown only for the remote chat
+                             providers, on the theory that a local server needs no auth; a
+                             hidden field posts api_key="" on every save, so editing anything
+                             else on a llama.cpp model started by --api-key silently destroyed
+                             its key. A local server published over HTTPS is precisely the one
+                             that has a key to lose. -->
+                        <div class="mb-3" id="api-key-group">
                             <label class="form-label">${i18n('models.apiKey')}</label>
                             <div class="input-group">
                                 <input type="password" class="form-control" id="f-apikey" value="${keyInitial}" autocomplete="new-password"
@@ -588,7 +585,6 @@ const ModelsPage = {
         // selects, because changing the kind also changes the provider.
         const applyProvider = (provider, k) => {
             const img = k === 'image';
-            document.getElementById('api-key-group').style.display = this.showsKey(k, provider) ? '' : 'none';
             // llama.cpp serves one model and ignores the name (chat and
             // embedding alike); an image backend takes an optional one.
             document.getElementById('model-name-group').style.display = !img && provider === 'llamacpp' ? 'none' : '';
@@ -613,7 +609,14 @@ const ModelsPage = {
 
         document.getElementById('f-provider').onchange = (e) => {
             const k = currentKind();
-            document.getElementById('f-url').value = this.defaultUrl(e.target.value, k);
+            // Same rule as the kind switch below: follow the provider only when
+            // the box still holds a URL this form filled in. A hand-typed one
+            // (127.0.0.1 rather than localhost, another host, another port) is
+            // the one thing here the user cannot get back from the defaults.
+            const url = document.getElementById('f-url');
+            if (!url.value.trim() || this.isDefaultUrl(url.value.trim())) {
+                url.value = this.defaultUrl(e.target.value, k);
+            }
             applyProvider(e.target.value, k);
         };
 
@@ -687,7 +690,7 @@ const ModelsPage = {
                 base_url: document.getElementById('f-url').value.trim(),
                 // Empty on an existing keyed config means "keep the stored key"
                 // (the server never sends the real key back).
-                api_key: this.showsKey(newKind, provider) ? document.getElementById('f-apikey').value : '',
+                api_key: document.getElementById('f-apikey').value,
                 api_format: 'openai',
                 supports_vision: document.getElementById('f-vision').checked,
                 supports_audio: document.getElementById('f-audio').checked,
