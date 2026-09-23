@@ -42,6 +42,13 @@ log = logging.getLogger(__name__)
 # Probe answers are live data, so the cache is short-lived; it exists to keep
 # the per-turn cost at zero, not to remember forever.
 CACHE_TTL = 300.0
+# A FAILED probe expires much sooner. "Unreachable" is the one answer that goes
+# stale on its own: restarting llama-server (or MyAgent starting before it) is
+# routine, and with a single TTL the model form kept saying "server unreachable"
+# for five minutes after the server was back, with the manual refresh button the
+# only way out. Short enough to follow a restart, long enough that a genuinely
+# down server costs one 6 s timeout every half minute instead of one per call.
+CACHE_TTL_UNREACHABLE = 30.0
 PROBE_TIMEOUT = 6.0
 
 # Fallbacks when the server won't say: unreachable, or an API that never
@@ -93,6 +100,11 @@ def _first_int(*values) -> int | None:
 # ---------------------------------------------------------------- probing
 
 
+def _ttl(info: dict) -> float:
+    """How long this cached answer stays good — see CACHE_TTL_UNREACHABLE."""
+    return CACHE_TTL if info.get("reachable") else CACHE_TTL_UNREACHABLE
+
+
 async def probe(cfg, *, client: httpx.AsyncClient | None = None, force: bool = False) -> dict:
     """Ask the model server what it is serving. Never raises.
 
@@ -107,7 +119,7 @@ async def probe(cfg, *, client: httpx.AsyncClient | None = None, force: bool = F
     now = time.monotonic()
     if not force:
         hit = _CACHE.get(key)
-        if hit and (now - hit[0]) < CACHE_TTL:
+        if hit and (now - hit[0]) < _ttl(hit[1]):
             return hit[1]
 
     lock = _LOCKS.get(key)
@@ -116,7 +128,7 @@ async def probe(cfg, *, client: httpx.AsyncClient | None = None, force: bool = F
     async with lock:
         # A concurrent turn may have filled the cache while we waited on the lock.
         hit = _CACHE.get(key)
-        if hit and not force and (time.monotonic() - hit[0]) < CACHE_TTL:
+        if hit and not force and (time.monotonic() - hit[0]) < _ttl(hit[1]):
             return hit[1]
         info = await _probe_now(c, client)
         _CACHE[key] = (time.monotonic(), info)
