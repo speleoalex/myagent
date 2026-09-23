@@ -82,6 +82,21 @@ class ModelConfig(BaseModel):
     # model's text — the JSON instructions are in the system prompt either way).
     # Set False for a server that accepts `tools` but never emits a tool_call.
     supports_tools: bool | None = None
+    # Does this model REASON (emit a chain of thought before the answer)?
+    # None = auto: model_probe decides — Ollama reports "thinking" among its
+    # capabilities, llama.cpp betrays it by the kwarg its chat template tests.
+    # Set explicitly when the probe cannot know (every remote provider) and you
+    # still want the chat's reasoning switch to appear.
+    supports_reasoning: bool | None = None
+    # Whether reasoning is ON by default for this model. None = don't ask
+    # either way and let the model/server decide, which is what every config
+    # written before this field meant. True/False force it, and a chat turn can
+    # still override per message (ChatRequest.reasoning).
+    #
+    # The wire shape is the provider's, not ours — chat_template_kwargs
+    # locally, reasoning_effort on OpenAI, a `thinking` block on Anthropic — so
+    # this stays a plain intent and LLMProvider does the translating.
+    reasoning: bool | None = None
     # Context window in tokens. None (or 0) means "auto": the real value is
     # probed from the model server — llama.cpp /props, Ollama /api/show +
     # /api/ps, remote /v1/models when it declares one — see
@@ -472,6 +487,13 @@ class ChatRequest(BaseModel):
     # to settings: the choice lives in the request (and on the current session,
     # for the UI selector to survive a reload).
     model_override: str | None = None
+    # Reason on THIS turn, or not: the chat's reasoning checkbox. None means
+    # "whatever the model config says" — the only thing a client that predates
+    # the switch can mean. Unlike model_override this is not scoped to agents
+    # on the "default" sentinel: reasoning is a property of whichever model
+    # ends up running, so a pinned agent obeys it too. Rides into call_agent
+    # for the same reason the model pick does.
+    reasoning: bool | None = None
     # Set by the server when `agent_id` arrived as the "auto" sentinel and was
     # resolved to a concrete agent (routers/chat.py, the connectors plugin): it
     # tells the channel turn that this session's history may hold other

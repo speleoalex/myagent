@@ -21,6 +21,11 @@ DROPPABLE_PARAMS = (
     "temperature", "top_p", "frequency_penalty", "presence_penalty",
     "max_tokens", "max_completion_tokens",
     "top_k", "repeat_penalty", "repeat_last_n", "min_p", "num_ctx",
+    # Reasoning directives: `reasoning_effort` on OpenAI-compatible gateways,
+    # `thinking` on Anthropic. Which models accept them is not knowable in
+    # advance (no API declares it), so a refusal has to degrade to "don't ask"
+    # rather than fail the turn.
+    "reasoning_effort", "thinking",
 )
 
 # What an endpoint refuses doesn't change between turns, and a provider
@@ -42,6 +47,10 @@ _PARAM_FIXES: dict[tuple[str, str], dict[str, str | None]] = {}
 # plain calls would degrade them. Memoized process-wide like _PARAM_FIXES and
 # for the same reason.
 _TOOLS_PARAM_ADDS: dict[tuple[str, str], dict[str, str]] = {}
+
+# Smallest thinking budget the Anthropic Messages API accepts (it 400s below
+# this), and therefore the floor of the budget we carve out of max_tokens.
+_ANTHROPIC_MIN_THINKING = 1024
 
 # Output caps this endpoint has told us about by REFUSING a request ("max_tokens:
 # 100000 > 64000, which is the maximum ..."). Memoized like _PARAM_FIXES and for
@@ -226,6 +235,15 @@ class LLMProvider:
         self._ctx_budget: int | None = None
         # Same for the output cap (Anthropic enforces one per request).
         self._max_out: int | None = None
+        # Whether this call should REASON. Starts from the model's policy and
+        # is overridden per call site: the executor pushes the chat turn's
+        # checkbox down here, while the auto-router and the memory compactor
+        # pin it to False — they read only `content`, so a chain of thought is
+        # pure latency for them. None means "say nothing either way" and is
+        # what every caller written before the switch existed means.
+        self.reasoning: bool | None = model_config.reasoning
+        # (supported, kwarg) from the probe, resolved lazily like _max_out.
+        self._reasoning: tuple[bool, str] | None = None
         # Payload fields this endpoint has already rejected (see _PARAM_FIXES).
         self._param_fixes = _PARAM_FIXES.setdefault(
             (model_config.base_url, model_config.model), {}
@@ -509,6 +527,23 @@ class LLMProvider:
                       self.config.id, self._max_out)
         return self._max_out
 
+    async def _reasoning_state(self) -> tuple[bool, str]:
+        """Can this model's reasoning be switched, and with which argument?
+
+        Resolved once per provider instance off the (cached) probe. When the
+        answer is "not switchable" nothing is sent — which is exactly what
+        happened before this existed, so an unknown model behaves as it always
+        did instead of collecting a 400.
+        """
+        if self._reasoning is None:
+            try:
+                info = await model_probe.probe(self.config, client=self._client)
+                st = model_probe.reasoning_support(self.config, info)
+                self._reasoning = (bool(st["supported"]), st["kwarg"])
+            except Exception:  # a probe must never break a turn
+                self._reasoning = (False, model_probe.DEFAULT_REASONING_KWARG)
+        return self._reasoning
+
     @staticmethod
     def _local_output_cap(max_ctx: int) -> int:
         """The runaway backstop for a local model, sized to its window.
@@ -526,6 +561,7 @@ class LLMProvider:
         temperature: float | None,
         stream: bool,
         max_ctx: int,
+        reasoning_kwarg: str | None = None,
     ) -> dict:
         remote = self.config.provider == "openai"
 
@@ -552,6 +588,35 @@ class LLMProvider:
         for key in allowed:
             if key in self.config.options:
                 payload[key] = self.config.options[key]
+
+        # Arguments for the server's chat template. Local only (a remote
+        # gateway renders the template itself and 400s on the field), and
+        # forwarded verbatim because the keys belong to the template, not to
+        # us — the escape hatch for anything this code does not model, such as
+        # gpt-oss's string-valued `reasoning_effort`.
+        template_args = self.config.options.get("chat_template_kwargs")
+        if not remote and isinstance(template_args, dict):
+            payload["chat_template_kwargs"] = dict(template_args)
+
+        # ...and the one template argument we DO model: the thinking switch.
+        # It wins over the escape hatch above on its own key, because it is the
+        # per-turn decision and that blob is a static default.
+        #
+        # This matters beyond latency: Qwen3.5 reasons without limit by
+        # default, so a turn whose entire output cap is spent reasoning returns
+        # EMPTY content. llama.cpp ignores a per-request `reasoning_budget`
+        # (verified 2026-09-23), which leaves the template switch as the only
+        # lever that does not require restarting the server.
+        if self.reasoning is not None and reasoning_kwarg:
+            if remote:
+                # No off switch exists on this wire — a reasoning model reasons
+                # — so only the "don't" is expressible. Gateways that refuse
+                # the field drop it via DROPPABLE_PARAMS and carry on.
+                if self.reasoning is False:
+                    payload["reasoning_effort"] = "none"
+            else:
+                payload.setdefault("chat_template_kwargs", {})
+                payload["chat_template_kwargs"][reasoning_kwarg] = self.reasoning
 
         # Ollama allocates the KV cache for whatever num_ctx we ask for, so an
         # explicit context_window has to be requested to take effect. llama.cpp
@@ -795,6 +860,7 @@ class LLMProvider:
         temperature: float | None,
         max_ctx: int,
         max_out: int,
+        reasoning_supported: bool = False,
     ) -> dict:
         # Truncate BEFORE translating: the estimator understands the
         # OpenAI-style shapes (strings, image_url parts). The reserve is the
@@ -834,6 +900,28 @@ class LLMProvider:
         for key in ("top_p", "top_k"):
             if key in self.config.options:
                 payload[key] = self.config.options[key]
+
+        # Extended thinking. Gated on reasoning_supported because no Anthropic
+        # API declares which models have it and the ones that don't answer 400
+        # — so it is opt-in via ModelConfig.supports_reasoning, never guessed.
+        if self.reasoning is not None and reasoning_supported:
+            if self.reasoning:
+                # budget_tokens is carved OUT of max_tokens and the API demands
+                # it be both >= 1024 and strictly less; half the cap leaves the
+                # answer the other half. Too small a cap means there is no room
+                # to think in, and silently thinking with none left to answer
+                # is the failure this whole switch exists to avoid.
+                budget = max(_ANTHROPIC_MIN_THINKING, max_out // 2)
+                if budget < max_out:
+                    payload["thinking"] = {"type": "enabled",
+                                           "budget_tokens": budget}
+                    # Thinking fixes the sampler: the Messages API rejects an
+                    # explicit temperature other than 1, and top_p/top_k
+                    # outright.
+                    for key in ("temperature", "top_p", "top_k"):
+                        payload.pop(key, None)
+            else:
+                payload["thinking"] = {"type": "disabled"}
 
         # Re-apply what this endpoint already rejected (newer Claude models
         # 400 on explicit sampling params — see _adapt_payload).
@@ -922,14 +1010,18 @@ class LLMProvider:
         temperature: float | None = None,
     ) -> AsyncIterator[dict]:
         anthropic = self.config.provider == "anthropic"
+        reasoning_supported, reasoning_kwarg = await self._reasoning_state()
         if anthropic:
             payload = self._build_anthropic_payload(
                 messages, tools, temperature,
                 max_ctx=await self._context_budget(),
-                max_out=await self._max_output())
+                max_out=await self._max_output(),
+                reasoning_supported=reasoning_supported)
         else:
-            payload = self._build_payload(messages, tools, temperature, stream=True,
-                                          max_ctx=await self._context_budget())
+            payload = self._build_payload(
+                messages, tools, temperature, stream=True,
+                max_ctx=await self._context_budget(),
+                reasoning_kwarg=reasoning_kwarg if reasoning_supported else None)
 
         # A 400 from an OpenAI-compatible endpoint usually means "this model
         # doesn't accept that field" rather than a real failure: adapt the

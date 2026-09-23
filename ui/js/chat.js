@@ -6,6 +6,11 @@ const ChatPage = {
     abortController: null,
     attachments: [],
     agents: [],
+    // The chat's model pick and reasoning switch. Both are null until a
+    // session or a selector says otherwise, and null means "don't ask": the
+    // server then applies the model's own policy.
+    modelOverride: null,
+    reasoning: null,
     viewingArchived: false,
     _archivedId: null,
     _history: [],
@@ -72,6 +77,11 @@ const ChatPage = {
                             <option value="${App.escAttr(m.id)}">${App.esc(m.name || m.id)}</option>
                         `).join('')}
                     </select>` : ''}
+                    <div class="form-check form-switch align-self-center mb-0" id="reasoning-wrap"
+                         style="display:none" title="${i18n('chat.reasoningTitle')}">
+                        <input class="form-check-input" type="checkbox" id="reasoning-toggle">
+                        <label class="form-check-label" for="reasoning-toggle">${i18n('chat.reasoning')}</label>
+                    </div>
                     <button class="btn btn-outline-primary" id="btn-new" title="${i18n('chat.newChatTitle')}">
                         <i class="bi bi-plus-lg"></i> ${i18n('chat.newChat')}
                     </button>
@@ -268,6 +278,11 @@ const ChatPage = {
             ? override : null;
         const msel = document.getElementById('model-select');
         if (msel) msel.value = this.modelOverride || '';
+        // Same for the reasoning switch, except that `false` is a real stored
+        // value here: test for presence, not for truthiness.
+        this.reasoning = (session && session.reasoning !== undefined)
+            ? session.reasoning : null;
+        this.refreshReasoning();
         this.renderSessionMessages(session || { messages: [] });
         // If a response is still being generated for this chat, reconnect to
         // its live stream (replay so far + follow the tail).
@@ -423,12 +438,59 @@ const ChatPage = {
             this.currentAgentId = e.target.value;
             this.attachments = [];
             this.renderAttachChips();
+            this.refreshReasoning();
             if (this.viewingArchived) this.loadCurrent();
         };
         // Per-chat model pick: state only — it rides every send request, and
         // the server keeps it on the current session so a reload restores it.
         const ms = document.getElementById('model-select');
-        if (ms) ms.onchange = (e) => { this.modelOverride = e.target.value || null; };
+        if (ms) ms.onchange = (e) => {
+            this.modelOverride = e.target.value || null;
+            this.refreshReasoning();
+        };
+        const rt = document.getElementById('reasoning-toggle');
+        if (rt) rt.onchange = (e) => { this.reasoning = e.target.checked; };
+    },
+
+    // Show the reasoning switch only when the model that will actually answer
+    // can be told not to reason. Which model that is depends on the agent's
+    // own pin as much as on the chat's picker, and resolving "default" means
+    // knowing the settings AND which backends are up — so the server answers
+    // and this only draws it. An unreachable server means "no switch", which
+    // is the truth: nothing here could honour one.
+    async refreshReasoning() {
+        const wrap = document.getElementById('reasoning-wrap');
+        const box = document.getElementById('reasoning-toggle');
+        if (!wrap || !box) return;
+        let caps = null;
+        try {
+            caps = await App.api('GET', '/chat/capabilities?agent_id='
+                + encodeURIComponent(this.currentAgentId || '')
+                + '&model_override=' + encodeURIComponent(this.modelOverride || ''));
+        } catch (e) { /* model server down: leave it hidden */ }
+        if (!caps || !caps.reasoning) {
+            wrap.style.display = 'none';
+            // Stop claiming a preference for a model that has no switch: the
+            // flag rides every send, and a stale `false` would keep silencing
+            // a model the user has since moved to.
+            this.reasoning = null;
+            return;
+        }
+        wrap.style.display = '';
+        // Precedence for what the box SHOWS: what this chat already chose,
+        // else the model's own policy, else on — a thinking model reasons
+        // unless told otherwise, and the box has to show what WILL happen,
+        // not what we would prefer.
+        //
+        // Only a real choice is written back to `this.reasoning`. Echoing the
+        // resolved state there would turn "I didn't touch it" into an
+        // explicit per-turn order, which then outranks the model's policy for
+        // the rest of the session — including after that policy is changed in
+        // Settings. Untouched stays null, and null means "apply the policy".
+        const chosen = this.reasoning;
+        box.checked = (chosen === true || chosen === false) ? chosen
+            : (caps.reasoning_default === true || caps.reasoning_default === false
+                ? caps.reasoning_default : true);
     },
 
     readFile(file, as) {
@@ -570,6 +632,7 @@ const ChatPage = {
                     message,
                     attachments: attachments.map(a => this._attachForSend(a)),
                     model_override: this.modelOverride || null,
+                    reasoning: this.reasoning,
                 }),
                 signal: this.abortController.signal,
             });

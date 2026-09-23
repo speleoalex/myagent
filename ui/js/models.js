@@ -73,6 +73,7 @@ const ModelsPage = {
             multimodal:  { icon: 'bi-images',  cls: 'text-bg-info',    label: i18n('models.capMultimodal') },
             tools:       { icon: 'bi-wrench',  cls: 'text-bg-secondary', label: i18n('models.capTools') },
             embedding:   { icon: 'bi-diagram-2', cls: 'text-bg-secondary', label: i18n('models.capEmbedding') },
+            thinking:    { icon: 'bi-lightbulb', cls: 'text-bg-secondary', label: i18n('models.capThinking') },
         };
         const b = map[cap];
         if (!b) return '';
@@ -398,7 +399,7 @@ const ModelsPage = {
     },
 
     async renderForm(modelId) {
-        let model = { id: '', name: '', kind: 'chat', provider: 'ollama', model: '', base_url: 'http://localhost:11434', api_key: '', api_format: 'openai', supports_vision: true, supports_audio: false, supports_tools: null, context_window: null, options: {} };
+        let model = { id: '', name: '', kind: 'chat', provider: 'ollama', model: '', base_url: 'http://localhost:11434', api_key: '', api_format: 'openai', supports_vision: true, supports_audio: false, supports_tools: null, supports_reasoning: null, reasoning: null, context_window: null, options: {} };
         let isEdit = false;
 
         if (modelId) {
@@ -506,6 +507,24 @@ const ModelsPage = {
                                     <option value="text" ${model.supports_tools === false ? 'selected' : ''}>${i18n('models.toolsText')}</option>
                                 </select>
                                 <div class="form-text">${i18n('models.toolCallingHelp')}</div>
+                            </div>
+                            <div class="mt-2" style="max-width:260px">
+                                <label class="form-label small mb-1" for="f-reasoning">${i18n('models.reasoning')}</label>
+                                <select class="form-select form-select-sm" id="f-reasoning">
+                                    <option value="" ${model.supports_reasoning === null || model.supports_reasoning === undefined ? 'selected' : ''}>${i18n('models.reasoningAuto')}</option>
+                                    <option value="yes" ${model.supports_reasoning === true ? 'selected' : ''}>${i18n('models.reasoningYes')}</option>
+                                    <option value="no" ${model.supports_reasoning === false ? 'selected' : ''}>${i18n('models.reasoningNo')}</option>
+                                </select>
+                                <div class="form-text">${i18n('models.reasoningHelp')}</div>
+                            </div>
+                            <div class="mt-2" style="max-width:260px">
+                                <label class="form-label small mb-1" for="f-reasoning-default">${i18n('models.reasoningDefault')}</label>
+                                <select class="form-select form-select-sm" id="f-reasoning-default">
+                                    <option value="" ${model.reasoning === null || model.reasoning === undefined ? 'selected' : ''}>${i18n('models.reasoningDefaultAuto')}</option>
+                                    <option value="on" ${model.reasoning === true ? 'selected' : ''}>${i18n('models.reasoningDefaultOn')}</option>
+                                    <option value="off" ${model.reasoning === false ? 'selected' : ''}>${i18n('models.reasoningDefaultOff')}</option>
+                                </select>
+                                <div class="form-text">${i18n('models.reasoningDefaultHelp')}</div>
                             </div>
                         </div>
                         <div class="mb-3" id="ctx-group" ${isChat ? '' : 'style="display:none"'}>
@@ -674,6 +693,8 @@ const ModelsPage = {
                 supports_audio: document.getElementById('f-audio').checked,
                 // Empty = auto: send the tools and let the endpoint answer.
                 supports_tools: { native: true, text: false }[document.getElementById('f-tools').value] ?? null,
+                supports_reasoning: { yes: true, no: false }[document.getElementById('f-reasoning').value] ?? null,
+                reasoning: { on: true, off: false }[document.getElementById('f-reasoning-default').value] ?? null,
                 // Empty = auto: the server tells us the real window (see model_probe).
                 context_window: ctxRaw === '' ? null : parseInt(ctxRaw, 10),
                 options: options,

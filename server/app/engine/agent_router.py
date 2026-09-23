@@ -199,6 +199,13 @@ async def pick_agent(message: str, stores: Stores, tool_registry: ToolRegistry,
     # Named in the API log: "which agent answers this" is one of the
     # questions a trace gets opened for, and this call is the answer.
     provider.trace_label = f"auto-route ({len(candidates)} candidates)"
+    # Never reason here, whatever the model's policy says. This call wants one
+    # agent id and _collect() below keeps only `content`, so a chain of thought
+    # is thrown away unread — while the user waits for it. On a thinking model
+    # that is not a tax but a break: unbudgeted reasoning ran the classifier
+    # past _ROUTE_TIMEOUT and every message fell through to the fallback agent
+    # (Qwen3.5-4B, 2026-09-23: 2s before the switch, 25s timeout after).
+    provider.reasoning = False
 
     async def _collect() -> str:
         out = ""

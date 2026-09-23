@@ -4,13 +4,17 @@ import asyncio
 import json
 import logging
 
+from app import config
 from app.engine import prompts
 from app.engine.agent_router import AUTO, mark_foreign, resolve_auto
 from app.engine.channel_turn import run_channel_turn
-from app.engine.executor import AgentExecutor, Stores
+from app.engine.executor import AgentExecutor, Stores, resolve_model_for_agent
+from app.engine import model_probe
+from app.engine.default_model import resolve_default
 from app.engine.memory_compactor import cancel_compaction, schedule_compaction
 from app.ids import is_valid_id
-from app.models import ChatRequest, ChatResponse, ChatMessage
+from app.models import (Agent, ChatRequest, ChatResponse, ChatMessage,
+                        ModelConfig)
 from app.storage.sessions import (delegation_history, memory_context, now_iso,
                                   record_turn, record_user_turn, steps_from,
                                   tool_history)
@@ -38,7 +42,8 @@ def _record_user(session: dict, req: ChatRequest) -> None:
 
 
 def _remember_model_override(session: dict, req: ChatRequest) -> None:
-    """Keep the chat's model pick on the CURRENT session, for the UI only.
+    """Keep the chat's model pick and reasoning switch on the CURRENT
+    session, for the UI only.
 
     The override itself travels in every request — this stored copy is what
     lets the selector survive a page reload without pretending to be a
@@ -48,6 +53,13 @@ def _remember_model_override(session: dict, req: ChatRequest) -> None:
         session["model_override"] = req.model_override
     else:
         session.pop("model_override", None)
+    # The reasoning checkbox rides along for the same reason and with the same
+    # scope. Stored even when False — here False is a choice, not an absence,
+    # and popping it would reopen the box on every reload.
+    if req.reasoning is None:
+        session.pop("reasoning", None)
+    else:
+        session["reasoning"] = req.reasoning
 
 
 def _remember_agent_auto(session: dict, on: bool) -> None:
@@ -123,7 +135,7 @@ async def chat(req: ChatRequest, request: Request) -> ChatResponse:
     try:
         executor = await AgentExecutor.create_for_agent(
             req.agent_id, tool_registry, stores,
-            model_override=req.model_override)
+            model_override=req.model_override, reasoning=req.reasoning)
     except ValueError as e:
         raise HTTPException(404, str(e))
     if routed_note:
@@ -264,7 +276,7 @@ async def chat_stream(req: ChatRequest, request: Request):
     try:
         executor = await AgentExecutor.create_for_agent(
             req.agent_id, tool_registry, stores,
-            model_override=req.model_override)
+            model_override=req.model_override, reasoning=req.reasoning)
     except ValueError as e:
         raise HTTPException(404, str(e))
     if routed_note:
@@ -288,6 +300,48 @@ async def chat_stream(req: ChatRequest, request: Request):
                         announce_agent=req.agent_id if req.agent_auto else None)
     run = live.start(sid, drive)
     return _sse(run.subscribe())
+
+
+@router.get("/capabilities")
+async def chat_capabilities(request: Request, agent_id: str = "",
+                            model_override: str = "") -> dict:
+    """What the chat composer may offer for this (agent, model) pair.
+
+    Only the frontend needs this, and only to decide whether to draw the
+    reasoning checkbox. It exists because the composer cannot work out the
+    effective model on its own: most agents sit on the "default" sentinel,
+    whose resolution includes a fallback to a reachable local model, and
+    reimplementing that precedence in JS would give two answers that drift.
+
+    Never raises for a bad pair — an unknown agent or a deleted override is
+    "no switch to offer", and the real error belongs to the turn that
+    follows, where it can be stated properly.
+    """
+    stores: Stores = request.app.state.stores
+    out = {"model_id": None, "reasoning": False, "reasoning_default": None}
+    # Auto mode picks the agent only once the message is known, so there is no
+    # effective model yet; the models it routes between are the user's own, so
+    # fall back to the chat's own default rather than promising nothing.
+    agent_data = stores.agents.get(agent_id) if agent_id else None
+    try:
+        if agent_data is not None:
+            cfg, _ = await resolve_model_for_agent(
+                Agent(**agent_data), stores, model_override or None)
+        elif model_override:
+            data = stores.models.get(model_override)
+            if data is None:
+                return out
+            cfg = ModelConfig(**data)
+        else:
+            cfg, _ = await resolve_default(
+                stores.models, config.settings.default_model_id)
+        info = await model_probe.probe(cfg)
+        out["model_id"] = cfg.id
+        out["reasoning"] = model_probe.reasoning_support(cfg, info)["supported"]
+        out["reasoning_default"] = cfg.reasoning
+    except Exception as e:
+        log.debug("Chat capabilities for '%s': %s", agent_id, e)
+    return out
 
 
 @router.get("/stream/attach")

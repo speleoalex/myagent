@@ -153,6 +153,10 @@ async def summarize(model_config: ModelConfig, text: str, max_chars: int,
     """One bare LLM call (no executor, no tools) → validated summary or None."""
     provider = LLMProvider(model_config)
     provider.trace_label = "memory summary"
+    # Same reason as the auto-router: a summary is housekeeping nobody is
+    # waiting to read the working-out of, and it runs on whatever chat model
+    # the agent already has — which may well be a thinking one.
+    provider.reasoning = False
     try:
         out = ""
         async for chunk in provider.chat_completion_stream(

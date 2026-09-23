@@ -163,6 +163,7 @@ async def call_agent_handler(
             # The chat's model pick follows the delegation: a sub-agent on
             # "default" runs on the same model the user chose for this chat.
             model_override=executor.model_override,
+            reasoning=executor.reasoning,
         )
         # A wake delegating to another agent is still a wake: the sub-agent
         # must not be told its files reached anybody either.

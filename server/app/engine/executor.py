@@ -181,6 +181,65 @@ def _refuse_image_model(cfg: ModelConfig, where: str) -> None:
         )
 
 
+async def resolve_model_for_agent(
+    agent: Agent, stores: Stores, model_override: str | None = None,
+) -> tuple[ModelConfig, str | None]:
+    """Which model answers for this agent, and what to warn the user about.
+
+    Its own function because the answer is asked for OUTSIDE a turn too: the
+    chat has to know whether the model it is about to talk to can be told not
+    to reason, and a second copy of this precedence would be a second set of
+    rules to keep in step.
+    """
+    # Resolve the model. The sentinel "default" (or an unset model_id) means
+    # "use the default model configured in Settings". Read config.settings
+    # live — it's reassigned when settings are updated.
+    #
+    # ``model_override`` is a per-chat substitute for the DEFAULT only (the
+    # web UI's chat selector): an agent pinned to a specific model keeps it
+    # — pinning is the stronger, per-agent choice. The override is loaded
+    # directly, no resolve_default fallback and no notice: it is an explicit
+    # pick, and silently swapping an explicit pick is exactly what the
+    # notice machinery exists to prevent.
+    #
+    # An agent on the default otherwise goes through resolve_default, which
+    # falls back to a reachable local model when the configured one is down
+    # or gone — otherwise a fresh install (default: llama.cpp on :8080)
+    # fails on the first message even with Ollama running. It never writes
+    # settings, so the user's choice comes back the moment their backend
+    # does.
+    model_id = agent.model_id
+    notice: str | None = None
+    if model_id in ("", "default") and model_override:
+        model_data = stores.models.get(model_override)
+        if model_data is None:
+            known = ", ".join(sorted(
+                d.get("id", "") for d in stores.models.list_all())) or "none"
+            raise ValueError(
+                f"Model '{model_override}' (picked for this chat) no longer "
+                f"exists. Pick another model, or set the chat back to the "
+                f"default (available: {known})."
+            )
+        model_config = ModelConfig(**model_data)
+        _refuse_image_model(model_config, "picked for this chat")
+    elif model_id in ("", "default"):
+        model_config, notice = await resolve_default(
+            stores.models, config.settings.default_model_id)
+    else:
+        model_data = stores.models.get(model_id)
+        if model_data is None:
+            known = ", ".join(sorted(
+                d.get("id", "") for d in stores.models.list_all())) or "none"
+            raise ValueError(
+                f"Model '{model_id}' no longer exists. Point this agent at "
+                f"an existing model, or set it back to the default "
+                f"(available: {known})."
+            )
+        model_config = ModelConfig(**model_data)
+        _refuse_image_model(model_config, f"pinned on agent '{agent.id}'")
+    return model_config, notice
+
+
 class AgentExecutor:
     """Executes an agent: LLM call -> tool calls -> feed results -> repeat.
 
@@ -238,6 +297,12 @@ class AgentExecutor:
         # The chat's per-request model pick (ChatRequest.model_override),
         # carried so call_agent propagates it to "default" sub-agents.
         self.model_override: str | None = None
+        # The turn's reasoning decision (ChatRequest.reasoning). Unlike the
+        # model pick this applies to a PINNED agent too: reasoning is a
+        # property of whatever model ends up running, not a substitute for it.
+        # Carried for the same reason though — a sub-agent that reasons when
+        # the user switched reasoning off spends the turn on what was declined.
+        self.reasoning = None
         # True when nothing renders this turn: an autonomous wake, where the
         # reply is only logged and a file produced by a tool reaches the user
         # ONLY through notify_user(attachments=[...]). Set by the caller that
@@ -424,66 +489,39 @@ class AgentExecutor:
         stores: Stores,
         depth: int = 0,
         model_override: str | None = None,
+        reasoning: bool | None = None,
     ) -> AgentExecutor:
         agent_data = stores.agents.get(agent_id)
         if agent_data is None:
             raise ValueError(f"Agent not found: {agent_id}")
         agent = Agent(**agent_data)
 
-        # Resolve the model. The sentinel "default" (or an unset model_id) means
-        # "use the default model configured in Settings". Read config.settings
-        # live — it's reassigned when settings are updated.
-        #
-        # ``model_override`` is a per-chat substitute for the DEFAULT only (the
-        # web UI's chat selector): an agent pinned to a specific model keeps it
-        # — pinning is the stronger, per-agent choice. The override is loaded
-        # directly, no resolve_default fallback and no notice: it is an explicit
-        # pick, and silently swapping an explicit pick is exactly what the
-        # notice machinery exists to prevent.
-        #
-        # An agent on the default otherwise goes through resolve_default, which
-        # falls back to a reachable local model when the configured one is down
-        # or gone — otherwise a fresh install (default: llama.cpp on :8080)
-        # fails on the first message even with Ollama running. It never writes
-        # settings, so the user's choice comes back the moment their backend
-        # does.
-        model_id = agent.model_id
-        notice: str | None = None
-        if model_id in ("", "default") and model_override:
-            model_data = stores.models.get(model_override)
-            if model_data is None:
-                known = ", ".join(sorted(
-                    d.get("id", "") for d in stores.models.list_all())) or "none"
-                raise ValueError(
-                    f"Model '{model_override}' (picked for this chat) no longer "
-                    f"exists. Pick another model, or set the chat back to the "
-                    f"default (available: {known})."
-                )
-            model_config = ModelConfig(**model_data)
-            _refuse_image_model(model_config, "picked for this chat")
-        elif model_id in ("", "default"):
-            model_config, notice = await resolve_default(
-                stores.models, config.settings.default_model_id)
-        else:
-            model_data = stores.models.get(model_id)
-            if model_data is None:
-                known = ", ".join(sorted(
-                    d.get("id", "") for d in stores.models.list_all())) or "none"
-                raise ValueError(
-                    f"Model '{model_id}' no longer exists. Point this agent at "
-                    f"an existing model, or set it back to the default "
-                    f"(available: {known})."
-                )
-            model_config = ModelConfig(**model_data)
-            _refuse_image_model(model_config, f"pinned on agent '{agent.id}'")
-
+        model_config, notice = await resolve_model_for_agent(
+            agent, stores, model_override)
         executor = cls(agent, model_config, tool_registry, stores, depth)
         executor.notice = notice
         # Carried even when THIS agent is pinned (and the override didn't
         # apply): call_agent passes it down, so a "default" sub-agent behind a
         # pinned router still follows the chat's model choice.
         executor.model_override = model_override
+        executor.reasoning = reasoning
         return executor
+
+    @property
+    def reasoning(self) -> bool | None:
+        """Reason on this turn? None leaves the model's own policy alone.
+
+        A property, not a field, because the value's whole job is to reach
+        ``self.provider`` — an executor whose reasoning flag quietly failed to
+        apply is indistinguishable from one where the switch does nothing.
+        """
+        return self._reasoning
+
+    @reasoning.setter
+    def reasoning(self, value: bool | None) -> None:
+        self._reasoning = value
+        if value is not None:
+            self.provider.reasoning = value
 
     # ------------------------------------------------------------------
     # Prompt building

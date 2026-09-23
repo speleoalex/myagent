@@ -32,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import time
 
 import httpx
@@ -145,6 +146,8 @@ async def _probe_now(c: dict, client: httpx.AsyncClient | None) -> dict:
         "n_ctx": None,
         "n_ctx_max": None,
         "max_output": None,
+        "reasoning": None,
+        "reasoning_kwarg": None,
     }
     base = (c.get("base_url") or "").rstrip("/")
     if not base:
@@ -200,6 +203,8 @@ async def _probe_ollama(client, base: str, c: dict, out: dict) -> None:
     resp.raise_for_status()
     d = resp.json()
     out["capabilities"] = d.get("capabilities") or []
+    # Ollama is the one server that says it outright.
+    out["reasoning"] = "thinking" in out["capabilities"]
     out["n_ctx_max"] = _ollama_trained_ctx(d.get("model_info") or {})
     out["reachable"] = True
 
@@ -287,8 +292,70 @@ async def _probe_openai_compatible(client, base: str, c: dict, out: dict) -> Non
             props = (await client.get(base + "/props", timeout=PROBE_TIMEOUT)).json()
             gen = props.get("default_generation_settings") or {}
             out["n_ctx"] = _first_int(gen.get("n_ctx"))
+            # Same response carries the chat template, so reasoning detection
+            # costs no extra round-trip.
+            kwarg = _template_reasoning_kwarg(props.get("chat_template") or "")
+            out["reasoning"] = kwarg is not None
+            out["reasoning_kwarg"] = kwarg
+            if kwarg and "thinking" not in out["capabilities"]:
+                # Report it the way Ollama does, so one badge covers both.
+                out["capabilities"] = list(out["capabilities"]) + ["thinking"]
         except Exception:
             pass
+
+
+# ------------------------------------------------------------- reasoning
+
+# The chat-template argument that switches a THINKING model's chain of thought
+# on and off, by family. There is no standard: llama.cpp exposes no capability
+# flag for reasoning (its /v1/models capabilities list stops at completion and
+# multimodal, and chat_template_caps has no thinking key), so the only honest
+# signal is the template ITSELF — whichever of these names it tests is the name
+# we must send back in chat_template_kwargs.
+#
+# Only BOOLEAN switches belong here. gpt-oss's `reasoning_effort` is a string
+# with no off value: a model that always reasons has nothing to toggle, and
+# offering a switch that cannot switch is worse than offering none.
+#
+# Order matters: "thinking" is a substring of "enable_thinking", so the longer
+# name is tried first (the word-boundary guard makes this belt and braces).
+REASONING_KWARGS = (
+    "enable_thinking",   # Qwen3 / Qwen3.5, GLM-4.5
+    "thinking",          # DeepSeek-V3.1, IBM Granite
+)
+DEFAULT_REASONING_KWARG = REASONING_KWARGS[0]
+
+
+def _template_reasoning_kwarg(template: str) -> str | None:
+    """Which reasoning switch this Jinja chat template reads, if any."""
+    if not template:
+        return None
+    for name in REASONING_KWARGS:
+        if re.search(r"(?<![A-Za-z0-9_])%s(?![A-Za-z0-9_])" % name, template):
+            return name
+    return None
+
+
+def reasoning_support(cfg, info: dict) -> dict:
+    """Can this model's reasoning be switched, and with which argument?
+
+    ``supported`` is what decides whether the chat shows a reasoning checkbox,
+    so an explicit ``supports_reasoning`` on the config always wins: it is the
+    only way to declare it for a remote provider, which never tells us. Absent
+    that, the probe answers — and when the probe could not reach the server we
+    say False rather than guessing, because a switch we cannot honour is a lie.
+    """
+    c = _as_dict(cfg)
+    explicit = c.get("supports_reasoning")
+    probed = info.get("reasoning")
+    supported = bool(probed) if explicit is None else bool(explicit)
+    return {
+        "supported": supported,
+        # Only meaningful for the local providers, whose wire shape is the
+        # template's own kwarg; the fallback covers an explicit
+        # supports_reasoning on a server we could not inspect.
+        "kwarg": info.get("reasoning_kwarg") or DEFAULT_REASONING_KWARG,
+    }
 
 
 # ---------------------------------------------------------------- resolving
