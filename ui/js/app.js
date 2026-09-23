@@ -33,8 +33,8 @@ const App = {
     },
 
     /** Identity of the server this UI is talking to: {label, name, color,
-     * hostname}, or null before /system/info has answered. Two MyAgent
-     * instances look identical otherwise, and "which one am I on" is a
+     * hostname, timezone_name}, or null before /system/info has answered. Two
+     * MyAgent instances look identical otherwise, and "which one am I on" is a
      * question the URL bar answers badly (a reverse proxy, an installed PWA
      * and a phone all hide it). */
     instance: null,
@@ -59,7 +59,10 @@ const App = {
         const color = /^#[0-9a-fA-F]{6}$/.test((info && info.instance_color) || '')
             ? info.instance_color.toLowerCase() : '';
         const label = name || hostname;
-        this.instance = { label, name, color, hostname };
+        // The server's own zone, carried here so the Settings placeholder can
+        // say what an empty timezone falls back to. '' on an older server.
+        const timezone_name = ((info && info.timezone_name) || '').trim();
+        this.instance = { label, name, color, hostname, timezone_name };
 
         const badge = document.getElementById('brand-instance');
         if (badge) {
@@ -377,6 +380,23 @@ const App = {
      * such as an MCP server's error output. */
     escAttr(str) {
         return App.esc(str).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    },
+
+    /** `<option>`s for a timezone datalist — the ONE definition, used by the
+     * agent form and by Settings.
+     *
+     * The list comes from the BROWSER (`Intl.supportedValuesOf`), not from a
+     * new endpoint: it is the same IANA database the server reads, it costs no
+     * round trip, and a suggestion list that lags the server's zoneinfo is a
+     * cosmetic problem — the server validates the value on save either way.
+     * Older browsers without the API get an empty datalist, which degrades to a
+     * plain text field rather than to a broken one. */
+    timezoneOptions() {
+        let zones = [];
+        try {
+            zones = Intl.supportedValuesOf('timeZone') || [];
+        } catch (e) { zones = []; }
+        return zones.map(z => `<option value="${this.escAttr(z)}"></option>`).join('');
     },
 
     slugify(text) {

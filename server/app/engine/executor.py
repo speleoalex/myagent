@@ -1312,12 +1312,17 @@ class AgentExecutor:
         cached prefix survives, while the time differs every turn and costs a
         full re-process of the prompt. Agents that only need to say which day
         it is must not pay that.
+
+        The zone is the agent's own, falling back to the install's and then to
+        the machine's (config.now_in_timezone). A server's host zone is an
+        accident of the image it was built from: injecting the host date on a
+        UTC box would hand an Italian team yesterday's date every evening after
+        22:00 — the exact failure this block exists to prevent, moved three
+        hours instead of removed.
         """
         if not getattr(self.agent, "date_in_prompt", False):
             return ""
-        # astimezone() attaches the SYSTEM zone, which is what %Z needs: a naive
-        # now() prints an empty tz and the model gets an hour with no anchor.
-        now = datetime.now().astimezone()
+        now = config.now_in_timezone(getattr(self.agent, "timezone", ""))
         lines = [prompts.NOW_DATE.format(
             date=now.strftime("%Y-%m-%d"), weekday=now.strftime("%A"))]
         if getattr(self.agent, "time_in_prompt", False):

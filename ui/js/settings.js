@@ -253,6 +253,24 @@ const SettingsPage = {
                             </div>
                         </div>
                         <div class="form-text mb-3">${i18n('settings.identityHint')}</div>
+
+                        <!-- The working zone of this install. Not a display
+                             preference: it is the clock the agents that state
+                             the date in their prompt are told to reason in, so
+                             it lives on the SERVER and not in the browser. A
+                             server's host zone is an accident of the image it
+                             was built from — UTC on most of them — while the
+                             people it answers are somewhere in particular. -->
+                        <h5>${i18n('settings.timezone')}</h5>
+                        <div class="row g-3 mb-2">
+                            <div class="col-sm-7">
+                                <input type="text" class="form-control" id="f-timezone" list="tz-list"
+                                       value="${App.escAttr(settings.timezone || '')}"
+                                       placeholder="${App.escAttr((App.instance && App.instance.timezone_name) || i18n('settings.timezonePlaceholder'))}">
+                                <datalist id="tz-list">${App.timezoneOptions()}</datalist>
+                            </div>
+                        </div>
+                        <div class="form-text mb-3">${i18n('settings.timezoneHint')}</div>
                         ${saveBtn}
 
                         <hr class="my-4">
@@ -327,6 +345,7 @@ const SettingsPage = {
                 // that is what the label reads.
                 context_compact_at:
                     Number(document.getElementById('f-ctx-compact').value) / 100,
+                timezone: document.getElementById('f-timezone').value.trim(),
                 instance_name: document.getElementById('f-instance-name').value.trim(),
                 instance_color: colorOn.checked ? colorInput.value : '',
             };
@@ -338,6 +357,7 @@ const SettingsPage = {
                 settings.embedding_model_id = data.embedding_model_id;
                 settings.debug = data.debug;
                 settings.context_compact_at = data.context_compact_at;
+                settings.timezone = data.timezone;
                 this.renderDebugBox();
                 document.getElementById('index-rebuild-warn').classList.add('d-none');
                 this.renderIndexStatus();

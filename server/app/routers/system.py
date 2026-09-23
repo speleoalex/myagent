@@ -5,6 +5,7 @@ import re
 import secrets as secrets_mod
 import socket
 import sys
+from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
@@ -38,6 +39,20 @@ async def health():
     return {"status": "ok", "workspace": str(WORKSPACE_DIR)}
 
 
+def _host_timezone() -> str:
+    """The machine's own IANA name, '' when it cannot be told. /etc/localtime is
+    a symlink into the zoneinfo tree on Linux and macOS; %Z gives an ABBREVIATION
+    (CEST), which is not a name anyone can type back into the field."""
+    try:
+        target = Path("/etc/localtime").resolve()
+        parts = target.parts
+        if "zoneinfo" in parts:
+            return "/".join(parts[parts.index("zoneinfo") + 1:])
+    except OSError:
+        pass
+    return ""
+
+
 @router.get("/info")
 async def info():
     """Who and where this server process is: the account it runs as, the host,
@@ -59,6 +74,13 @@ async def info():
         "uid": os.getuid() if hasattr(os, "getuid") else None,
         "is_root": (os.getuid() == 0) if hasattr(os, "getuid") else False,
         "hostname": socket.gethostname(),
+        # The zone this process actually reasons in, already resolved through
+        # settings -> machine. Reported so the Settings field can show what an
+        # empty value falls back to: the BROWSER's zone is the one thing it
+        # must not show there, since the clock that ends up in a prompt is the
+        # server's and a phone in another country would suggest otherwise.
+        "timezone": config.now_in_timezone().strftime("%Z"),
+        "timezone_name": config.timezone_name() or _host_timezone(),
         "platform": platform.platform(terse=True),
         "python": sys.version.split()[0],
         "pid": os.getpid(),
@@ -173,6 +195,17 @@ async def update_settings(new_settings: Settings, request: Request):
             status_code=400,
             detail=(f"instance_color must be a #rrggbb colour or empty (got "
                     f"{color!r})."))
+    # The working zone is checked HERE and not on the model: a name that this
+    # machine does not know must not stop settings.json from loading, but it
+    # must never get in through the UI either — a silent fallback to the host
+    # zone is exactly the wrong date, delivered confidently.
+    tz = (new_settings.timezone or "").strip()
+    if not config.is_valid_timezone(tz):
+        raise HTTPException(
+            status_code=400,
+            detail=(f"Unknown timezone {tz!r}. Use an IANA name such as "
+                    "'Europe/Rome', or leave it empty to follow this machine."))
+    new_settings.timezone = tz
     new_settings.instance_name = name
     new_settings.instance_color = color
     save_settings(new_settings)

@@ -149,6 +149,22 @@ async def get_agent(agent_id: str, request: Request):
     return _public(get_or_404(_store(request), agent_id, "Agent"))
 
 
+def _check_timezone(agent: Agent) -> None:
+    """Refuse a working zone this machine cannot resolve, on the way IN.
+
+    Not a model validator: a bad name hand-written into an agent's .json must
+    still load (config.now_in_timezone degrades to the host zone and logs), or
+    one typo would take the agent off the air. But accepting one through the
+    API would inject a confidently wrong date into every prompt, which is the
+    failure the date block exists to prevent."""
+    tz = (agent.timezone or "").strip()
+    if not config.is_valid_timezone(tz):
+        raise HTTPException(
+            400, f"Unknown timezone {tz!r}. Use an IANA name such as "
+                 "'Europe/Rome', or leave it empty to follow the app settings.")
+    agent.timezone = tz
+
+
 @router.post("", status_code=201)
 async def create_agent(agent: Agent, request: Request):
     store = _store(request)
@@ -157,6 +173,7 @@ async def create_agent(agent: Agent, request: Request):
         # Auto off silently (literal beats sentinel in agent_router).
         raise HTTPException(400, f"'{RESERVED_AGENT_ID}' is reserved for automatic agent selection")
     require_absent(store, agent.id, "Agent")
+    _check_timezone(agent)
     store.save(agent.id, agent.model_dump())
     return agent.model_dump()
 
@@ -166,6 +183,7 @@ async def update_agent(agent_id: str, agent: Agent, request: Request):
     store = _store(request)
     require_exists(store, agent_id, "Agent")
     agent.id = agent_id
+    _check_timezone(agent)
     store.save(agent_id, agent.model_dump())
     return agent.model_dump()
 

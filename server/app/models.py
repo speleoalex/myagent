@@ -366,6 +366,14 @@ class Agent(BaseModel):
     # for a day, the time line differs every turn and invalidates the prompt
     # cache with it. Inert while date_in_prompt is off — one block, one gate.
     time_in_prompt: bool = False
+    # The zone THIS agent works in (IANA name, e.g. "Europe/Rome"). Empty =
+    # inherit the install-wide Settings.timezone, itself empty = the machine's.
+    # Per-agent because one install serves agents that do not share a clock: a
+    # scheduled report for an Italian team and one for a US account disagree on
+    # what "yesterday" is. Only read when date_in_prompt is on — it is what the
+    # injected date is computed IN, not a second switch. Resolution and
+    # validation live in config.now_in_timezone / config.is_valid_timezone.
+    timezone: str = ""
     # Per-agent long-term memory (opt-in). False = hard exclusion: no compaction, no
     # prompt injection, and the memory_* tools refuse even if attached.
     memory_enabled: bool = False
@@ -585,6 +593,16 @@ class Settings(BaseModel):
     # still distinguishable without anyone having typed anything.
     instance_name: str = ""
     instance_color: str = ""
+    # The install-wide working zone (IANA name). Empty = the machine's zone,
+    # which is the honest default: on a laptop it is already right, and pinning
+    # it here would only go stale when the laptop travels. Set it on a SERVER,
+    # where the host zone is an accident of the image it was built from — the
+    # production node runs Etc/UTC while everyone it answers is on Europe/Rome,
+    # and for three hours every evening those are different dates.
+    #
+    # An agent may override it (Agent.timezone); this is the fallback for the
+    # ones that do not care. See config.now_in_timezone for the order.
+    timezone: str = ""
     # No connectors_base_url / connectors_api_key any more: notify_user reaches
     # the connectors plugin in-process, so there is no URL or bearer key to
     # configure. Pydantic ignores unknown keys, so an existing settings.json

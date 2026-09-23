@@ -28,6 +28,13 @@ The contract:
   5. It rides on `_system_suffix`, so the no-tools fallback — which rebuilds the
      system prompt mid-loop from `_system_prompt_with_tools` alone — keeps it.
      llama.cpp STARTS in that mode.
+  6. The date is computed in the agent's OWN zone, falling back to the install's
+     and then to the machine's. The host zone is an accident of the image the
+     server was built from — the production node runs Etc/UTC while the team it
+     answers is on Europe/Rome — so for the three hours before midnight the
+     "correct" date injected there is yesterday's. A name the machine cannot
+     resolve degrades to the host zone and logs; it is the SAVE path that
+     refuses it, so one typo in a config file cannot take an agent off the air.
 """
 
 import os
@@ -44,6 +51,7 @@ sys.path.insert(0, str(ROOT / "server"))
 _tmp = tempfile.TemporaryDirectory()
 os.environ["MYAGENT_HOME"] = _tmp.name
 
+from app import config                                            # noqa: E402
 from app.engine import prompts                                   # noqa: E402
 from app.engine.executor import AgentExecutor                    # noqa: E402
 from app.models import Agent                                     # noqa: E402
@@ -83,10 +91,18 @@ def test_clock_is_a_second_switch_riding_on_the_first():
 
 
 def test_the_date_is_resolved_per_turn():
-    """Not frozen at import: the process outlives the day it started in."""
+    """Not frozen at import: the process outlives the day it started in.
+
+    The clock reading moved into config.now_in_timezone when the zone became
+    configurable, so both halves are checked — the block must CALL the resolver
+    per turn, and the resolver must read the clock rather than a module-level
+    constant."""
     src = Path(ROOT / "server" / "app" / "engine" / "executor.py").read_text()
     body = src.split("def _build_now_section", 1)[1].split("\n    def ", 1)[0]
-    assert "datetime.now()" in body, "the day must be read when the turn is built"
+    assert "config.now_in_timezone(" in body, "the day must be read per turn"
+    src = Path(ROOT / "server" / "app" / "config.py").read_text()
+    body = src.split("def now_in_timezone", 1)[1].split("\ndef ", 1)[0]
+    assert "datetime.now(" in body
 
 
 def test_the_block_is_a_constant_nobody_reformats():
@@ -104,6 +120,65 @@ def test_it_rides_on_the_system_suffix():
     prep = src.split("suffix = self._build_now_section()", 1)
     assert len(prep) == 2, "the block must be part of the turn suffix"
     assert "_system_suffix = suffix" in prep[1]
+
+
+def test_the_zone_is_the_agents_own():
+    """Two agents on one server, two clocks. The point of the field: the same
+    install answers a team in Rome and a job reporting to a US account, and
+    they disagree about what "yesterday" is for six hours a day."""
+    rome = section(date_in_prompt=True, time_in_prompt=True, timezone="Europe/Rome")
+    utc = section(date_in_prompt=True, time_in_prompt=True, timezone="UTC")
+    assert rome != utc, "the zone must reach the rendered block"
+    assert "CEST" in rome or "CET" in rome
+    assert "UTC" in utc
+    # And the date itself, not only the printed abbreviation: a zone that only
+    # relabelled the hour would still hand over the wrong day in the evening.
+    auckland = section(date_in_prompt=True, timezone="Pacific/Auckland")
+    honolulu = section(date_in_prompt=True, timezone="Pacific/Honolulu")
+    assert auckland != honolulu
+
+
+def test_the_zone_falls_back_agent_then_settings_then_machine():
+    assert config.timezone_name("Europe/Rome") == "Europe/Rome"
+    saved = config.settings.timezone
+    try:
+        config.settings.timezone = "America/New_York"
+        assert config.timezone_name("Europe/Rome") == "Europe/Rome", "the agent wins"
+        assert config.timezone_name("") == "America/New_York", "then the install"
+    finally:
+        config.settings.timezone = saved
+    assert config.timezone_name("") == "", "empty = the machine's, not a guess"
+    # Empty resolves to an AWARE now: a naive one prints no %Z, and an hour with
+    # no zone beside it is worse than no hour at all.
+    assert config.now_in_timezone("").tzinfo is not None
+
+
+def test_an_unresolvable_name_degrades_instead_of_killing_the_turn():
+    """A hand-edited config must not take the agent off the air. The API is
+    where a bad name is refused (test_it_is_refused_on_save)."""
+    block = section(date_in_prompt=True, timezone="Mars/Olympus")
+    assert prompts.NOW_NOTE in block, "the block still renders"
+    assert config.is_valid_timezone("Mars/Olympus") is False
+    assert config.is_valid_timezone("Europe/Rome") is True
+    assert config.is_valid_timezone("") is True, "empty means 'the machine', not missing"
+
+
+def test_it_is_refused_on_save():
+    """Both write paths check, because both would otherwise store a name that
+    silently resolves to the host zone — a confidently wrong date, which is the
+    exact failure this feature exists to prevent, just moved."""
+    agents = Path(ROOT / "server" / "app" / "routers" / "agents.py").read_text()
+    assert agents.count("_check_timezone(agent)") == 2, "POST and PUT"
+    assert "is_valid_timezone" in agents
+    system = Path(ROOT / "server" / "app" / "routers" / "system.py").read_text()
+    body = system.split("async def update_settings", 1)[1]
+    assert "is_valid_timezone" in body
+
+
+def test_the_default_is_inherit_everywhere():
+    assert Agent(id="a", name="A", model_id="m").timezone == ""
+    from app.models import Settings
+    assert Settings().timezone == ""
 
 
 if __name__ == "__main__":

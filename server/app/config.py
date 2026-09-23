@@ -2,7 +2,9 @@ import json
 import logging
 import os
 import shutil
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.models import Settings
 
@@ -303,6 +305,58 @@ CORS_ORIGINS = [
 def debug_enabled() -> bool:
     """Whether executor tracing is on right now."""
     return bool(getattr(settings, "debug", False))
+
+
+# The zone an agent works in. Two levels, both opt-in, resolved in this order:
+#   agent.timezone  -> settings.timezone  -> the machine's zone
+# and it exists because the machine's zone is an accident of where the server
+# was installed, not a statement about who uses it. The production node runs on
+# Etc/UTC; the people it answers are on Europe/Rome. Between 22:00 and midnight
+# their "today" and the server's "today" are different days, so an agent told
+# the host date would file yesterday's report and never mention the doubt.
+#
+# Per-agent rather than per-install alone because one install serves agents that
+# do not share a clock: an assistant answering an Italian team and a scheduled
+# job reporting to a US account want different answers to "yesterday".
+#
+# Resolved on EVERY call like debug_enabled(), never cached: settings change
+# from the UI without a restart, and a clock that needs one is the bug.
+def timezone_name(preferred: str = "") -> str:
+    """The configured zone name, '' when nothing is set (= the machine's)."""
+    return (preferred or getattr(settings, "timezone", "") or "").strip()
+
+
+def is_valid_timezone(name: str) -> bool:
+    """Whether the IANA zone name exists on THIS machine. Empty is valid: it
+    means 'the machine's zone', which is the default, not a missing value."""
+    if not name or not name.strip():
+        return True
+    try:
+        ZoneInfo(name.strip())
+        return True
+    except (ZoneInfoNotFoundError, ValueError, OSError):
+        return False
+
+
+def now_in_timezone(preferred: str = "") -> datetime:
+    """An AWARE 'now' in the resolved zone — the single definition of what time
+    it is for an agent.
+
+    Aware and never naive: %Z on a naive datetime prints nothing, and an hour
+    with no zone beside it is worse than no hour at all. A name that does not
+    resolve (a zone removed from the system, a hand-edited config) degrades to
+    the machine's zone rather than raising: a bad string in a config file must
+    not take the turn down with it — the save path is what rejects those.
+    """
+    name = timezone_name(preferred)
+    if name:
+        try:
+            return datetime.now(ZoneInfo(name))
+        except (ZoneInfoNotFoundError, ValueError, OSError):
+            logging.getLogger(__name__).warning(
+                "Unknown timezone %r: falling back to the system zone", name)
+    # astimezone() attaches the SYSTEM zone to a naive now().
+    return datetime.now().astimezone()
 
 
 DEBUG_LOG_FILE = Path(

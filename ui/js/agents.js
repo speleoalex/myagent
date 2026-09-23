@@ -685,7 +685,9 @@ const AgentsPage = {
         // reading as "folder" once a second switch could raise it.
         const general = [
             d.folder ? i18n('agents.tabFolderOn', { path: d.folder.path }) : '',
-            d.date_in_prompt ? i18n('agents.tabDateOn') : '',
+            d.date_in_prompt
+                ? i18n('agents.tabDateOn') + (d.timezone ? ` (${d.timezone})` : '')
+                : '',
         ].filter(Boolean);
         set('tab-general', general.length
             ? `<span class="tab-dot" title="${App.escAttr(general.join(' · '))}"></span>`
@@ -825,7 +827,7 @@ const AgentsPage = {
     async renderForm(agentId, sourceId = '') {
         // callable_agents defaults to [] (no delegation) for NEW agents only:
         // the user opts in explicitly. Existing agents keep their stored value.
-        let agent = { id: '', name: '', description: '', model_id: '', system_prompt: '', date_in_prompt: false, time_in_prompt: false, tools: [], lazy_tools: false, max_iterations: 10, max_tool_calls: 5, temperature: 0.7, enabled: true, callable: true, callable_agents: [], memory_enabled: false, memory_threshold: 4000, live: false, schedule_others: false, autonomous: null };
+        let agent = { id: '', name: '', description: '', model_id: '', system_prompt: '', date_in_prompt: false, time_in_prompt: false, timezone: '', tools: [], lazy_tools: false, max_iterations: 10, max_tool_calls: 5, temperature: 0.7, enabled: true, callable: true, callable_agents: [], memory_enabled: false, memory_threshold: 4000, live: false, schedule_others: false, autonomous: null };
         let isEdit = false;
 
         if (agentId) {
@@ -1073,6 +1075,17 @@ const AgentsPage = {
                                         <label class="form-check-label" for="f-time-in-prompt">${i18n('agents.timeInPrompt')}</label>
                                         <div class="form-text">${i18n('agents.timeInPromptHelp')}</div>
                                     </div>
+                                    <!-- The zone the date above is computed IN. Nested and gated
+                                         with the clock because it is not a third feature: with the
+                                         date switch off there is no date for it to qualify. -->
+                                    <div class="ms-4 mt-2" id="f-timezone-row">
+                                        <label class="form-label mb-1" for="f-timezone">${i18n('agents.timezone')}</label>
+                                        <input class="form-control form-control-sm" id="f-timezone" list="tz-list"
+                                               placeholder="${App.escAttr(i18n('agents.timezoneInherit'))}"
+                                               value="${App.escAttr(agent.timezone || '')}">
+                                        <datalist id="tz-list">${App.timezoneOptions()}</datalist>
+                                        <div class="form-text">${i18n('agents.timezoneHelp')}</div>
+                                    </div>
                                 </div>`)}
                             ${pane('tools', `
                                 <div class="mb-3">
@@ -1279,6 +1292,10 @@ const AgentsPage = {
                 // gate UNCHECKS this box and does not merely disable it: a disabled
                 // input still reports whatever it was last left at.
                 time_in_prompt: document.getElementById('f-time-in-prompt').checked,
+                // Empty = inherit the app setting, which is itself empty = the
+                // machine. Sent trimmed and verbatim: the server rejects a name
+                // it cannot resolve rather than quietly using the host zone.
+                timezone: document.getElementById('f-timezone').value.trim(),
                 // RangeField.read, not `parseInt(...) || dflt`: 0 is a legitimate
                 // value here (temperature 0 = greedy decoding) and the old idiom
                 // silently turned it into the default.
@@ -1517,10 +1534,16 @@ const AgentsPage = {
         // reports its last state to readForm() — so uncheck as well as disable.
         const dateEl = document.getElementById('f-date-in-prompt');
         const timeEl = document.getElementById('f-time-in-prompt');
+        const tzRow = document.getElementById('f-timezone-row');
         const syncTime = () => {
             if (!dateEl.checked) timeEl.checked = false;
             timeEl.disabled = !dateEl.checked;
             timeEl.closest('.form-check').style.opacity = dateEl.checked ? '1' : '0.5';
+            // The zone is NOT cleared with the switch, only greyed: it is a
+            // preference worth keeping across an off/on, and with no date in the
+            // prompt it is inert anyway.
+            document.getElementById('f-timezone').disabled = !dateEl.checked;
+            tzRow.style.opacity = dateEl.checked ? '1' : '0.5';
         };
         dateEl.addEventListener('change', syncTime);
         syncTime();
