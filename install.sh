@@ -2,6 +2,8 @@
 # Install MyAgent — the single installer for every setup.
 #
 # Usage:
+#   curl -fsSL https://raw.githubusercontent.com/speleoalex/myagent/main/install.sh | bash
+#                                 # from nothing: fetches the repo into ./myagent first
 #   ./install.sh                  # install + register the service (mode below)
 #   ./install.sh --dev            # venv + deps in this checkout only, no service
 #   ./install.sh --port N         # bind port (default: 8888, or the first free one)
@@ -37,10 +39,69 @@
 # here at all.
 set -e
 
+has() { command -v "$1" >/dev/null 2>&1; }
+
 SERVICE_NAME="myagent"
 LABEL="com.myagent.agent"                       # launchd label (macOS)
 SOURCE_DIR="$(cd "$(dirname "$0")" && pwd)"
 PYTHON="${PYTHON:-python3}"
+
+REPO_URL="${MYAGENT_REPO_URL:-https://github.com/speleoalex/myagent.git}"
+REPO_TARBALL="${MYAGENT_REPO_TARBALL:-https://codeload.github.com/speleoalex/myagent/tar.gz/refs/heads/main}"
+
+# ======================================================== -1. bootstrap the code
+# `curl -fsSL .../install.sh | bash` lands here with no repo around it: $0 is
+# "bash", so SOURCE_DIR is merely the current directory and the copy step would
+# cheerfully install THAT. When the sources are not next to this script, fetch
+# them first and hand over to the real install.sh. The clone is left in ./myagent
+# — exactly the tree the documented `git clone` produces, and the one update.sh
+# needs later — rather than in a temp dir that would strand every future update.
+if [ ! -f "$SOURCE_DIR/server/main.py" ]; then
+    case " $* " in
+        *" -h "*|*" --help "*)
+            echo "MyAgent installer, bootstrapping from GitHub."
+            echo "It fetches $REPO_URL into ./myagent and runs its install.sh."
+            echo "For every option: clone the repo and run ./install.sh --help"
+            exit 0 ;;
+    esac
+    CLONE_DIR="${MYAGENT_SRC_DIR:-$PWD/myagent}"
+    echo "=== MyAgent install ==="
+    echo "No sources next to this script — fetching MyAgent into $CLONE_DIR"
+    if [ -e "$CLONE_DIR" ]; then
+        if [ -f "$CLONE_DIR/install.sh" ] && [ -f "$CLONE_DIR/server/main.py" ]; then
+            echo "  A checkout is already there — using it as is (update it with $CLONE_DIR/update.sh)."
+        else
+            echo "  $CLONE_DIR exists and is not a MyAgent checkout." >&2
+            echo "  Move it aside, or clone where you want it and run its install.sh." >&2
+            exit 1
+        fi
+    elif has git; then
+        git clone --depth 1 "$REPO_URL" "$CLONE_DIR"
+    elif has curl || has wget; then
+        # No git: a snapshot installs and runs exactly the same, but update.sh
+        # needs a clone — say so now rather than let it fail months from now.
+        echo "  git not found — downloading a snapshot instead. It installs and runs"
+        echo "  the same, but update.sh will not work: install git and re-clone for that."
+        TMP_TGZ="$(mktemp)"
+        if has curl; then curl -fsSL -o "$TMP_TGZ" "$REPO_TARBALL"
+        else wget -qO "$TMP_TGZ" "$REPO_TARBALL"; fi
+        mkdir -p "$CLONE_DIR"
+        tar xzf "$TMP_TGZ" -C "$CLONE_DIR" --strip-components=1
+        rm -f "$TMP_TGZ"
+        chmod +x "$CLONE_DIR"/*.sh
+    else
+        echo "  Need git, curl or wget to fetch the sources." >&2
+        exit 1
+    fi
+    # Piped into bash, stdin IS this script and is already spent: every prompt
+    # would silently take its default (ask() returns no without a TTY). Give the
+    # real run the terminal back when there is one — and only when opening it
+    # actually works, so a cron-driven install keeps answering no to everything.
+    if [ ! -t 0 ] && { : < /dev/tty; } 2>/dev/null; then
+        exec "$CLONE_DIR/install.sh" "$@" < /dev/tty
+    fi
+    exec "$CLONE_DIR/install.sh" "$@"
+fi
 
 MODE=""                    # user | service | root | macos | dev
 SERVICE_USER="myagent"
@@ -59,7 +120,7 @@ while [ $# -gt 0 ]; do
         --port=*)         PORT="${1#--port=}" ;;
         -y|--yes)         ASSUME_YES=1 ;;
         --no-optional)    SKIP_OPTIONAL=1 ;;
-        -h|--help)        sed -n '2,30p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        -h|--help)        sed -n '2,29p' "$0" | sed 's/^# \?//'; exit 0 ;;
         *)                echo "Unknown option: $1 (see $0 --help)" >&2; exit 2 ;;
     esac
     shift
@@ -68,7 +129,6 @@ if [ -n "$PORT" ] && ! [ "$PORT" -ge 1 ] 2>/dev/null; then
     echo "--port needs a number, got '$PORT'" >&2; exit 2
 fi
 
-has() { command -v "$1" >/dev/null 2>&1; }
 
 # Ask only when there is someone to answer: no TTY (a container build, a pipe,
 # a cron-driven install) behaves exactly like answering no, so automation never
@@ -177,15 +237,78 @@ if [ "$MODE" = user ] && [ -e "/etc/systemd/system/${SERVICE_NAME}.service" ]; t
     echo ""
 fi
 
+# ================================================================ 0.5 preflight
+# What a bare machine lacks INVISIBLY. Each of these kills the script several
+# steps later with a message about something else entirely (`python3 -m venv`
+# exits 1 telling you to apt-get something, rsync dies as "command not found"
+# mid-install), so they are checked here and collected into ONE command.
+# Detected once, here, because the optional-package step below needs the same.
+PKG_MGR=""; PKG_CMD=""
+if has apt-get;  then PKG_MGR=apt;    PKG_CMD="apt-get install -y"
+elif has dnf;    then PKG_MGR=dnf;    PKG_CMD="dnf install -y"
+elif has yum;    then PKG_MGR=dnf;    PKG_CMD="yum install -y"
+elif has pacman; then PKG_MGR=pacman; PKG_CMD="pacman -S --needed --noconfirm"
+elif has zypper; then PKG_MGR=zypper; PKG_CMD="zypper install -y"
+elif has brew;   then PKG_MGR=brew;   PKG_CMD="brew install"
+fi
+
 # Fail on an old Python here rather than three steps later: the models use
 # PEP-604 annotations (`bool | None`), so 3.9 creates the venv and installs the
-# deps happily and then dies with a pydantic traceback at first import.
+# deps happily and then dies with a pydantic traceback at first import. Not part
+# of the scan below: no package manager installs "a newer default python3".
 if ! "$PYTHON" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' 2>/dev/null; then
     FOUND=$("$PYTHON" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null || echo "none")
     echo "MyAgent needs Python 3.10+ (found: $FOUND)." >&2
     echo "Install it, or point this script at another interpreter:" >&2
     echo "  PYTHON=/usr/bin/python3.12 $0" >&2
     exit 1
+fi
+
+PRE_PKGS=""; PRE_WHY=""
+need_pre() {   # need_pre <package name, or "" when we cannot name one> <what it is>
+    PRE_WHY="${PRE_WHY:+$PRE_WHY, }$2"
+    # An `if`, not `[ -n "$1" ] && ...`: with no package name that AND-list
+    # returns 1, which under `set -e` ends the install right here, silently.
+    if [ -n "$1" ]; then PRE_PKGS="${PRE_PKGS:+$PRE_PKGS }$1"; fi
+}
+preflight_scan() {
+    PRE_PKGS=""; PRE_WHY=""
+    # Debian and openSUSE ship a python3 whose venv cannot bootstrap pip. The
+    # module imports; ensurepip is the half that is split out into a package.
+    if ! "$PYTHON" -c 'import ensurepip' >/dev/null 2>&1; then
+        case "$PKG_MGR" in
+            apt|zypper) need_pre python3-venv "python3-venv (pip inside the virtualenv)" ;;
+            *)          need_pre "" "the Python venv module (ensurepip)" ;;
+        esac
+    fi
+    # Only the modes that copy need it; --dev and macOS install in place.
+    if [ -z "$IN_PLACE" ] && ! has rsync; then
+        need_pre rsync "rsync (copies the code into $INSTALL_DIR)"
+    fi
+}
+preflight_scan
+if [ -n "$PRE_WHY" ]; then
+    echo "Missing prerequisites: $PRE_WHY"
+    if [ -n "$PRE_PKGS" ] && [ -n "$PKG_CMD" ]; then
+        # brew refuses to run as root, and apt & co. need it: same rule as the
+        # optional packages below.
+        PRE_SUDO=""
+        if [ "$PKG_MGR" != brew ] && [ -z "$IS_ROOT" ] && has sudo; then PRE_SUDO="sudo "; fi
+        echo "  Command: ${PRE_SUDO}${PKG_CMD} ${PRE_PKGS}"
+        if [ -z "$SKIP_OPTIONAL" ] && ask "Install them now?"; then
+            # Unquoted on purpose: the package list is passed by word splitting.
+            ${PRE_SUDO}${PKG_CMD} ${PRE_PKGS} || true
+            hash -r
+            preflight_scan
+        fi
+    fi
+    if [ -n "$PRE_WHY" ]; then
+        echo "" >&2
+        echo "Cannot continue without: $PRE_WHY" >&2
+        echo "Install the above, then run this script again." >&2
+        exit 1
+    fi
+    echo ""
 fi
 
 # ============================================================ 1. copy the code
@@ -421,14 +544,7 @@ fi
 # package is a snap shim that fails inside containers, and a headless server
 # often does not want a browser at all; the report below keeps it visible.
 echo "  Optional system dependencies:"
-MISSING=""; PKGS=""; PKG_MGR=""; PKG_CMD=""
-if has apt-get;  then PKG_MGR=apt;    PKG_CMD="apt-get install -y"
-elif has dnf;    then PKG_MGR=dnf;    PKG_CMD="dnf install -y"
-elif has yum;    then PKG_MGR=dnf;    PKG_CMD="yum install -y"
-elif has pacman; then PKG_MGR=pacman; PKG_CMD="pacman -S --needed --noconfirm"
-elif has zypper; then PKG_MGR=zypper; PKG_CMD="zypper install -y"
-elif has brew;   then PKG_MGR=brew;   PKG_CMD="brew install"
-fi
+MISSING=""; PKGS=""      # PKG_MGR / PKG_CMD: detected in the preflight above
 pkg_name() {   # one package name per (binary, manager); unknown manager → nothing
     case "$1:$PKG_MGR" in
         pdftotext:apt|pdftotext:dnf)     echo poppler-utils ;;
@@ -712,6 +828,35 @@ kill_dev_instances() {
     sleep 1
 }
 
+# A unit that crash-loops (a venv missing a dep, a port stolen between the probe
+# and the start, a drop-in with a typo) leaves systemd content and this script
+# printing "Install complete" — the user then meets the failure in the browser,
+# with no idea where to look. So: ask the server itself. An HTTP error still
+# means a server that is up and answering (401, with an API key pinned), which
+# is why only a connection failure counts as "not there yet".
+http_alive() {
+    "$VENV/bin/python" - "$1" <<'PYEOF' 2>/dev/null
+import sys, urllib.error, urllib.request
+try:
+    urllib.request.urlopen(sys.argv[1], timeout=2)
+except urllib.error.HTTPError:
+    pass
+except Exception:
+    sys.exit(1)
+PYEOF
+}
+wait_for_service() {
+    # Bounded by the CLOCK, not by a number of attempts: a server that accepts the
+    # connection and then never answers costs a full 2s timeout per probe, so
+    # thirty tries would be over a minute of apparent hang at the end of install.
+    local deadline=$((SECONDS + 20))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        if http_alive "http://127.0.0.1:$PORT/"; then return 0; fi
+        sleep 0.5
+    done
+    return 1
+}
+
 SERVICE_INSTALLED=""
 case "$MODE" in
     dev)
@@ -747,6 +892,12 @@ case "$MODE" in
         fi
         ;;
 esac
+
+HEALTH_OK=""
+if [ -n "$SERVICE_INSTALLED" ]; then
+    printf '  Waiting for the service to answer on port %s... ' "$PORT"
+    if wait_for_service; then HEALTH_OK=1; echo "ok"; else echo "no answer"; fi
+fi
 
 # ============================================================ 5. report
 echo "[5/5] LLM backend and optional features:"
@@ -875,7 +1026,20 @@ else
 fi
 
 echo ""
-echo "=== Install complete ==="
+if [ -n "$SERVICE_INSTALLED" ] && [ -z "$HEALTH_OK" ]; then
+    echo "=== Installed, but the service is NOT answering ==="
+    echo "Nothing replied on http://127.0.0.1:$PORT within 20 seconds. Last log lines:"
+    case "$MODE" in
+        macos) tail -n 20 "$HOME/Library/Logs/myagent.err.log" 2>/dev/null | sed 's/^/  /' ;;
+        *)     JC="journalctl"
+               [ -n "$IS_USER_UNIT" ] && JC="journalctl --user"
+               [ -n "$USER_FALLBACK" ] && JC="sudo journalctl"
+               $JC -u "$SERVICE_NAME" -n 20 --no-pager 2>/dev/null | sed 's/^/  /' ;;
+    esac
+    echo ""
+else
+    echo "=== Install complete ==="
+fi
 case "$MODE" in
     dev)
         echo "Run:  $VENV/bin/python $INSTALL_DIR/server/main.py"

@@ -1,16 +1,46 @@
 # Installing MyAgent
 
-The short version is in the [README](../README.md#quickstart): clone, run
-`./install.sh`, open the URL it prints. This page covers everything around it —
-requirements, optional dependencies, the install modes (per-user, service
-account, root, macOS, development), installing the UI as an app, and hosting
-that UI somewhere else.
+The short version is in the [README](../README.md#quickstart): one `curl` line,
+or clone and run `./install.sh`, then open the URL it prints. This page covers
+everything around it — getting the code, requirements, optional dependencies,
+the install modes (per-user, service account, root, macOS, development),
+installing the UI as an app, and hosting that UI somewhere else.
+
+## Getting the code
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/speleoalex/myagent/main/install.sh | bash
+```
+
+Run with no sources around it, `install.sh` fetches them first: it clones the
+repository into `./myagent` and hands over to that checkout's own `install.sh`,
+passing along any options you gave it. The result is exactly what `git clone`
+would have left you, in the same place — which matters, because
+[`update.sh`](#updating) and [`uninstall.sh`](#uninstalling) are run from that
+checkout later. If the directory is already a MyAgent checkout it is used as
+is, never overwritten. With no `git` on the machine it falls back to a source
+snapshot, says so, and warns that `update.sh` will not work until you install
+git and re-clone. `MYAGENT_SRC_DIR` puts the checkout somewhere else.
+
+Piped into `bash` the script still asks its questions, by reading the terminal
+directly — and still asks nothing at all when there is no terminal, so a
+scripted or container install keeps answering no to everything.
 
 ## Requirements
 
 - **Python 3.10+** (3.12 recommended). `./install.sh` refuses anything older
   before it installs a thing — on 3.9 the failure would otherwise arrive much
-  later, as a pydantic traceback.
+  later, as a pydantic traceback. It also checks the two prerequisites a bare
+  machine is missing *invisibly* — `python3-venv` (on Debian and openSUSE the
+  venv cannot bootstrap pip without it) and `rsync` — and prints the single
+  command that installs both, rather than dying three steps later about
+  something else:
+
+  ```text
+  Missing prerequisites: python3-venv (pip inside the virtualenv), rsync (copies the code into /home/you/myagent/bin)
+    Command: sudo apt-get install -y python3-venv rsync
+    Install them now? [y/N]
+  ```
 - **At least one LLM backend.** For a fully offline setup, a local one:
   - llama.cpp server (`http://localhost:8080`), or
   - Ollama (`http://localhost:11434`), or
@@ -254,6 +284,14 @@ Remember that the server must also be reachable from the browser's machine
   **Models**, or the base URLs under **Settings**.
 - **`Address already in use`** — something else has 8888:
   `MYAGENT_PORT=8899 server/.venv/bin/python server/main.py`.
+- **"Installed, but the service is NOT answering"** — `install.sh` does not
+  claim success on a service it cannot reach: after starting the unit it polls
+  the port for 20 seconds, and when nothing replies it prints the last 20 log
+  lines in place of the usual report. The most common causes are a port taken
+  by another process (the installer warns about that earlier too) and a tool
+  dependency that fails at import. The full log is
+  `journalctl --user -u myagent -e` (`sudo journalctl -u myagent -e` for a
+  system-wide install).
 - **A tool "works" in a terminal but not from an agent** — check its `run` is
   executable and its shebang points at an interpreter that has its
   dependencies; a service `PATH` is minimal. See

@@ -61,10 +61,10 @@ _ACTIVATE_TOOLS = "activate_tools"
 # wake prompt says so: the reply is only logged). So the budget check offers ONE
 # extra round in which this is the only tool, and lets up to _DELIVERY_CALLS_MAX
 # calls to it through — one per recipient, `to` takes a single name. Measured
-# on tmind, 2026-09-21: sistemista-techmakers hit the limit at call 21 in both
-# runs of its daily report (6 of the 22 calls were the same Float query cut in
-# 2-day windows), wrote "non ho potuto inviare la notifica" and the report
-# stayed in the log. Attended turns are untouched: the user reads the reply.
+# on a production install, 2026-09-21: a sysadmin agent hit the limit at call
+# 21 in both runs of its daily report (6 of the 22 calls were the same
+# time-tracking query cut in 2-day windows), wrote "non ho potuto inviare la
+# notifica" and the report stayed in the log. Attended turns are untouched: the user reads the reply.
 _NOTIFY_USER = "notify_user"
 _DELIVERY_CALLS_MAX = 3
 

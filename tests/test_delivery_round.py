@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """An unattended turn that spends its tool budget still gets to deliver.
 
-tmind, 2026-09-21. The daily report task of `sistemista-techmakers` (20 tool
-calls per run) hit the limit at call 21 in both runs: the model was still
-gathering (six of the calls were one Float query cut in 2-day windows), the
+Production install, 2026-09-21. The daily report task of a sysadmin agent (20
+tool calls per run) hit the limit at call 21 in both runs: the model was still
+gathering (six of the calls were one time-tracking query cut in 2-day windows), the
 executor forced the answer, the answer said "non ho potuto inviare la
 notifica" — and, this being a wake, the reply was only logged. The connector,
 the contacts and the SMTP were all fine; notify_user was simply never called.

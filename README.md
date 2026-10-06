@@ -128,6 +128,13 @@ You need **Python 3.10+** and **one LLM backend**. If you have neither,
 ```bash
 ollama pull qwen3          # any tool-capable model will do
 
+curl -fsSL https://raw.githubusercontent.com/speleoalex/myagent/main/install.sh | bash
+```
+
+That one line clones the repo into `./myagent` and installs from it, which is
+the same thing as doing it by hand:
+
+```bash
 git clone https://github.com/speleoalex/myagent.git
 cd myagent
 ./install.sh
