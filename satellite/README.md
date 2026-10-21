@@ -148,7 +148,7 @@ A device WITH a display should show the agent, not a desktop:
 
 ```bash
 bash kiosk.sh --install     # add it to the desktop session's autostart
-bash kiosk.sh               # try it now (needs a running X session)
+bash kiosk.sh               # try it now (from inside the graphical session)
 bash kiosk.sh --uninstall   # remove the autostart entry
 ```
 
@@ -161,8 +161,23 @@ browsing. It ends up in that browser's argv, visible to `ps` on the device:
 the same trust boundary as `config.json` itself, and it never leaves localhost.
 
 Requires a desktop session (Raspberry Pi OS with desktop, autologin on) and
-Chromium — or Chrome, which is the same engine and the same flags. Undo the
-screen tweak with `xset s on +dpms` if you would rather the panel blanks.
+Chromium — or Chrome, which is the same engine and the same flags.
+
+`--install` also switches the screen lock and blanking off **for that user**:
+a panel with no keyboard in the room cannot be unlocked, and the desktop's own
+locker is not something `xset` can reach. Undo it in System Settings → Screen
+Locking, or with `xset s on +dpms` for the X side, if you would rather the
+panel blanks.
+
+The script **pins the browser's display backend** rather than inheriting it,
+and that is not a detail: a graphical login exports `WAYLAND_DISPLAY`, so an
+autostarted Chromium takes the Wayland backend, while the same script run by
+hand over ssh takes X11. On a machine whose Wayland backend cannot get a
+usable DRM render node the window comes up fullscreen, titled, and *completely
+unpainted* — the page is loaded and working, the screen is blank, and nothing
+anywhere says why. `kiosk.sh` therefore asks for X11 wherever an X server
+answers (native, or the Xwayland a Wayland desktop runs anyway) and for
+Wayland only when there is none.
 
 The autostart entry belongs to the user who runs `--install`, so on a PC that
 is also somebody's desktop the clean split is a **login of its own**: create a

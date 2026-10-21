@@ -263,6 +263,7 @@ const STR = {
     keyStored: 'This is the key this browser is using. Wrong one? Fix it here.',
     keyHint: 'The same key as the binding in MyAgent (config.json → "key"). Kept in this browser only.',
     keyBad: 'That key was refused by the device.',
+    offline: 'The device is not answering. Retrying\u2026',
     listen: 'Talk', listening: 'listening — speak now', thinking: 'the agent is thinking…',
     heardNothing: 'nothing was heard.',
     textPlaceholder: 'Type a message…', send: 'Send',
@@ -292,6 +293,7 @@ const STR = {
     keyStored: 'È la chiave che questo browser sta usando. Sbagliata? Correggila qui.',
     keyHint: 'La stessa chiave del binding in MyAgent (config.json → "key"). Resta solo in questo browser.',
     keyBad: 'Chiave rifiutata dal dispositivo.',
+    offline: 'Il dispositivo non risponde. Riprovo\u2026',
     listen: 'Parla', listening: 'in ascolto — parla pure', thinking: "l'agente sta pensando…",
     heardNothing: 'non ho sentito nulla.',
     textPlaceholder: 'Scrivi un messaggio…', send: 'Invia',
@@ -342,7 +344,12 @@ async function api(method, path, body) {
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const data = await res.json().catch(() => ({}));
-  if (res.status === 401) { show('key', T.keyBad); throw new Error(T.keyBad); }
+  if (res.status === 401) {
+    show('key', T.keyBad);
+    // Tagged: every caller's catch has to tell "wrong key" (the key screen
+    // is already up) from "no answer" (it must not be).
+    throw Object.assign(new Error(T.keyBad), { badKey: true });
+  }
   if (!res.ok) throw new Error(data.detail || ('HTTP ' + res.status));
   return data;
 }
@@ -372,9 +379,20 @@ async function load(screen) {
   try {
     cfg = await api('GET', '/config');
   } catch (e) {
-    if (!key) show('key', '');
+    if (!key) { show('key', ''); return; }
+    if (e.badKey) return;                       // key screen is already up
+    // The device did not answer. Returning quietly here left the page on its
+    // bare markup — a title of "…", blank badges, no screen at all — which
+    // reads as a frozen browser and sends you hunting the wrong fault. Say it
+    // on the main screen and retry: a kiosk panel has nobody to press reload.
+    show('main');
+    $('state').innerHTML = '<span class="err">' + esc(T.offline) + '</span>';
+    clearTimeout(load.retry);
+    load.retry = setTimeout(() => load(screen), 3000);
     return;
   }
+  clearTimeout(load.retry);
+  if ($('state').querySelector('.err')) $('state').textContent = '';
   // The page of an Italian-speaking device is in Italian, whatever locale the
   // browser was built with: on the kiosk screen there is no browser to set.
   const byDevice = pick(cfg.language);
