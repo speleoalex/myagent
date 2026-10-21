@@ -161,8 +161,16 @@ browsing. It ends up in that browser's argv, visible to `ps` on the device:
 the same trust boundary as `config.json` itself, and it never leaves localhost.
 
 Requires a desktop session (Raspberry Pi OS with desktop, autologin on) and
-`chromium-browser`. Undo the screen tweak with `xset s on +dpms` if you would
-rather the panel blanks.
+Chromium — or Chrome, which is the same engine and the same flags. Undo the
+screen tweak with `xset s on +dpms` if you would rather the panel blanks.
+
+The autostart entry belongs to the user who runs `--install`, so on a PC that
+is also somebody's desktop the clean split is a **login of its own**: create a
+user, install the satellite under it (`install.sh` builds its venv and user
+unit there) and run `kiosk.sh --install` as that user. Logging in as them gives
+the agent fullscreen; logging in as yourself gives you your desktop, untouched.
+The satellite must live in the same session as the kiosk, because the
+microphone and the speaker belong to whoever is logged in.
 
 **Back to the desktop.** Fullscreen with no keyboard in the room also means no
 way out, and the desktop of the machine is where you join a WiFi or read a log.

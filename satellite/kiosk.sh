@@ -78,9 +78,16 @@ command -v unclutter >/dev/null 2>&1 && (unclutter -idle 1 -root &) || true
 PREFS="$PROFILE/Default/Preferences"
 [ -f "$PREFS" ] && sed -i 's/"exited_cleanly":false/"exited_cleanly":true/;s/"exit_type":"[^"]*"/"exit_type":"Normal"/' "$PREFS" || true
 
-BROWSER="$(command -v chromium-browser || command -v chromium || true)"
+# Chromium by preference, Chrome if that is what the machine has: the flags
+# below are the same engine's, and what identifies "our" browser to
+# /kiosk/close is the profile directory, not the binary's name.
+BROWSER=""
+for b in chromium-browser chromium google-chrome-stable google-chrome; do
+    BROWSER="$(command -v "$b" || true)"
+    [ -n "$BROWSER" ] && break
+done
 if [ -z "$BROWSER" ]; then
-    echo "No chromium found (apt install chromium-browser)." >&2
+    echo "No Chromium-based browser found (apt install chromium-browser)." >&2
     exit 1
 fi
 
