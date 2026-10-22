@@ -27,6 +27,7 @@ from __future__ import annotations
 import base64
 import hmac
 import io
+import http.client
 import json
 import logging
 import os
@@ -776,6 +777,21 @@ def ask_myagent(cfg: dict, wav: bytes | None = None, text: str = "") -> dict:
     except urllib.error.URLError as e:
         raise RuntimeError(f"cannot reach myagent at {cfg['myagent_url']}: "
                            f"{e.reason}")
+    # urlopen wraps only the CONNECT in URLError: a timeout while waiting for
+    # the reply is a bare TimeoutError, and a dropped connection an OSError or
+    # an HTTPException. Every caller catches RuntimeError alone, so anything
+    # else escaped the page's handler, which closed the socket without an
+    # answer — the browser said "Failed to fetch" and nothing else (2026-10-22:
+    # a turn on a CPU-only model took 189 s against the default 180).
+    except TimeoutError:
+        raise RuntimeError(f"myagent did not answer within "
+                           f"{cfg['request_timeout_s']} s — a local model can "
+                           f"be slower than that: raise request_timeout_s")
+    except (OSError, http.client.HTTPException) as e:
+        raise RuntimeError(f"lost the connection to myagent at "
+                           f"{cfg['myagent_url']}: {e!r}")
+    except ValueError as e:
+        raise RuntimeError(f"myagent answered something that is not JSON: {e}")
 
 
 def run_turn(cfg: dict, speaker: Speaker, wav: bytes | None = None,
