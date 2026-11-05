@@ -1,0 +1,374 @@
+#!/usr/bin/env python3
+"""Synthesise Italian (or 22 other languages) with Chatterbox Multilingual,
+optionally cloning a voice from a few seconds of reference audio.
+
+On this laptop the GPU is not free: llama.cpp holds 3.2 of the 3.9 GiB of the
+Arc A370M and sd-server holds the iGPU. So:
+
+  --device cpu   (default)  nothing is stopped. llama.cpp runs on the GPU, the
+                            synthesis runs on the 16 CPU threads, the chat keeps
+                            answering. Slower, but nothing goes dark.
+  --device xpu              the Arc is needed whole, so llama.service is STOPPED
+                            for the duration and started again afterwards, the
+                            way contrib/jetson-orin-8gb/sd-arbitrage-run trades
+                            llama-server against sd-server on the Orin. A
+                            detached guardian repeats the restore if this
+                            process is killed, and a flock keeps two runs from
+                            stopping and starting the unit under each other.
+
+Long texts are SPLIT at sentence boundaries and the pieces joined with a short
+pause: Chatterbox generates one utterance at a time and degrades well before
+the length of a paragraph of narration. The model is loaded once per
+invocation, so --textdir over a folder of scripts pays the load once, not once
+per file.
+"""
+import argparse
+import contextlib
+import fcntl
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+import urllib.request
+
+PREFIX = os.environ.get("CHATTERBOX_HOME",
+                        os.path.expanduser("~/.local/share/chatterbox-tts"))
+LLM_UNIT = "llama"                                  # systemctl --user unit
+LLM_READY = "http://127.0.0.1:8080/health"
+START_TIMEOUT = 120
+HEADROOM = 10 ** (-1 / 20)                          # peak ceiling, -1 dBFS
+
+
+def log(msg):
+    print(f"[chatterbox] {msg}", file=sys.stderr, flush=True)
+
+
+def sysctl(*args):
+    return subprocess.run(["systemctl", "--user", *args],
+                          capture_output=True, text=True).returncode
+
+
+def unit_active(unit):
+    return subprocess.run(["systemctl", "--user", "is-active", "--quiet", unit]).returncode == 0
+
+
+def wait_http(url, timeout):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(url, timeout=3) as r:
+                if r.status == 200:
+                    return True
+        except Exception:
+            pass
+        time.sleep(1)
+    return False
+
+
+def acquire_lock():
+    path = os.path.join(os.environ.get("XDG_RUNTIME_DIR") or "/tmp",
+                        f"chatterbox-{os.getuid()}.lock")
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    return fd
+
+
+def spawn_guardian():
+    """Restarts llama if THIS process dies before the finally block runs.
+    Cancelled on a normal exit, where we do the restore ourselves."""
+    script = ("while kill -0 %d 2>/dev/null; do sleep 2; done; "
+              "systemctl --user start %s" % (os.getpid(), LLM_UNIT))
+    return subprocess.Popen(["bash", "-c", script], start_new_session=True,
+                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
+
+
+def pick_device(requested):
+    import torch
+    has_xpu = hasattr(torch, "xpu") and torch.xpu.is_available()
+    if requested == "xpu":
+        if not has_xpu:
+            sys.exit("ERROR: --device xpu but torch has no usable XPU. Install "
+                     "the XPU build: contrib/chatterbox-tts/install.sh --xpu")
+        return "xpu"
+    if requested == "cpu":
+        return "cpu"
+    return "xpu" if has_xpu else "cpu"
+
+
+# A sentence ends at . ! ? … or a newline. The lookbehind keeps the punctuation
+# with the sentence it closes; common abbreviations are not special-cased
+# because Italian narration rarely has them mid-flow and a wrong split only
+# costs a pause.
+_SENT = re.compile(r'(?<=[.!?…])\s+|\n+')
+
+
+def split_text(text, max_chars):
+    """Chunks of at most max_chars, broken at sentence ends where possible."""
+    chunks, cur = [], ""
+    for sent in (s.strip() for s in _SENT.split(text) if s.strip()):
+        while len(sent) > max_chars:
+            # one sentence longer than a chunk: break at the last comma, then
+            # at the last space, before the limit
+            cut = max(sent.rfind(", ", 0, max_chars), sent.rfind("; ", 0, max_chars))
+            if cut < max_chars // 3:
+                cut = sent.rfind(" ", 0, max_chars)
+            if cut <= 0:
+                cut = max_chars
+            head, sent = sent[:cut + 1].strip(), sent[cut + 1:].strip()
+            if cur:
+                chunks.append(cur)
+                cur = ""
+            chunks.append(head)
+        if not cur:
+            cur = sent
+        elif len(cur) + 1 + len(sent) <= max_chars:
+            cur += " " + sent
+        else:
+            chunks.append(cur)
+            cur = sent
+    if cur:
+        chunks.append(cur)
+    return chunks
+
+
+def load_lexicon(path):
+    """'word<TAB>respelling' per line, # for comments. Applied whole-word,
+    case sensitive, in file order: a proper name whose stress the model gets
+    wrong (Martel -> Màrtel) is fixed once for every text instead of being
+    edited into each file."""
+    rules = []
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.rstrip("\n")
+            if not line.strip() or line.lstrip().startswith("#"):
+                continue
+            word, sep, repl = line.partition("\t")
+            if sep and word.strip():
+                rules.append((re.compile(r"\b%s\b" % re.escape(word.strip())),
+                              repl.strip()))
+    return rules
+
+
+def apply_lexicon(text, rules):
+    for rx, repl in rules:
+        text = rx.sub(repl, text)
+    return text
+
+
+def jobs_from_args(args):
+    """-> [(output_path, text)]"""
+    if args.textdir:
+        out_dir = args.outdir or args.textdir
+        os.makedirs(out_dir, exist_ok=True)
+        names = sorted(n for n in os.listdir(args.textdir) if n.endswith(".txt"))
+        if args.limit:
+            names = names[:args.limit]
+        if not names:
+            sys.exit(f"ERROR: no .txt files in {args.textdir}")
+        jobs = []
+        for name in names:
+            with open(os.path.join(args.textdir, name), encoding="utf-8") as fh:
+                text = fh.read().strip()
+            if text:
+                jobs.append((os.path.join(out_dir, name[:-4] + ".wav"), text))
+        return jobs
+    if args.text_file:
+        with open(args.text_file, encoding="utf-8") as fh:
+            text = fh.read()
+        out = args.out
+        if out == "chatterbox-out.wav":
+            base = os.path.basename(args.text_file)
+            out = os.path.join(args.outdir or ".", os.path.splitext(base)[0] + ".wav")
+        return [(out, text.strip())]
+    if args.batch:
+        out_dir = args.outdir or os.getcwd()
+        os.makedirs(out_dir, exist_ok=True)
+        jobs = []
+        with open(args.batch, encoding="utf-8") as fh:
+            for n, line in enumerate(fh, 1):
+                line = line.rstrip("\n")
+                if not line.strip() or line.lstrip().startswith("#"):
+                    continue
+                name, sep, text = line.partition("\t")
+                if not sep:
+                    name, text = f"{n:03d}", line
+                jobs.append((os.path.join(out_dir, f"{name.strip()}.wav"), text.strip()))
+        if not jobs:
+            sys.exit(f"ERROR: no phrases in {args.batch}")
+        return jobs
+    text = args.text
+    if text in (None, "-"):
+        text = sys.stdin.read()
+    text = text.strip()
+    if not text:
+        sys.exit("ERROR: nothing to say (pass TEXT, a file, or - to read stdin)")
+    return [(args.out, text)]
+
+
+def synthesise(args, device, jobs):
+    import torch
+    import torchaudio
+    from chatterbox.mtl_tts import ChatterboxMultilingualTTS
+
+    if device == "cpu" and args.threads:
+        torch.set_num_threads(args.threads)
+
+    t0 = time.time()
+    # The watermarker announces itself with a print(): keep stdout for --json.
+    with contextlib.redirect_stdout(sys.stderr):
+        model = ChatterboxMultilingualTTS.from_pretrained(device=device)
+    load_s = time.time() - t0
+    log(f"model loaded on {device} in {load_s:.0f}s")
+
+    kw = {"language_id": args.lang}
+    if args.exaggeration is not None:
+        kw["exaggeration"] = args.exaggeration
+    if args.cfg is not None:
+        kw["cfg_weight"] = args.cfg
+    if args.voice:
+        # Condition once instead of per chunk: the voice encoder would
+        # otherwise re-run for every sentence of every file.
+        try:
+            prep_kw = {}
+            if args.exaggeration is not None:
+                prep_kw["exaggeration"] = args.exaggeration
+            model.prepare_conditionals(args.voice, **prep_kw)
+            log(f"voice conditioned from {os.path.basename(args.voice)}")
+        except Exception as e:
+            log(f"prepare_conditionals unavailable ({e}); passing the prompt per chunk")
+            kw["audio_prompt_path"] = args.voice
+
+    gap = torch.zeros(1, int(args.gap * 24000))
+    rules = load_lexicon(args.pron) if args.pron else []
+    results = []
+    for path, text in jobs:
+        if rules:
+            text = apply_lexicon(text, rules)
+        chunks = split_text(text, args.max_chars)
+        t0 = time.time()
+        pieces = []
+        for i, chunk in enumerate(chunks, 1):
+            wav = model.generate(chunk, **kw).cpu()
+            pieces.append(wav)
+            if i < len(chunks):
+                pieces.append(gap.to(wav.dtype))
+            log(f"  {os.path.basename(path)} [{i}/{len(chunks)}] "
+                f"{len(chunk)} chars -> {wav.shape[-1] / 24000:.1f}s")
+        full = torch.cat(pieces, dim=-1)
+        dt = time.time() - t0
+        dur = full.shape[-1] / model.sr
+        os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
+        # The model follows the reference's loudness and, cloning a loud one,
+        # overshoots full scale: the 16-bit WAV would square those peaks off
+        # for good. Lower the whole take instead, it is normalised later anyway.
+        peak = full.abs().max().item()
+        if peak > HEADROOM:
+            full = full * (HEADROOM / peak)
+        torchaudio.save(path, full, model.sr)
+        rtf = dt / dur if dur else float("inf")
+        log(f"{os.path.basename(path)}: {dur:.1f}s audio in {dt:.0f}s "
+            f"(RTF {rtf:.1f}, {len(chunks)} chunk)")
+        results.append({"out": path, "chars": len(text), "chunks": len(chunks),
+                        "audio_s": round(dur, 2), "synth_s": round(dt, 1),
+                        "rtf": round(rtf, 2)})
+    return {"device": device, "load_s": round(load_s, 1), "items": results}
+
+
+def main():
+    p = argparse.ArgumentParser(
+        description="Chatterbox Multilingual TTS with voice cloning, arbitrated "
+                    "against llama.cpp when it needs the GPU.")
+    p.add_argument("text", nargs="?", help="what to say ('-' reads stdin)")
+    p.add_argument("-o", "--out", default="chatterbox-out.wav", help="output WAV")
+    p.add_argument("-f", "--text-file", metavar="FILE", help="read the text from FILE")
+    p.add_argument("--textdir", metavar="DIR",
+                   help="one WAV per .txt in DIR, named after it; the model is "
+                        "loaded once for the whole folder")
+    p.add_argument("--batch", metavar="FILE",
+                   help="file of phrases, one per line, optionally 'name<TAB>text'")
+    p.add_argument("--outdir", help="where --textdir/--batch write their WAVs")
+    p.add_argument("--limit", type=int, default=0,
+                   help="with --textdir, only the first N files (to try one out)")
+    p.add_argument("--skip-existing", action="store_true",
+                   help="leave alone outputs that already exist (resume a long batch)")
+    p.add_argument("-v", "--voice", metavar="WAV",
+                   help="reference audio to clone (6-20 seconds of clean speech)")
+    p.add_argument("-l", "--lang", default="it", help="language id (default: it)")
+    p.add_argument("-d", "--device", choices=("auto", "cpu", "xpu"), default="cpu",
+                   help="cpu (default, touches nothing) or xpu (stops llama.service)")
+    p.add_argument("--threads", type=int, default=0,
+                   help="torch threads on CPU (default: let torch decide)")
+    p.add_argument("--max-chars", type=int, default=280,
+                   help="longest chunk handed to the model (default: 280)")
+    p.add_argument("--gap", type=float, default=0.35,
+                   help="seconds of silence between chunks (default: 0.35)")
+    p.add_argument("--pron", metavar="TSV",
+                   help="pronunciation lexicon, 'word<TAB>respelling' per line, "
+                        "applied whole-word before synthesis (Martel -> Màrtel)")
+    p.add_argument("--exaggeration", type=float, help="emotion intensity (0.5 default)")
+    p.add_argument("--cfg", type=float, help="cfg/pace weight (0.5 default)")
+    p.add_argument("--keep-llama", action="store_true",
+                   help="with --device xpu, do NOT stop llama.service (expect an OOM)")
+    p.add_argument("--play", action="store_true", help="play the result when done")
+    p.add_argument("--json", action="store_true", help="print a JSON report on stdout")
+    args = p.parse_args()
+
+    if args.voice and not os.path.isfile(args.voice):
+        sys.exit(f"ERROR: reference audio not found: {args.voice}")
+
+    os.environ.setdefault("HF_HOME", os.path.join(PREFIX, "hf"))
+    os.environ.setdefault("TMPDIR", os.path.join(PREFIX, "tmp"))
+
+    device = pick_device(args.device)
+    jobs = jobs_from_args(args)
+    if args.skip_existing:
+        done = [out for out, _ in jobs if os.path.exists(out)]
+        jobs = [(out, text) for out, text in jobs if out not in done]
+        for out in done:
+            log(f"skip {os.path.basename(out)}: already there")
+        if not jobs:
+            log("nothing to do")
+            return
+
+    lock = guardian = None
+    stopped_llama = False
+    try:
+        if device == "xpu" and not args.keep_llama:
+            lock = acquire_lock()
+            if unit_active(LLM_UNIT):
+                log(f"stopping {LLM_UNIT}: the Arc cannot hold both")
+                guardian = spawn_guardian()
+                sysctl("stop", LLM_UNIT)
+                stopped_llama = True
+        report = synthesise(args, device, jobs)
+    finally:
+        if guardian:
+            guardian.terminate()
+        if stopped_llama:
+            log(f"restarting {LLM_UNIT}")
+            sysctl("start", LLM_UNIT)
+            if not wait_http(LLM_READY, START_TIMEOUT):
+                log(f"WARNING: {LLM_UNIT} not healthy after {START_TIMEOUT}s — "
+                    f"check journalctl --user -u {LLM_UNIT}")
+        if lock is not None:
+            os.close(lock)
+
+    if args.play:
+        for item in report["items"]:
+            for player in (["paplay"], ["aplay", "-q"]):
+                if subprocess.run(["which", player[0]], capture_output=True).returncode == 0:
+                    subprocess.run(player + [item["out"]])
+                    break
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+    else:
+        for item in report["items"]:
+            print(item["out"])
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
