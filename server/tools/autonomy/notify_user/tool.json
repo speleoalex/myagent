@@ -7,7 +7,7 @@
     "properties": {
       "text": {
         "type": "string",
-        "description": "The message to send"
+        "description": "The message to send. Markdown (bold, lists, tables, links) is fine: email renders it as formatted HTML."
       },
       "to": {
         "type": "string",
@@ -26,7 +26,7 @@
         "items": {
           "type": "string"
         },
-        "description": "Optional files to send along, by the name they have in the workspace. Max 5, 15 MB each."
+        "description": "Optional files to send along: a file's name in the workspace, or the http(s) address of a file (a PDF, an image), which is downloaded and attached. A web page is not a file: put its link in the text. Max 5, 15 MB each."
       }
     },
     "required": [

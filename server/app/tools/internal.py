@@ -3,10 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 import mimetypes
 import re
+import socket
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import datetime, timedelta
+from email.message import Message
 from pathlib import Path
 
 # Module-level on purpose (no import cycle: executor -> registry, and neither
@@ -503,6 +510,19 @@ def _resolve_configured(state, raw, channel: str, binding_id: str):
 MAX_NOTIFY_FILES = 5
 MAX_NOTIFY_FILE_BYTES = 15 * 1024 * 1024
 
+# A text that tells the reader a file is attached. Observed 2026-11-05: the
+# model wrote "In allegato trovi il rilievo", passed attachments=[] (it had no
+# file), and the mail went out promising one. Refused BEFORE sending, so the
+# model either attaches it or rewords — and only the affirmative phrasings:
+# "non ho potuto allegare" or "senza allegati" must not trip it, or the model
+# could not even explain that the file is missing.
+_CLAIMS_ATTACHMENT = re.compile(
+    r"\bin allegato\b|\b(?:ti |vi |le |gli )?allego\b|\btrovi(?:te)? allegat|"
+    r"\b(?:please )?(?:find|see) (?:the )?attached\b|\battached (?:is|are|you|please)\b|"
+    r"\bI(?:'ve| have) attached\b|\bin attachment\b|\bas an attachment\b|"
+    r"\bci-joint\b|\ben pi[eè]ce jointe\b|\banbei\b|\bim anhang\b|\badjunto\b",
+    re.IGNORECASE)
+
 
 def _split_paths(raw) -> list[str]:
     """The ``attachments`` argument as a list of path strings.
@@ -541,6 +561,153 @@ def _notify_roots(executor) -> list[Path]:
     return [r.resolve() for r in roots]
 
 
+# --- attachments given as a URL -------------------------------------------
+# Born 2026-11-05 on the catasto mailbox: asked to "mail a cave's survey", the
+# agent had the PDF sheet's address (pdf_url, from the catasto MCP) and no way
+# to turn it into a file — no download tool, and attachments took workspace
+# names only. It sent the mail without it, writing "in allegato trovi il
+# rilievo". An http(s) URL in ``attachments`` is now downloaded and attached.
+_URL_ATTACHMENT = re.compile(r"^https?://", re.I)
+URL_FETCH_TIMEOUT = 20      # seconds per socket operation
+URL_FETCH_DEADLINE = 60     # seconds for the whole download
+# Tests serve their files from 127.0.0.1; nothing else may turn this on.
+_ALLOW_PRIVATE_URLS = False
+
+
+class _UrlRefused(urllib.error.URLError):
+    """A URL (or a redirect hop) that points somewhere it must not."""
+
+
+def _url_problem(url: str) -> str:
+    """Why ``url`` may not be fetched, or "".
+
+    Only public addresses. The URL is model-written, and the model may be
+    answering a stranger's mail: "attach http://192.168.1.1/backup" would
+    otherwise mail out whatever the server can reach on its own network —
+    files an agent without http_request could never read before this
+    existed. Every redirect hop is checked again (_CheckedRedirect). What is
+    NOT covered: a DNS answer that changes between this check and the
+    connection (rebinding); the window is one lookup wide."""
+    parts = urllib.parse.urlsplit(url)
+    if parts.scheme.lower() not in ("http", "https") or not parts.hostname:
+        return "only http and https addresses can be attached"
+    if _ALLOW_PRIVATE_URLS:
+        return ""
+    try:
+        infos = socket.getaddrinfo(parts.hostname, parts.port or None,
+                                   proto=socket.IPPROTO_TCP)
+    except (socket.gaierror, UnicodeError, ValueError):
+        return f"host {parts.hostname} not found"
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(str(info[4][0]).split("%", 1)[0])
+        except ValueError:
+            return f"host {parts.hostname} has an unusable address"
+        if not ip.is_global:
+            return f"{parts.hostname} is a local or private address"
+    return ""
+
+
+class _CheckedRedirect(urllib.request.HTTPRedirectHandler):
+    max_redirections = 5
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        problem = _url_problem(newurl)
+        if problem:
+            raise _UrlRefused(f"redirected to a refused address ({problem})")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _url_was_given(url: str, executor) -> bool:
+    """Whether the model was GIVEN this address — by a tool result, the user,
+    the history — rather than composing it. Observed 2026-11-05: asked for a
+    cave's PDF sheet, the model copied the pattern of other records' pdf_url
+    with the cadastral number (571) in place of the id (575), and the mail
+    carried the sheet of another cave; the download succeeded, so nothing
+    else could have caught it. A caller with no turn record (no
+    ``saw_text``) is not checked: there is nothing to check against."""
+    saw = getattr(executor, "saw_text", None)
+    return True if saw is None else bool(saw(url))
+
+
+def _attachment_name(headers, url: str, mime: str) -> str:
+    """The file name a download gets: the server's (Content-Disposition), else
+    the last segment of the address, with an extension from the type when it
+    has none — ``.../caves/view/1/?export_pdf=1`` is "1.pdf", not "1"."""
+    name = ""
+    disposition = headers.get("Content-Disposition") if headers else None
+    if disposition:
+        holder = Message()
+        holder["Content-Disposition"] = disposition
+        name = holder.get_filename() or ""
+    if not name:
+        path = urllib.parse.urlsplit(url).path.rstrip("/")
+        name = urllib.parse.unquote(path.rsplit("/", 1)[-1])
+    name = name.replace("\\", "/").rsplit("/", 1)[-1]
+    name = re.sub(r'[\x00-\x1f<>:"|?*]+', "_", name).strip(" .")[:120] or "download"
+    if not Path(name).suffix and mime:
+        name += mimetypes.guess_extension(mime) or ""
+    return name
+
+
+def _fetch_attachment(url: str) -> tuple[tuple[str, bytes, str] | None, str]:
+    """Download one attachment: ``((name, bytes, mime), "")`` or ``(None, why)``.
+
+    Blocking (urllib): the handler runs the whole resolution in a thread. A web
+    PAGE is refused rather than attached — asked for "the sheet", a model hands
+    over the record's page as readily as its PDF, and a mail carrying the
+    site's HTML source is worse than one carrying the link."""
+    def refused(why: str):
+        return None, f"'{url}' not attached: {why}"
+
+    problem = _url_problem(url)
+    if problem:
+        return refused(problem)
+    request = urllib.request.Request(url, headers={
+        "User-Agent": "MyAgent (notify_user attachment)", "Accept": "*/*"})
+    opener = urllib.request.build_opener(_CheckedRedirect)
+    deadline = time.monotonic() + URL_FETCH_DEADLINE
+    try:
+        with opener.open(request, timeout=URL_FETCH_TIMEOUT) as resp:
+            mime = resp.headers.get_content_type() if resp.headers.get("Content-Type") else ""
+            if mime in ("text/html", "application/xhtml+xml"):
+                # Observed 2026-11-05: the model built
+                # .../uploads/survey/Priamara2021.png out of a stored file
+                # name, and the site answered with its "not found" page. Saying
+                # "link it instead" would have mailed that broken address.
+                return refused("it is a web page, not a file. Attach only a file "
+                               "address a tool gave you, never one built by hand; "
+                               "a page you were given can go in the text as a link")
+            declared = resp.headers.get("Content-Length")
+            if declared and declared.isdigit() and int(declared) > MAX_NOTIFY_FILE_BYTES:
+                return refused(f"larger than {MAX_NOTIFY_FILE_BYTES // (1024 * 1024)} MB")
+            chunks, size = [], 0
+            while True:
+                if time.monotonic() > deadline:
+                    return refused(f"download took longer than {URL_FETCH_DEADLINE} s")
+                chunk = resp.read(64 * 1024)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > MAX_NOTIFY_FILE_BYTES:
+                    return refused(f"larger than {MAX_NOTIFY_FILE_BYTES // (1024 * 1024)} MB")
+                chunks.append(chunk)
+            name = _attachment_name(resp.headers, resp.geturl() or url, mime)
+    except _UrlRefused as e:
+        return refused(str(e.reason))
+    except urllib.error.HTTPError as e:
+        return refused(f"the server answered HTTP {e.code}")
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        reason = getattr(e, "reason", None) or e
+        return refused(f"cannot download it ({type(reason).__name__}: {reason})"[:200])
+    data = b"".join(chunks)
+    if not data:
+        return refused("the server sent an empty file")
+    if not mime or mime == "application/octet-stream":
+        mime = mimetypes.guess_type(name)[0] or "application/octet-stream"
+    return (name, data, mime), ""
+
+
 def _resolve_notify_files(raw, executor) -> tuple[list[tuple[str, bytes, str]], list[str]]:
     """Turn the ``attachments`` argument into ``(name, bytes, mime)`` triples.
 
@@ -550,12 +717,29 @@ def _resolve_notify_files(raw, executor) -> tuple[list[tuple[str, bytes, str]], 
     opposite. Relative paths resolve against the workspace (the tools' cwd, so
     the model's relative paths mean the same thing here as there); absolute
     paths and ``~`` are accepted as file_write prints them, provided they
-    resolve inside one of :func:`_notify_roots`."""
+    resolve inside one of :func:`_notify_roots`. An http(s) URL is downloaded
+    (:func:`_fetch_attachment`) — which blocks, so the handler calls this in a
+    thread."""
     files, problems = [], []
     roots = _notify_roots(executor)
     for one in _split_paths(raw):
         if len(files) >= MAX_NOTIFY_FILES:
             problems.append(f"'{one}' not attached: at most {MAX_NOTIFY_FILES} files per notification")
+            continue
+        if _URL_ATTACHMENT.match(one):
+            if not _url_was_given(one, executor):
+                problems.append(
+                    f"'{one}' not attached: this address is not in anything a tool "
+                    "returned or the user wrote in this conversation. An address "
+                    "built by hand leads to the wrong file or to none: get the "
+                    "file's address from the tool (a link line of the record, such "
+                    "as pdf_url) and pass it exactly as returned")
+                continue
+            got, problem = _fetch_attachment(one)
+            if got is None:
+                problems.append(problem)
+            else:
+                files.append(got)
             continue
         candidate = Path(one).expanduser()
         if not candidate.is_absolute():
@@ -651,9 +835,17 @@ async def notify_user_handler(
     # on its own, and nothing should reach the recipient before it is settled —
     # with several attachments and one bad path, the good ones are still sent
     # and the bad one is named in the result.
-    files, file_problems = _resolve_notify_files(attachments, executor)
+    files, file_problems = await asyncio.to_thread(_resolve_notify_files, attachments, executor)
     if file_problems and not files and _split_paths(attachments):
         return "ERROR: " + "; ".join(file_problems)
+    if not files:
+        claim = _CLAIMS_ATTACHMENT.search(f"{subject}\n{text}")
+        if claim:
+            return (f"ERROR: nothing was sent. The text says a file is attached "
+                    f"(\"{claim.group(0)}\") but 'attachments' has none. Pass the "
+                    "file in 'attachments' — its name in the workspace, or the "
+                    "http(s) address of the file (a PDF link, an image) — or "
+                    "rewrite the text without promising an attachment.")
     cfg = getattr(getattr(executor, "agent", None), "autonomous", None)
     binding_id = _or_configured(binding_id, cfg and cfg.notify_binding_id)
     to = _or_configured(to, "")

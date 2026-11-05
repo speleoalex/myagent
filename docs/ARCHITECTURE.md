@@ -544,7 +544,11 @@ stays idle whether it is live or not.
   a clear error when the plugin is not installed. The reply text of a wake is only
   logged. A notification may also carry a ``subject`` and ``attachments``: the
   core resolves the paths (workspace or the agent's folder, containment
-  re-checked, 5 files of 15 MB at most) and reads the bytes; the connector's
+  re-checked, 5 files of 15 MB at most) and reads the bytes — or downloads an
+  http(s) URL (public addresses only, every redirect hop re-checked; a web
+  page is refused with "link it instead"). A text that promises an
+  attachment ("in allegato", "please find attached") with none is refused
+  before anything is sent. The connector's
   ``notify(chat_id, text, subject, files)`` decides how they render (the base
   class folds the subject into the first line and uploads each file through
   ``send_file``; mail overrides it with a Subject header and MIME attachments).

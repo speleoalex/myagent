@@ -60,7 +60,9 @@ MCP server, which is a different thing (MyAgent has those too, under *MCP*).
   autonomous one) start a conversation. It both delivers the message and appends
   it to that chat's own history, so the agent remembers having said it. A
   notification can carry a **subject** and **attachments** (files from the
-  workspace, max 5 of 15 MB): each channel renders them its own way — Telegram
+  workspace, or the http(s) address of a file, which is downloaded — public
+  addresses only, never a web page; max 5 of 15 MB): each channel renders
+  them its own way — Telegram
   puts the subject on the first line and uploads each file (photos inline,
   anything else as a document), email sends **one** mail with that Subject and
   the files attached, a voice satellite speaks the text and reports the files

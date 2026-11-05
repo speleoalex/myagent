@@ -286,6 +286,17 @@ class AgentExecutor:
         # level down: a `tool` message never survives into conversation[], so
         # without this the model answers a follow-up from its own past PROSE.
         self._tool_results: list[dict] = []
+        # Every text THIS turn has put in front of the model — system prompt
+        # (previous tool results and delegations included), the history's user
+        # messages, the user's message, each tool result as it arrives — but
+        # never the model's own replies; kept by reference,
+        # not copied. Read through saw_text(): notify_user downloads an
+        # attachment URL only if it appears here. Observed 2026-11-05: asked
+        # for a cave's PDF sheet, the model composed the address from the
+        # pattern of other records with the cadastral number in place of the
+        # id, and mailed the sheet of a DIFFERENT cave. A text that was never
+        # shown cannot be "given", whatever later demotion does to messages.
+        self.seen_texts: list[str] = []
         # Turn-scoped system-prompt suffix (memory digest + findings +
         # attachments manifest), re-appended when the no-tools fallback
         # rebuilds the prompt.
@@ -1058,6 +1069,15 @@ class AgentExecutor:
             self.activate_tool_categories(needed)
             self._debug_log(f"  LAZY autoload for {tool_id}: {', '.join(needed)}")
         return needed
+
+    def saw_text(self, needle: str) -> bool:
+        """Whether ``needle`` appeared verbatim in something this turn showed
+        the model (see ``seen_texts``). An ``&`` in a URL is also matched in its
+        HTML-escaped form, as an address copied out of markup carries it."""
+        if not needle:
+            return False
+        variants = {needle, needle.replace("&", "&amp;")}
+        return any(v in t for t in self.seen_texts for v in variants)
 
     @staticmethod
     def _flatten_content(content):
@@ -1923,6 +1943,10 @@ class AgentExecutor:
 
         # New user message (with attachments folded in / images as content parts)
         messages.append({"role": "user", "content": self._build_user_content(user_message, attachments)})
+        # The model's own earlier prose is not a source: an address it once
+        # composed would otherwise count as given in every later turn.
+        self.seen_texts = [str(self._flatten_content(m.get("content")) or "")
+                           for m in messages if m.get("role") != "assistant"]
         # Boundary between injected history and messages produced THIS turn. The
         # final-reply search must not reach back into a prior turn's answer, or
         # an LLM failure would silently echo the previous reply.
@@ -2305,6 +2329,7 @@ class AgentExecutor:
                 # is consumed in the same order it was produced. The SSE/
                 # tool_results summary is a projection of the same step —
                 # single source of truth.
+                self.seen_texts.append(result)
                 step = self._make_step(func_name, func_args, result,
                                        resources=step_resources)
                 trace_steps.append(step)

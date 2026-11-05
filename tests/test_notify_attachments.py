@@ -18,15 +18,23 @@ against fakes (no plugin, no transport, temporary workspace):
   * a connector WITHOUT ``notify`` (older plugin) still gets the message, with
     the subject folded into the text, and the files reported as not delivered;
   * the chat history records what was said: subject first, then the text,
-    then the names of the files that arrived.
+    then the names of the files that arrived;
+  * an http(s) URL is downloaded and attached (named by Content-Disposition,
+    by the path, by the type), but never from a private address — redirect
+    hops included — never a web page, never past the size cap;
+  * a text that PROMISES an attachment ("in allegato", "please find
+    attached") with none is refused before anything is sent, while a text
+    saying there is none ("non ho potuto allegare") goes out.
 
 Run:  server/.venv/bin/python tests/test_notify_attachments.py
 """
 import asyncio
+import http.server
 import os
 import shutil
 import sys
 import tempfile
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -276,6 +284,152 @@ async def test_handler():
           "history does not claim a file that never left")
 
 
+class _Files(http.server.BaseHTTPRequestHandler):
+    """The web the URL attachments are fetched from, on 127.0.0.1."""
+
+    def do_GET(self):
+        path = self.path.split("?", 1)[0]
+        if path == "/caves/view/1/":
+            body = b"%PDF-1.4 the sheet"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/pdf")
+            self.send_header("Content-Disposition",
+                             'inline; filename="scheda_catastale_0001.pdf";')
+        elif path == "/img/rilievo.png":
+            body = b"\x89PNG fake"
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+        elif path == "/noname/7/":
+            body = b"%PDF-1.4 nameless"
+            self.send_response(200)
+            self.send_header("Content-Type", "application/pdf")
+        elif path == "/page":
+            body = b"<html><body>a page</body></html>"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+        elif path == "/big":
+            body = b"x" * 4096
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+        elif path == "/to-secret":
+            body = b""
+            self.send_response(302)
+            self.send_header("Location", f"http://127.0.0.1:{self.server.server_port}/secret")
+        else:
+            body = b"nope"
+            self.send_response(404)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+def test_url_attachments():
+    print("Attachments given as a URL:")
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Files)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    rf = internal._resolve_notify_files
+    try:
+        files, problems = rf([f"{base}/caves/view/1/?export_pdf=1&format=pdf"], executor())
+        check(problems and "local or private" in problems[0] and not files,
+              f"a private address is refused by default: {problems}")
+
+        internal._ALLOW_PRIVATE_URLS = True
+        files, problems = rf([f"{base}/caves/view/1/?export_pdf=1&format=pdf",
+                              f"{base}/img/rilievo.png", f"{base}/noname/7/?x=1"], executor())
+        check(not problems and [f[0] for f in files]
+              == ["scheda_catastale_0001.pdf", "rilievo.png", "7.pdf"],
+              f"named by Content-Disposition, by the path, by the type: {[f[0] for f in files]}")
+        check(files[0][1] == b"%PDF-1.4 the sheet" and files[0][2] == "application/pdf"
+              and files[1][2] == "image/png", "bytes and mime from the response")
+
+        files, problems = rf([f"{base}/page"], executor())
+        check(not files and "web page" in problems[0] and "link" in problems[0],
+              "an HTML page is refused, with the advice to link it")
+        files, problems = rf([f"{base}/missing.pdf"], executor())
+        check(not files and "HTTP 404" in problems[0], "an HTTP error is named")
+        files, problems = rf(["ftp://example.org/a.pdf"], executor())
+        check(not files and problems and "no such file" in problems[0],
+              "ftp:// is not a URL attachment (and not a workspace file either)")
+
+        cap = internal.MAX_NOTIFY_FILE_BYTES
+        internal.MAX_NOTIFY_FILE_BYTES = 1000
+        try:
+            files, problems = rf([f"{base}/big"], executor())
+            check(not files and "larger than" in problems[0], "the size cap holds for downloads")
+        finally:
+            internal.MAX_NOTIFY_FILE_BYTES = cap
+
+        # Redirect hops are checked again: allow the server, refuse /secret.
+        internal._ALLOW_PRIVATE_URLS = False
+        orig = internal._url_problem
+        internal._url_problem = lambda u: "a private address" if "/secret" in u else ""
+        try:
+            files, problems = rf([f"{base}/to-secret"], executor())
+            check(not files and "redirected to a refused address" in problems[0],
+                  f"a redirect to a refused address is refused: {problems}")
+        finally:
+            internal._url_problem = orig
+
+        internal._ALLOW_PRIVATE_URLS = True
+        files, problems = rf(["report.pdf", f"{base}/img/rilievo.png"], executor())
+        check([f[0] for f in files] == ["report.pdf", "rilievo.png"] and not problems,
+              "workspace files and URLs mix in one call")
+
+        # Provenance: only an address the turn was GIVEN is downloaded. The
+        # real AgentExecutor.saw_text, on a stand-in holding seen_texts.
+        from app.engine.executor import AgentExecutor
+        given = f"{base}/caves/view/1/?export_pdf=1&format=pdf"
+        turn = SimpleNamespace(
+            agent=executor().agent,
+            seen_texts=[f"code,LI1\npdf_url,{given}\n",
+                        f'<a href="{base}/img/rilievo.png?a=1&amp;b=2">x</a>'])
+        turn.saw_text = lambda needle: AgentExecutor.saw_text(turn, needle)
+        built = f"{base}/caves/view/571/?export_pdf=1&format=pdf"
+        files, problems = rf([given, built], turn)
+        check([f[0] for f in files] == ["scheda_catastale_0001.pdf"]
+              and len(problems) == 1 and built in problems[0]
+              and "built by hand" in problems[0] and "pdf_url" in problems[0],
+              "an address no tool returned is refused, the given one goes")
+        check(turn.saw_text(f"{base}/img/rilievo.png?a=1&b=2"),
+              "an address quoted in markup (&amp;) counts as given")
+        check(not AgentExecutor.saw_text(SimpleNamespace(seen_texts=[]), given),
+              "an empty turn record gives nothing")
+    finally:
+        internal._ALLOW_PRIVATE_URLS = False
+        server.shutdown()
+
+
+async def test_attachment_claim():
+    print("A text that promises an attachment:")
+    named = FakeNamed()
+
+    async def send(text, attachments=None, subject=""):
+        conn = FakeConnector()
+        out = await internal.notify_user_handler(
+            text=text, subject=subject, attachments=attachments, binding_id="tg",
+            chat_id="42", executor=executor(), _named=named, _state=state_for(conn))
+        return out, conn.calls
+
+    out, calls = await send("Ciao,\n\nin allegato trovi il rilievo della grotta.")
+    check(out.startswith("ERROR") and "in allegato" in out and "http(s)" in out and not calls,
+          "'in allegato' with no file: ERROR naming the phrase, nothing sent")
+    out, calls = await send("Please find attached the report.")
+    check(out.startswith("ERROR") and not calls, "English phrasing caught too")
+    out, calls = await send("Dettagli", subject="Ti allego la scheda")
+    check(out.startswith("ERROR") and not calls, "a promise in the subject counts")
+    out, calls = await send("In allegato la scheda.", attachments=["report.pdf"])
+    check(not out.startswith("ERROR") and calls, "the same text WITH a file goes out")
+    for text in ("Non ho potuto allegare il file: ecco il link.",
+                 "Il rilievo non ha file allegati nel catasto.",
+                 "Nessun allegato disponibile, trovi la scheda qui: https://x.it/1"):
+        out, calls = await send(text)
+        check(not out.startswith("ERROR") and calls, f"not a promise: {text[:40]!r}")
+
+
 def test_schema():
     print("Tool schema:")
     import json
@@ -292,6 +446,8 @@ try:
     test_split_paths()
     test_resolve()
     asyncio.run(test_handler())
+    test_url_attachments()
+    asyncio.run(test_attachment_claim())
     test_schema()
 finally:
     shutil.rmtree(HOME, ignore_errors=True)
