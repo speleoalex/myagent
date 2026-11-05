@@ -162,8 +162,14 @@ def test_parsing():
 
     p = mail.parse_inbound(RAW_HTML, {"bot@myagent.test"})
     check(p.get("text") == "Mandami il report di ieri, grazie & ciao",
-          f"HTML rendered to text, style dropped, English quote marker cut: {p.get('text')!r}")
-    check(not p["text"].startswith("Report"), "a 'Re:' subject is NOT prepended")
+          f"HTML rendered to text, style dropped, English quote marker cut, "
+          f"a subject the body already says not repeated: {p.get('text')!r}")
+    raw = RAW_HTML.replace(b"Subject: Re: Report",
+                           b"Subject: Re: Test - rilievo Grotta Priamara (LI571)")
+    text = mail.parse_inbound(raw, set())["text"]
+    check(text == "[Subject: Re: Test - rilievo Grotta Priamara (LI571)]\n"
+                  "Mandami il report di ieri, grazie & ciao",
+          f"a 'Re:' subject says which mail is answered, marked as context: {text!r}")
     check(p["references"] == ["<r0@example.com>", "<h1@example.com>"], "References chain kept")
 
     # Outlook-style block and Italian wrapped marker
@@ -734,6 +740,72 @@ async def test_html_body():
         mail.smtp_send = orig_send
 
 
+async def test_markdown_body():
+    """What models write is Markdown, and a mail client shows it as source:
+    observed 2026-11-05, a cave sheet arrived as ``**Numero catastale:**``.
+    Rendered to HTML now, with the source as the text/plain twin; and every
+    part of a reply is judged on its own, so the AI disclosure in front of an
+    HTML answer no longer turns that answer back into tag soup."""
+    print("Markdown body:")
+    md_text = ("La scheda della **Grotta della Redarca**:\n\n"
+               "- **Quota:** 253 m\n- **Coordinate:**\n  - 44°04′35.0″ N\n\n"
+               "PDF: https://x.it/view/1/?export_pdf=1&format=pdf")
+    plain, rich = mail.compose_body([md_text])
+    check(plain == md_text, "text/plain twin is the Markdown source")
+    check(rich is not None and rich.startswith("<!DOCTYPE html>")
+          and "<strong>Grotta della Redarca</strong>" in rich and rich.count("<ul") == 2
+          and 'href="https://x.it/view/1/?export_pdf=1&amp;format=pdf"' in rich,
+          "text/html is the rendering: strong, nested list, link")
+
+    plain, rich = mail.compose_body(["Ciao, report di oggi.", "Saluti"])
+    check(rich is None and plain == "Ciao, report di oggi.\n\nSaluti",
+          "only prose: no HTML part, parts joined by a blank line")
+    check(mail.compose_body([]) == ("(no reply)", None)
+          and mail.compose_body(["", "  "]) == ("(no reply)", None),
+          "nothing to say: the placeholder, as before")
+
+    disclosure = "🤖 Sono un assistente AI: le risposte sono generate automaticamente."
+    html_doc = "<html><head><style>p{}</style></head><body><h2>Report</h2><p>ok</p></body></html>"
+    plain, rich = mail.compose_body([disclosure, html_doc])
+    check(rich is not None and "<h2>Report</h2>" in rich and "&lt;h2&gt;" not in rich
+          and "<p>🤖 Sono un assistente AI" in rich and rich.count("<body") == 1,
+          "disclosure + HTML answer: one document, the answer's body inside it")
+    check(plain.startswith(disclosure) and "<h2>" not in plain and "Report" in plain,
+          "…and the plain twin has the disclosure then the rendered answer")
+
+    mail.smtp_send, orig_send = FakeSMTP.send, mail.smtp_send
+    try:
+        FakeSMTP.sent.clear()
+        conn = make(binding(id="mailbot5"))
+        ok, lost = await conn.notify("mario@example.com", md_text, subject="Scheda",
+                                     files=[("scheda.pdf", b"%PDF-1.4", "application/pdf")])
+        _, _, msg = FakeSMTP.sent[0]
+        check(ok and msg.get_content_type() == "multipart/mixed",
+              f"Markdown + attachment: multipart/mixed ({msg.get_content_type()})")
+        html_part = msg.get_body(preferencelist=("html",))
+        plain_part = msg.get_body(preferencelist=("plain",))
+        check(html_part is not None and "<strong>" in html_part.get_content()
+              and plain_part is not None and "**Quota:**" in plain_part.get_content(),
+              "HTML rendering and Markdown source travel together")
+        check([a.get_filename() for a in msg.iter_attachments()] == ["scheda.pdf"],
+              "the attachment rides along")
+
+        # A reply buffered from several sends: each part judged on its own.
+        FakeSMTP.sent.clear()
+        conn._pending["mario@example.com"] = mail._Pending()
+        await conn.send("mario@example.com", disclosure)
+        await conn.send("mario@example.com", md_text)
+        pending = conn._pending.pop("mario@example.com")
+        await conn._compose_and_send("mario@example.com", pending.texts, pending.files)
+        _, _, msg = FakeSMTP.sent[0]
+        html_part = msg.get_body(preferencelist=("html",))
+        check(html_part is not None and "Sono un assistente AI" in html_part.get_content()
+              and "<strong>Quota:</strong>" in html_part.get_content(),
+              "a buffered reply (disclosure + Markdown answer) is ONE HTML mail")
+    finally:
+        mail.smtp_send = orig_send
+
+
 async def main():
     await test_base_notify()
     test_parsing()
@@ -743,6 +815,7 @@ async def main():
     await test_pipeline_and_reply()
     await test_notify()
     await test_html_body()
+    await test_markdown_body()
     await test_verify()
     test_address_book()
 

@@ -23,6 +23,9 @@ How a conversation maps onto the shared pipeline:
   experience that makes people stop writing to a bot. An unsolicited
   ``notify_user`` WITH a subject is the one exception: it is a new mail under
   that subject, in a thread of its own (``notify`` / ``_build_reply``).
+* **A body is sent the way it was written** (``compose_body``): Markdown — what
+  models write — as HTML rendered by ``markdown_html`` with the source as the
+  text/plain twin, HTML as HTML, prose as a single text/plain part.
 * **Loops are the failure mode of mail.** Two auto-responders facing each
   other, a vacation notice, a bounce quoting our own reply: each is a message
   from a machine that would earn a fresh agent turn and another machine
@@ -70,7 +73,7 @@ from pathlib import Path
 
 from app.storage.store import JsonStore
 
-from myagent_connectors import config
+from myagent_connectors import config, markdown_html
 from myagent_connectors.channels.base import (BaseConnector, Unreachable,
                                              redact)
 
@@ -284,6 +287,51 @@ def looks_like_html(text: str) -> bool:
     return bool(_RE_HTML_OPEN.match(body) and _RE_HTML_CLOSE.search(body))
 
 
+def _html_fragment(markup: str) -> str:
+    """The content of an HTML document, to sit beside other parts in ONE body:
+    what is inside ``<body>``, or the markup minus its document wrapper."""
+    m = re.search(r"<body\b[^>]*>(.*?)(?:</body\s*>|\Z)", markup, re.I | re.S)
+    if m:
+        return m.group(1).strip()
+    return re.sub(r"<!doctype[^>]*>|</?html\b[^>]*>|<head\b.*?</head\s*>", "",
+                  markup, flags=re.I | re.S).strip()
+
+
+def compose_body(parts: list[str]) -> tuple[str, str | None]:
+    """The body of one outgoing mail: ``(text/plain, text/html or None)``.
+
+    ``parts`` are the texts the mail carries, in order \u2014 on a reply the AI
+    disclosure, then the answer, then whatever a notify_user inside the turn
+    added. Each is judged ON ITS OWN, because the judgement is about how it
+    was written: HTML (``looks_like_html``) travels as is, Markdown is
+    rendered (``markdown_html``), prose is escaped. Judging the joined text
+    instead got it wrong both ways: an HTML answer after the disclosure no
+    longer started with a tag, so its source went out as text.
+
+    No HTML at all \u2014 only prose \u2014 keeps the mail a single text/plain part, as
+    it always was. Otherwise the plain twin is each part's own readable form:
+    the Markdown source (it is meant to be read as text) and the HTML rendered
+    to text by the same ``html_to_text`` that reads the INBOUND mail."""
+    parts = [p for p in (parts or []) if p and p.strip()]
+    if not parts:
+        return "(no reply)", None
+    kinds = ["html" if looks_like_html(p)
+             else "md" if markdown_html.looks_like_markdown(p)
+             else "text" for p in parts]
+    if all(k == "text" for k in kinds):
+        return "\n\n".join(parts), None
+    plain = "\n\n".join((html_to_text(p) if k == "html" else p).strip()
+                        for p, k in zip(parts, kinds)) or "(no reply)"
+    if kinds == ["html"]:
+        # A document the agent wrote whole: verbatim, its own <head> included.
+        return plain, parts[0]
+    fragments = [_html_fragment(p) if k == "html"
+                 else markdown_html.render(p) if k == "md"
+                 else markdown_html.plain(p)
+                 for p, k in zip(parts, kinds)]
+    return plain, markdown_html.document("\n".join(fragments))
+
+
 def strip_quoted(text: str) -> str:
     """Drop the quoted history and signature from a reply, keep what the
     person typed. Cuts at the earliest marker, then removes ``>`` lines that
@@ -429,13 +477,20 @@ def parse_inbound(raw: bytes, own_addresses: set[str]) -> dict:
     subject = re.sub(r"\s+", " ", str(msg.get("Subject") or "")).strip()
     body = strip_quoted(message_body(msg))
     attachments, notes = extract_attachments(msg)
-    # The subject is part of what the person said — unless it is a "Re:" of
-    # an earlier exchange, where it only repeats the thread's title.
+    # The subject is part of what the person said. On a "Re:" / "Fwd:" it is
+    # not their words but it says WHICH mail they are answering, and the
+    # quoted history that would say so is stripped: it goes in as a marked
+    # line. It used to be dropped as "only the thread's title" — observed
+    # 2026-11-05: "puoi mandare l'allegato anche a Sylvia?", in reply to a
+    # mail the agent had sent from ANOTHER conversation, left the model
+    # guessing, and it forwarded the wrong file under the wrong title.
     topic = clean_subject(subject)
-    if topic and not is_reply_subject(subject) and topic.lower() not in body.lower():
-        text = f"{topic}\n\n{body}".strip()
-    else:
+    if not topic or topic.lower() in body.lower():
         text = body
+    elif is_reply_subject(subject):
+        text = f"[Subject: {subject}]\n{body}".strip()
+    else:
+        text = f"{topic}\n\n{body}".strip()
     refs = str(msg.get("References") or "").split()
     mid = str(msg.get("Message-ID") or "").strip()
     if mid and mid not in refs:
@@ -969,7 +1024,7 @@ class MailConnector(BaseConnector):
             _ANSWERING.reset(answering)
             pending = self._pending.pop(chat_id, None)
         if pending and (pending.texts or pending.files):
-            await self._compose_and_send(chat_id, "\n\n".join(pending.texts), pending.files)
+            await self._compose_and_send(chat_id, pending.texts, pending.files)
 
     # ------------------------------------------------------------ transport
     async def send(self, chat_id, text: str) -> bool:
@@ -1022,7 +1077,7 @@ class MailConnector(BaseConnector):
         ok = await self._compose_and_send(chat_id, text or "", files, subject=subject)
         return ok, ([] if ok else [name for name, _, _ in files])
 
-    def _build_reply(self, chat_id: str, text: str,
+    def _build_reply(self, chat_id: str, text: str | list[str],
                      files: list[tuple[str, bytes, str]],
                      subject: str = "") -> EmailMessage:
         """The outgoing message. Without ``subject`` it is a REPLY: ``Re:`` the
@@ -1030,7 +1085,10 @@ class MailConnector(BaseConnector):
         NEW mail under exactly that subject and deliberately NOT threaded — an
         ``In-Reply-To`` pointing at last week's question would file "Report
         di oggi" under "Domanda sulle grotte" in the reader's client, which is
-        the opposite of what a subject is for."""
+        the opposite of what a subject is for.
+
+        ``text`` is one body or the list of parts a turn buffered (see
+        ``compose_body`` for why they are not joined first)."""
         s = self.settings
         thread = {} if subject else (self._threads.get(chat_id) or {})
         msg = EmailMessage()
@@ -1052,16 +1110,12 @@ class MailConnector(BaseConnector):
         # is how two bots facing each other stop after one round.
         msg["Auto-Submitted"] = "auto-replied"
         msg["X-Auto-Response-Suppress"] = "All"
-        body = text or "(no reply)"
-        if looks_like_html(body):
-            # multipart/alternative, not a bare text/html part: a reader that
-            # refuses HTML (or a digest, or a screen reader) still gets the
-            # report, and html_to_text() is the same renderer that reads the
-            # INBOUND mail, so the fallback cannot drift from it.
-            msg.set_content(html_to_text(body) or "(no reply)")
-            msg.add_alternative(body, subtype="html")
-        else:
-            msg.set_content(body)
+        plain, rich = compose_body(text if isinstance(text, list) else [text])
+        # multipart/alternative, never a bare text/html part: a reader that
+        # refuses HTML (or a digest, or a screen reader) still gets the text.
+        msg.set_content(plain)
+        if rich:
+            msg.add_alternative(rich, subtype="html")
         for name, data, mime in files:
             maintype, _, subtype = (mime or "application/octet-stream").partition("/")
             if not subtype:
@@ -1069,7 +1123,7 @@ class MailConnector(BaseConnector):
             msg.add_attachment(data, maintype=maintype, subtype=subtype, filename=name)
         return msg
 
-    async def _compose_and_send(self, chat_id: str, text: str,
+    async def _compose_and_send(self, chat_id: str, text: str | list[str],
                                 files: list[tuple[str, bytes, str]],
                                 subject: str = "") -> bool:
         if not chat_id or "@" not in chat_id:
