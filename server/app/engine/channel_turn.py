@@ -13,6 +13,7 @@ import asyncio
 from app.models import ChatRequest, ChatResponse, ChatMessage
 from app.engine.agent_router import mark_foreign
 from app.engine.memory_compactor import cancel_compaction, schedule_compaction
+from app.storage.channel_sessions import holding
 from app.storage.sessions import (delegation_history, memory_context, record_turn,
                                   record_user_turn, steps_from, title_from,
                                   tool_history)
@@ -65,11 +66,15 @@ async def run_channel_turn(req: ChatRequest, named, executor) -> ChatResponse:
         if req.sender:
             model_message = f"[{req.sender}]\n{req.message}"
 
-        response = await executor.run(model_message, prior, attachments,
-                                      memory_context=memory_context(session),
-                                      transcribed=req.transcribed,
-                                      delegations=delegation_history(session),
-                                      tool_results=tool_history(session))
+        # Tell the code the turn runs that THIS session's lock is taken, so a
+        # notify_user to the person being answered does not wait on it (see
+        # app.storage.channel_sessions.holding).
+        with holding(named, sid):
+            response = await executor.run(model_message, prior, attachments,
+                                          memory_context=memory_context(session),
+                                          transcribed=req.transcribed,
+                                          delegations=delegation_history(session),
+                                          tool_results=tool_history(session))
 
         conv = [m.model_dump(exclude_none=True) for m in response.conversation]
         record_user_turn(session, req.message,

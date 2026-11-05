@@ -21,7 +21,10 @@ Pinned properties, each of which fails silently in production:
     the delivered files inside it;
   * a notify_user with a subject is ONE new mail under that Subject, with the
     files attached and NOT threaded; without a subject it behaves as send()
-    (a threaded reply, or buffered into the turn's single reply);
+    (a threaded reply, or buffered into the turn's single reply) — and so does
+    one WITH a subject called from inside the turn answering that address;
+  * a sender the allowlist refuses gets no mail at all, or a provider's
+    auto-responder and our refusal answer each other forever;
   * a body the agent wrote as HTML goes out as multipart/alternative with a
     rendered text twin, while prose stays a single text/plain part;
   * verify() maps a socket failure to Unreachable (the manager keeps
@@ -317,11 +320,25 @@ async def test_pipeline_and_reply():
         check(FakeSMTP.sent[0][2]["Subject"] == "Re: Domanda sulle grotte",
               "an inbound 'Re:' subject is not doubled")
 
-        # Not in the allowlist: nothing goes out, the agent is never called.
+        # Not in the allowlist: nothing goes out, the agent is never called —
+        # not even the "⛔ not authorized" a chat app gets. A fresh Message-ID:
+        # reusing q1 made this a duplicate, dropped before the allowlist was
+        # ever consulted, so the line passed while the refusal was being mailed.
         FakeSMTP.sent.clear()
         n = len(client.calls)
-        await conn._handle_raw("uid:12", RAW_PLAIN.replace(b"Mario@Example.com", b"Nobody@Else.org"))
+        await conn._handle_raw("uid:12", RAW_PLAIN.replace(b"Mario@Example.com", b"Nobody@Else.org")
+                               .replace(b"q1@", b"denied1@"))
         check(len(client.calls) == n and not FakeSMTP.sent, "unknown address: no turn, no mail")
+        # The loop of 2026-11-05: a provider's alert, then its auto-responder
+        # answering our refusal with no Auto-Submitted header. Silence ends it.
+        alert = (b"From: comunicazioni@staff.aruba.it\nTo: bot@myagent.test\n"
+                 b"Subject: Re: [External Sender] Re: Abbiamo rilevato accessi sospetti\n"
+                 b"Message-ID: <1793890061.199004.blah>\n"
+                 b"Content-Type: text/plain; charset=utf-8\n\n"
+                 b"questa e' una risposta automatica\n")
+        await conn._handle_raw("uid:13", alert)
+        check(len(client.calls) == n and not FakeSMTP.sent,
+              "an auto-responder without Auto-Submitted gets no refusal to answer")
 
         # Files delivered by the turn become attachments of the same mail.
         FakeSMTP.sent.clear()
@@ -584,11 +601,34 @@ async def test_notify():
         check(ok and not FakeSMTP.sent and pend.texts == ["nel frattempo"]
               and [f[0] for f in pend.files] == ["report.pdf"],
               "buffered into the turn's single reply, nothing sent yet")
-        # WITH a subject during a turn: its own mail, now.
+        # WITH a subject during a turn, called from OUTSIDE it (a scheduled
+        # report, another chat): its own mail, now.
         ok, lost = await conn.notify("mario@example.com", "a parte", subject="Altro")
         check(ok and len(FakeSMTP.sent) == 1 and FakeSMTP.sent[0][2]["Subject"] == "Altro",
               "an explicit subject during a turn goes out on its own")
         conn._pending.pop("mario@example.com")
+
+        # WITH a subject from INSIDE the turn answering that address — the
+        # model "sending the email" instead of replying (2026-11-05): ONE mail,
+        # the reply, threaded onto the question, carrying both texts.
+        class NotifyingClient(FakeClient):
+            async def chat(self, agent_id, message, session_id, **kw):
+                await conn4.notify("mario@example.com", "Nel catasto risultano 2435 grotte.",
+                                   subject="Richiesta")
+                return "Ecco la risposta.", []
+        FakeSMTP.sent.clear()
+        conn4 = make(binding(id="mailbot4", disclose_ai=False), client=NotifyingClient())
+        conn4._baselined = True
+        await conn4._handle_raw("uid:30", RAW_PLAIN.replace(b"q1@", b"inturn1@"))
+        check(len(FakeSMTP.sent) == 1, f"notify with subject inside the turn = ONE mail ({len(FakeSMTP.sent)})")
+        if FakeSMTP.sent:
+            msg = FakeSMTP.sent[0][2]
+            body = msg.get_body(preferencelist=("plain",)).get_content()
+            check(msg["Subject"] == "Re: Domanda sulle grotte"
+                  and msg["In-Reply-To"] == "<inturn1@example.com>",
+                  "…the threaded reply, not a new subject")
+            check("2435 grotte" in body and "Ecco la risposta." in body,
+                  "…carrying the notification AND the final answer")
 
         # Failure: the files are reported lost, not swallowed.
         def boom(settings, password, msg):

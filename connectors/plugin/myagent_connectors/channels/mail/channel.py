@@ -61,6 +61,7 @@ import poplib
 import re
 import smtplib
 import time
+from contextvars import ContextVar
 from datetime import datetime
 from email.message import EmailMessage
 from email.policy import default as default_policy
@@ -98,6 +99,13 @@ MAX_SEEN = 5000
 # Where the per-binding "already answered" state lives — under the plugin's
 # state root, beside grants/ and disclosed/, never inside the plugin folder.
 SEEN_DIR = config.STATE_DIR / "mail"
+
+# The address whose inbound mail the CURRENT task context is answering. Set
+# around process_message, so the agent turn it starts — and the notify_user a
+# model calls inside it — inherit it; any other caller (a scheduled report, a
+# web chat) sees None. See MailConnector.notify for what it decides.
+_ANSWERING: ContextVar[str | None] = ContextVar("myagent_mail_answering",
+                                                default=None)
 
 # The manifest is the single definition of the settings and their defaults
 # (the UI reads the same file through /bindings/types): a second copy here
@@ -724,6 +732,16 @@ class _Pending:
 
 class MailConnector(BaseConnector):
     type = "mail"
+    # A denied sender is dropped in silence (the log line stays). Anyone can
+    # write to a mailbox, and much of what writes is a machine: answering
+    # "⛔ not authorized" to it is backscatter at best and a loop at worst.
+    # Observed 2026-11-05: Aruba's "suspicious login" alert was denied, the
+    # refusal went to Aruba's no-reply desk, whose auto-responder (no
+    # Auto-Submitted header, so is_automated could not tell) answered, and the
+    # two traded a mail a minute until Aruba's side gave up. Password mode
+    # still works — a mail carrying the password is granted and told so — it
+    # just never advertises itself to strangers.
+    answers_denied = False
 
     def __init__(self, binding, client, grants):
         super().__init__(binding, client, grants)
@@ -941,12 +959,14 @@ class MailConnector(BaseConnector):
             text = (text + "\n\n" if text else "") + "[" + "; ".join(parsed["notes"]) + "]"
         self.status.last_update = datetime.now().isoformat(timespec="seconds")
         self._pending[chat_id] = _Pending()
+        answering = _ANSWERING.set(chat_id)
         try:
             await self.process_message(
                 chat_id, chat_id, text, username=chat_id,
                 attachments=parsed["attachments"] or None,
                 sender_name=parsed["sender_name"])
         finally:
+            _ANSWERING.reset(answering)
             pending = self._pending.pop(chat_id, None)
         if pending and (pending.texts or pending.files):
             await self._compose_and_send(chat_id, "\n\n".join(pending.texts), pending.files)
@@ -982,12 +1002,20 @@ class MailConnector(BaseConnector):
         inbound mail by calling ``notify_user`` still produces ONE reply. An
         explicit subject is the agent saying "a new mail, about this": it goes
         out on its own, now, under that subject and in a thread of its own
-        (see ``_build_reply``)."""
+        (see ``_build_reply``).
+
+        Except from inside the turn that is answering THIS sender's mail: there
+        the subject is dropped and the notification joins the reply, in the
+        thread the person wrote in. A model asked a question by mail reaches
+        for notify_user "to send the email" and gives it a subject every time
+        ("Richiesta", "Rilievo della Grotta Priamara" — observed 2026-11-05),
+        and honouring it produced two mails per question: the answer under a
+        new subject, then the reply "I sent it to you by email"."""
         chat_id = str(chat_id).strip().lower()
         files = list(files or [])
         subject = (subject or "").strip()
         pending = self._pending.get(chat_id)
-        if pending is not None and not subject:
+        if pending is not None and (not subject or _ANSWERING.get() == chat_id):
             pending.texts.append(text or "")
             pending.files.extend(files)
             return True, []

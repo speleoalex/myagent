@@ -20,12 +20,51 @@ where those fields let the UI show where the chat came from.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+from contextvars import ContextVar
 from pathlib import Path
 
 from app import config
 from app.ids import is_valid_id
 from app.storage.sessions import (new_session, now_iso, read_json,
                                   session_summary, write_json)
+
+#: The channel sessions whose lock the CURRENT turn holds, as
+#: ``(id(store), session_id)``. A ContextVar because "current turn" is a task
+#: context: the tool calls, the sub-agents and the connector code a turn runs
+#: are all tasks spawned inside it, and they inherit the value; an unrelated
+#: turn running concurrently does not see it.
+#:
+#: It exists because the session lock is an ``asyncio.Lock``, which is not
+#: re-entrant. ``notify_user`` appends what it sent to the recipient's session
+#: under that lock — and when the recipient is the very person the turn is
+#: answering, the turn already holds it. Observed 2026-11-05 on a mail bot:
+#: asked a question by mail, the agent answered with notify_user (the mail
+#: went out), then waited on its own lock until the 180 s turn timeout — so the
+#: person got the answer, then an error mail, and the turn was never recorded,
+#: which left the next question without context.
+_HELD: ContextVar[frozenset] = ContextVar("myagent_held_channel_sessions",
+                                          default=frozenset())
+
+
+@contextlib.contextmanager
+def holding(store, session_id: str):
+    """Mark *session_id* as held by the code running inside this block.
+
+    To be entered while ``store.lock(session_id)`` is held, around the agent
+    turn. Module-level (not a store method) so the test fakes of the store,
+    which only implement ``lock``, keep working."""
+    token = _HELD.set(_HELD.get() | {(id(store), session_id)})
+    try:
+        yield
+    finally:
+        _HELD.reset(token)
+
+
+def held_by_caller(store, session_id: str) -> bool:
+    """True when the caller runs inside a turn that holds this session's lock:
+    taking it again would wait for the turn to end, i.e. forever."""
+    return (id(store), session_id) in _HELD.get()
 
 
 class NamedSessionStore:

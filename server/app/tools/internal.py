@@ -15,6 +15,7 @@ from app import config as app_config
 from app.engine import cron as cron_parser
 from app.engine.executor import AgentExecutor
 from app.models import Task
+from app.storage.channel_sessions import held_by_caller
 from app.storage.sessions import now_iso
 
 log = logging.getLogger(__name__)
@@ -692,7 +693,7 @@ async def notify_user_handler(
     # Telegram ACCEPTS "123456789,987654321", parses the leading digits,
     # delivers to the first chat only and returns ok:true. No error, no warning,
     # second recipient silently dropped (verified against the live API).
-    sent, failed, undelivered = [], [], []
+    sent, failed, undelivered, answering = [], [], [], []
     for one, display in targets:
         try:
             # A connector's send() is best-effort for inbound replies, so it
@@ -714,9 +715,18 @@ async def notify_user_handler(
         # The session key is asked of the connector: it derives from the
         # binding's session_prefix, and that connector is the only thing that
         # knows how to build it.
-        logged = await _log_to_channel(
-            connector.session_id_for(one), _as_said(text, subject, arrived),
-            executor, _named)
+        sid = connector.session_id_for(one)
+        said = _as_said(text, subject, arrived)
+        if sid and _named is not None and held_by_caller(_named, sid):
+            # The recipient is the person THIS turn is answering: the turn holds
+            # their session's lock and will save the session when it ends, so
+            # appending now would deadlock (and be overwritten anyway). Queued
+            # behind the turn instead — it still lands if the turn fails.
+            _log_after_turn(sid, said, executor, _named)
+            answering.append(display)
+            sent.append(display)
+            continue
+        logged = await _log_to_channel(sid, said, executor, _named)
         sent.append(display if logged else f"{display} (not added to its history)")
 
     if not sent:
@@ -735,6 +745,13 @@ async def notify_user_handler(
         out += f" NOT delivered (the channel cannot carry files): {'; '.join(undelivered)}."
     if file_problems:
         out += f" Skipped: {'; '.join(file_problems)}."
+    # Said to the model because what it writes next reaches the same person:
+    # "I sent you the details by email", inside the reply that carries them
+    # (on mail the two are ONE message), is the follow-up this prevents.
+    if answering:
+        out += (f" {', '.join(answering)} is who you are answering in this "
+                "conversation: your reply reaches them too, so do not repeat "
+                "this message and do not announce that it was sent.")
     # Who the address book could NOT reach on this channel. Last, and never folded
     # into the sent list: "everyone was told" is exactly the sentence this prevents.
     if note:
@@ -779,6 +796,22 @@ def _as_said(text: str, subject: str, attached: list[str]) -> str:
     if attached:
         out += f"\n\n[attached: {', '.join(attached)}]"
     return out
+
+
+#: Appends queued behind the turn that holds their session (see
+#: _log_after_turn). Referenced here because the event loop keeps only a weak
+#: reference to a task: an unreferenced one can be collected mid-wait.
+_PENDING_LOGS: set[asyncio.Task] = set()
+
+
+def _log_after_turn(sid: str, text: str, executor, named) -> None:
+    """Append a sent notification once the current turn releases the session.
+
+    asyncio.Lock wakes its waiters in FIFO order, so this lands right after the
+    turn saves — before any later turn of the same chat reads the history."""
+    task = asyncio.create_task(_log_to_channel(sid, text, executor, named))
+    _PENDING_LOGS.add(task)
+    task.add_done_callback(_PENDING_LOGS.discard)
 
 
 async def _log_to_channel(sid: str, text: str, executor, named) -> bool:

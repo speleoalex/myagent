@@ -101,6 +101,11 @@ class ConnectorStatus:
 
 class BaseConnector:
     type = "base"
+    # Whether a DENIED sender is told so ("⛔ You are not authorized…", the
+    # password prompt). Right on a chat app, where the sender is a person who
+    # typed into this very bot. A channel whose senders include machines turns
+    # it off (see MailConnector).
+    answers_denied = True
 
     def __init__(self, binding: Binding, client: CoreClient, grants: GrantStore):
         self.binding = binding
@@ -357,7 +362,7 @@ class BaseConnector:
         if not allowed:
             log.info("[%s] DENIED id=%s username=%s (add it to the allowlist to grant access)",
                      self.binding.id, user_id, ("@" + username) if username else "-")
-            if note:
+            if note and self.answers_denied:
                 await self.send(chat_id, note)
             return
 
