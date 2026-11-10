@@ -7,7 +7,7 @@ from typing import AsyncIterator
 
 import httpx
 
-from app.engine import model_probe, prompts
+from app.engine import claude_cli, model_probe, prompts
 from app.engine import trace
 from app.models import ModelConfig
 
@@ -259,6 +259,10 @@ class LLMProvider:
         # value always wins.
         if self.supports_tools is None and "tools" in self._param_fixes:
             self.supports_tools = False
+        # The CLI cannot be handed our tool schemas, whatever the config says:
+        # the text protocol is the only way a tool call gets out of it.
+        if model_config.provider == claude_cli.PROVIDER:
+            self.supports_tools = False
 
     # Who is making the call, for the raw API log. Set by the caller — the
     # executor stamps agent+iteration, the auto-router "auto-route", the memory
@@ -270,6 +274,9 @@ class LLMProvider:
         """Accept both base-URL conventions: with or without a trailing /v1
         (e.g. "https://api.openai.com/v1" and "http://localhost:11434")."""
         base = self.config.base_url.rstrip("/")
+        if self.config.provider == claude_cli.PROVIDER:
+            # Not a URL: only the trace reads it for this provider.
+            return f"{claude_cli.PROVIDER}:{base or claude_cli.DEFAULT_COMMAND}"
         if self.config.provider == "anthropic":
             if not base.endswith("/v1"):
                 base = f"{base}/v1"
@@ -800,6 +807,14 @@ class LLMProvider:
                             "content part type %r", ptype)
         return blocks
 
+    @staticmethod
+    def _system_text(messages: list[dict]) -> str:
+        """The system entries, hoisted out of an OpenAI-style history."""
+        return "\n\n".join(
+            m["content"] for m in messages
+            if m.get("role") == "system" and isinstance(m.get("content"), str)
+        )
+
     def _anthropic_messages(self, messages: list[dict]) -> list[dict]:
         """OpenAI-style history -> Anthropic messages.
 
@@ -875,10 +890,7 @@ class LLMProvider:
             reserve += self._estimate_tokens(json.dumps(tools))
         messages = self._truncate_messages(messages, max_ctx, reserve=reserve)
 
-        system = "\n\n".join(
-            m["content"] for m in messages
-            if m.get("role") == "system" and isinstance(m.get("content"), str)
-        )
+        system = self._system_text(messages)
         payload = {
             "model": self.config.model,
             "messages": self._anthropic_messages(messages),
@@ -1003,12 +1015,47 @@ class LLMProvider:
         # ping, message_start, content_block_stop, message_stop
         return []
 
+    async def _claude_cli_stream(self, messages: list[dict]) -> AsyncIterator[dict]:
+        """One turn through the Claude Code CLI (see app.engine.claude_cli).
+
+        `tools` and `temperature` have no counterpart on the CLI: tool calls
+        travel in the text protocol, and the sampler is not exposed.
+        """
+        # Sanitized first: a history recorded with a native-tools model carries
+        # role:tool entries, and the CLI gets a single text turn.
+        messages = self._truncate_messages(
+            self._sanitize_messages(messages), await self._context_budget(),
+            reserve=FALLBACK_MAX_OUTPUT)
+        system = self._system_text(messages)
+        blocks = claude_cli.single_turn(self._anthropic_messages(messages))
+        trace.call(self.trace_label, self._endpoint, {
+            "model": self.config.model, "system": system,
+            "messages": [{"role": "user", "content": blocks}]})
+        seen_text, seen_reasoning, tool_idx = "", "", {}
+        try:
+            async for event in claude_cli.stream_events(
+                    self.config.base_url, self.config.model, system, blocks,
+                    api_key=self.config.api_key, thinking=self.reasoning,
+                    idle_timeout=float(self.config.options.get("request_timeout", 600))):
+                for chunk in self._anthropic_chunks(event, tool_idx):
+                    seen_text, seen_reasoning = _accumulate(
+                        chunk, seen_text, seen_reasoning, {})
+                    yield chunk
+        except RuntimeError as e:
+            trace.reply(self.trace_label, "", error=str(e))
+            raise
+        trace.reply(self.trace_label, seen_text, None, seen_reasoning)
+
     async def chat_completion_stream(
         self,
         messages: list[dict],
         tools: list[dict] | None = None,
         temperature: float | None = None,
     ) -> AsyncIterator[dict]:
+        if self.config.provider == claude_cli.PROVIDER:
+            async for chunk in self._claude_cli_stream(messages):
+                yield chunk
+            return
         anthropic = self.config.provider == "anthropic"
         reasoning_supported, reasoning_kwarg = await self._reasoning_state()
         if anthropic:

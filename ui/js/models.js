@@ -10,7 +10,7 @@ const ModelsPage = {
         try { models = await App.api('GET', '/models'); } catch (e) { /* empty */ }
 
         const providerBadge = (p) =>
-            ({ ollama: 'success', llamacpp: 'primary', openai: 'info', anthropic: 'warning', a1111: 'danger' }[p] || 'secondary');
+            ({ ollama: 'success', llamacpp: 'primary', openai: 'info', anthropic: 'warning', claude_code: 'dark', a1111: 'danger' }[p] || 'secondary');
 
         // No extra column for the kind: an icon in front of the name says it in
         // the width a phone has, and "chat" needs no marking — it is what every
@@ -194,7 +194,8 @@ const ModelsPage = {
             return [['ollama', 'Ollama'], ['llamacpp', 'llama.cpp']];
         }
         return [['ollama', 'Ollama'], ['llamacpp', 'llama.cpp'],
-                ['openai', i18n('models.providerOpenai')], ['anthropic', i18n('models.providerAnthropic')]];
+                ['openai', i18n('models.providerOpenai')], ['anthropic', i18n('models.providerAnthropic')],
+                ['claude_code', i18n('models.providerClaudeCode')]];
     },
 
     // Defaults for the generator, overridable per call by the tool's own
@@ -216,6 +217,8 @@ const ModelsPage = {
         // An embedder samples nothing: temperature, penalties and the context
         // window are all questions for a model that writes text.
         if (kind === 'embedding') return [];
+        // The CLI exposes no sampler: the only knob left is how long to wait.
+        if (provider === 'claude_code') return [{ key: 'request_timeout', min: 5, int: true, ph: '600' }];
         const local = provider === 'ollama' || provider === 'llamacpp';
         const anthropic = provider === 'anthropic';
         const specs = [
@@ -249,7 +252,8 @@ const ModelsPage = {
 
     // Placeholder of the model-name field, per kind: an example the user can
     // copy is worth more than a generic "model name".
-    modelPlaceholderKey(kind) {
+    modelPlaceholderKey(kind, provider) {
+        if (provider === 'claude_code') return 'models.modelClaudeCodePlaceholder';
         return { image: 'models.modelImagePlaceholder',
                  embedding: 'models.modelEmbedPlaceholder' }[kind] || 'models.modelPlaceholder';
     },
@@ -377,6 +381,7 @@ const ModelsPage = {
             llamacpp: 'http://localhost:8080',
             openai: 'https://api.openai.com/v1',
             anthropic: 'https://api.anthropic.com',
+            claude_code: 'claude',
         }[provider] || '';
     },
 
@@ -449,9 +454,10 @@ const ModelsPage = {
                                 ${this.providerChoices(kind).map(([v, label]) =>
                                     `<option value="${v}" ${model.provider === v ? 'selected' : ''}>${App.esc(label)}</option>`).join('')}
                             </select>
+                            <div class="form-text" id="provider-help"></div>
                         </div>
                         <div class="mb-3">
-                            <label class="form-label">${i18n('models.baseUrl')}</label>
+                            <label class="form-label" for="f-url" id="f-url-label"></label>
                             <input type="text" class="form-control" id="f-url" value="${App.esc(model.base_url)}" autocomplete="url" required>
                         </div>
                         <!-- Offered for EVERY kind and provider, and simply left empty when
@@ -476,7 +482,7 @@ const ModelsPage = {
                                 <input type="text" class="form-control" id="f-model" value="${App.esc(model.model)}"
                                        list="remote-models"
                                        ${!isImage && model.provider !== 'llamacpp' ? 'required' : ''}
-                                       placeholder="${i18n(this.modelPlaceholderKey(kind))}">
+                                       placeholder="${i18n(this.modelPlaceholderKey(kind, model.provider))}">
                                 <button type="button" class="btn btn-outline-secondary" id="btn-fetch-models"
                                         ${!isImage && this.isRemote(model.provider) ? '' : 'style="display:none"'}>
                                     <i class="bi bi-cloud-download"></i> ${i18n('models.fetchRemote')}
@@ -563,19 +569,26 @@ const ModelsPage = {
         const currentKind = () => document.getElementById('f-kind').value;
 
         const applyProviderHelp = (provider, k) => {
+            // For the CLI the address field is the executable, and the provider
+            // needs a line saying whose account answers.
+            const cli = provider === 'claude_code';
+            document.getElementById('f-url-label').textContent = i18n(cli ? 'models.executable' : 'models.baseUrl');
+            document.getElementById('provider-help').textContent = cli ? i18n('models.claudeCodeHelp') : '';
             if (k === 'embedding') return;   // both help lines live in hidden groups
             document.getElementById('options-help').textContent = k === 'image'
                 // On the OpenAI image route only the size survives: steps, cfg
                 // and the sampler have no field in that request body. Say so
                 // here rather than let them look effective and be dropped.
                 ? i18n(provider === 'a1111' ? 'models.optionsA1111Help' : 'models.optionsImageOpenaiHelp')
-                : i18n(this.isRemote(provider) ? 'models.optionsRemoteHelp' : 'models.optionsLocalHelp');
+                : i18n(cli ? 'models.optionsClaudeCodeHelp'
+                    : this.isRemote(provider) ? 'models.optionsRemoteHelp' : 'models.optionsLocalHelp');
             if (k === 'image') return;   // ctx-help lives in a hidden group
             document.getElementById('ctx-help').textContent = i18n({
                 ollama: 'models.contextHelpOllama',
                 llamacpp: 'models.contextHelpLlamacpp',
                 openai: 'models.contextHelpRemote',
                 anthropic: 'models.contextHelpAnthropic',
+                claude_code: 'models.contextHelpClaudeCode',
             }[provider] || 'models.contextHelpOllama');
         };
         applyProviderHelp(model.provider, kind);
@@ -589,7 +602,7 @@ const ModelsPage = {
             // embedding alike); an image backend takes an optional one.
             document.getElementById('model-name-group').style.display = !img && provider === 'llamacpp' ? 'none' : '';
             document.getElementById('f-model').required = !img && provider !== 'llamacpp';
-            document.getElementById('f-model').placeholder = i18n(this.modelPlaceholderKey(k));
+            document.getElementById('f-model').placeholder = i18n(this.modelPlaceholderKey(k, provider));
             document.getElementById('btn-fetch-models').style.display = !img && this.isRemote(provider) ? '' : 'none';
             document.getElementById('options-group').style.display = k === 'embedding' ? 'none' : '';
             // Re-render the option fields for the new provider, keeping the
@@ -617,6 +630,10 @@ const ModelsPage = {
             if (!url.value.trim() || this.isDefaultUrl(url.value.trim())) {
                 url.value = this.defaultUrl(e.target.value, k);
             }
+            // A key saved for another provider must not follow the model to
+            // the CLI: the CLI would use it INSTEAD of its own login, and fail
+            // with "Invalid API key" on an account that is logged in fine.
+            if (e.target.value === 'claude_code') document.getElementById('f-apikey').value = '';
             applyProvider(e.target.value, k);
         };
 

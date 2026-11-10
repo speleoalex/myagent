@@ -46,7 +46,10 @@ scripted or container install keeps answering no to everything.
   - Ollama (`http://localhost:11434`), or
   - any remote OpenAI-compatible API with a key — OpenAI, OpenRouter, Groq,
     Mistral, a vLLM box on the LAN … *(needs internet)*, or
-  - the Anthropic API (Claude), spoken natively *(needs internet)*
+  - the Anthropic API (Claude), spoken natively *(needs internet)*, or
+  - the Claude Code CLI, installed and logged in for the user the server
+    runs as: it answers with that Claude subscription, no API key
+    *(needs internet)*
 - **`libzim`** — to search offline Wikipedia archives. Installed by `install.sh`
   into its own virtualenv, so there is nothing to do.
 - **Node.js + Chrome/Chromium** *(optional)* — only for the online web tools.

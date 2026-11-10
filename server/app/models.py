@@ -56,7 +56,9 @@ class ModelConfig(BaseModel):
     kind: str = CHAT_KIND
     # kind=chat:  "ollama" | "llamacpp" | "openai" (generic OpenAI-compatible
     #             API) | "anthropic" (native Messages API, translated in
-    #             LLMProvider)
+    #             LLMProvider) | "claude_code" (the Claude Code CLI run as a
+    #             subprocess; base_url is then the command or the path of the
+    #             executable, and api_key is optional — see engine/claude_cli)
     # kind=image: "openai" (POST /v1/images/generations — OpenAI itself and
     #             every server that copies it, stable-diffusion.cpp's sd-server
     #             included) | "a1111" (POST /sdapi/v1/txt2img — Automatic1111,

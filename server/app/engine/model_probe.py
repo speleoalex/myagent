@@ -22,6 +22,8 @@ user to type that number into the model form, we ask the server:
                                    AND max_tokens: the per-request OUTPUT cap
                                    (a hard limit the Messages API 400s on, and
                                    the only provider here that states it).
+    claude_code nothing to ask: the CLI declares no window, so the probe only
+                                   checks that the executable is installed.
 
 Results are cached per (provider, base_url, model) with a short TTL: they are
 live data — restarting llama.cpp with a different ``-c`` changes them — but a
@@ -37,7 +39,9 @@ import time
 
 import httpx
 
-log = logging.getLogger(__name__)
+from app.engine import claude_cli
+
+log =logging.getLogger(__name__)
 
 # Probe answers are live data, so the cache is short-lived; it exists to keep
 # the per-turn cost at zero, not to remember forever.
@@ -161,6 +165,11 @@ async def _probe_now(c: dict, client: httpx.AsyncClient | None) -> dict:
         "reasoning": None,
         "reasoning_kwarg": None,
     }
+    if c.get("provider") == claude_cli.PROVIDER:
+        # Nothing to ask over HTTP: "reachable" means the CLI is installed.
+        out["reachable"] = claude_cli.find_executable(c.get("base_url")) is not None
+        out["n_ctx_max"] = claude_cli.CONTEXT_WINDOW
+        return out
     base = (c.get("base_url") or "").rstrip("/")
     if not base:
         return out

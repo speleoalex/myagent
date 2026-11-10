@@ -50,7 +50,16 @@ connectors/            # optional Telegram plugin: source only, NOT deployed
    way out and the typed SSE events back into OpenAI-shaped chunks on the way
    in (`thinking_delta` → the reasoning channel, `tool_use`/`input_json_delta`
    → incremental `tool_calls`), so the executor and the reasoning splitter
-   are provider-agnostic.
+   are provider-agnostic. `claude_code` is not HTTP at all: it runs the
+   Claude Code CLI (`claude -p`) as a subprocess and uses it as a plain
+   model, to answer with the account the CLI is logged into
+   (`server/app/engine/claude_cli.py`). The CLI's own tools, MCP servers,
+   settings and CLAUDE.md are switched off and its system prompt is replaced
+   by the agent's; the history is folded into one user turn, and MyAgent's
+   tools are called in the text protocol. The model's `base_url` is the
+   command or path of the executable (default `claude`); an optional
+   `api_key` is passed to the CLI as a `claude setup-token` token or an
+   Anthropic API key, for a server account that cannot log in interactively.
 5. `ToolRegistry` (`server/app/tools/registry.py`) dispatches each tool call
    to an external subprocess or an internal Python handler.
 
@@ -184,6 +193,9 @@ asks for it rather than requiring configuration
 - **anthropic** — `GET /v1/models/{id}` declares `max_input_tokens` (the
   context window) outright. Same precedence and truncation-only semantics as
   the other remote provider.
+- **claude_code** — the CLI declares nothing, so 200k is assumed unless an
+  explicit `context_window` is set; the probe only checks that the
+  executable is installed.
 
 Probe answers are cached per (provider, base_url, model) with a 300s TTL and
 invalidated when a model config is saved or deleted.
