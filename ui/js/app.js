@@ -267,9 +267,17 @@ const App = {
 
     /** Absolute URL of an API endpoint on the configured server.
      * EVERY request must be built here — a literal '/api/...' fetch would
-     * silently talk to whatever host serves the static files. */
+     * silently talk to whatever host serves the static files. Same origin
+     * means the folder the page was served from, not the host root, so the
+     * UI also works behind a reverse proxy under a path (/myagent/). */
     apiUrl(path) {
-        return `${this.serverBase}/api${path}`;
+        return `${this.serverBase || App.pageBase()}/api${path}`;
+    },
+
+    /** Path of the folder holding this page, without the trailing slash:
+     * '' at the host root, '/myagent' when proxied under /myagent/. */
+    pageBase() {
+        return new URL('.', location.href).pathname.replace(/\/+$/, '');
     },
 
     /** URL of a workspace file served by GET /api/files/ (the resource

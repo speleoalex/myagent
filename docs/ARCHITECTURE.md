@@ -312,7 +312,7 @@ Each tool is a folder with two files:
 `tool.json` is a group: its subfolders are scanned as ordinary tools, one
 level deep (e.g. the bundled `file_management/` holds `file_read`,
 `file_write`, `file_edit`, `list_dir`, `file_search`, `file_append`,
-`make_dir`, `show_file`; `library/` holds `local_search` and `local_read`;
+`make_dir`, `show_file`, `write_pdf`; `library/` holds `local_search` and `local_read`;
 `images/` holds `generate_image`, `edit_image` and `remove_background`;
 `web/` holds `web_search`, `browse_web` and `web_research`;
 `self_management/` holds `manage_agents` and `manage_tools`).
@@ -371,7 +371,8 @@ and the files stay visible in the channel session from the web UI. Files under
 `workspace/_resources/` are never auto-pruned (sessions reference them
 indefinitely), unlike `_attachments/` which is swept after 24h; MCP
 image/blob content lands there too and shows in the chat the same way.
-Bundled `show_file` (`file_management/`) flags an existing file, and
+Bundled `show_file` (`file_management/`) flags an existing file, `write_pdf`
+renders Markdown to a PDF and flags it, and
 `library/local_read` delivers a ZIM article's images through the same
 channel. See [TOOLS.md](TOOLS.md), "Returning files to the user".
 
@@ -833,7 +834,9 @@ formulas are memoized because `renderMarkdown` re-runs on every streamed token.
 The UI does not have to be served by MyAgent: it is plain static HTML with
 relative asset paths, so any web server can host it, and `App.serverBase`
 (Settings → *MyAgent server*, or a one-shot `?server=` URL parameter; stored
-in `localStorage`, empty = same origin) points it at the API. Every request —
+in `localStorage`, empty = same origin) points it at the API. Same origin means
+the folder the page came from (`App.pageBase()`), so the UI also works behind a
+reverse proxy under a path such as `/myagent/`. Every request —
 including the two streaming `fetch`es in `chat.js` — is built through
 `App.apiUrl(path)`; a literal `/api/...` URL would silently talk to the host
 serving the static files. The server side of the split is

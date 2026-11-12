@@ -23,7 +23,7 @@
 // Bump at every release, even when only ?v= stamps moved: a changed sw.js is
 // what makes the browser install a new worker, and that installation is the
 // only signal the page has to tell the user a new version is in (js/pwa.js).
-const CACHE = 'myagent-shell-v4';
+const CACHE = 'myagent-shell-v5';
 
 // Referenced from CSS or the manifest rather than the markup, so the parser
 // above cannot see them.
@@ -92,9 +92,15 @@ self.addEventListener('activate', event => {
     })());
 });
 
-/** Not-cacheable: the live API, and FastAPI's own endpoints. */
+/** Not-cacheable: the live API, and FastAPI's own endpoints. Matched after
+ * the worker's scope, so a UI proxied under a path (/myagent/api/...) is
+ * recognized as well as one at the host root. */
+const SCOPE_PATH = new URL(self.registration.scope).pathname;
 function isApi(url) {
-    return /^\/(api|docs|redoc|openapi\.json)(\/|$)/.test(url.pathname);
+    const rel = url.pathname.startsWith(SCOPE_PATH)
+        ? url.pathname.slice(SCOPE_PATH.length)
+        : url.pathname.slice(1);
+    return /^(api|docs|redoc|openapi\.json)(\/|$)/.test(rel);
 }
 
 self.addEventListener('fetch', event => {

@@ -64,7 +64,9 @@
         return;
     }
     // Same localStorage contract as app.js (serverBase + api key).
-    const server = (localStorage.getItem('myagent_server') || '').replace(/\/+$/, '');
+    // Unset = same origin, i.e. the folder of this page (see App.pageBase()).
+    const server = (localStorage.getItem('myagent_server')
+        || new URL('.', location.href).pathname).replace(/\/+$/, '');
     const key = localStorage.getItem('myagent_api_key') || '';
     const url = server + '/api/files/'
         + path.split('/').map(encodeURIComponent).join('/');
