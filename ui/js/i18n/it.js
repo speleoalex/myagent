@@ -12,7 +12,11 @@ I18n.translations.it = {
     'nav.settings': 'Impostazioni',
 
     // Auth (solo quando il server imposta MYAGENT_API_KEY)
-    'auth.promptKey': 'Questo server richiede una API key.\nInseriscila per continuare (puoi anche aprire la UI con ?api_key=... nell\'URL):',
+    'auth.title': 'Chiave di accesso',
+    'auth.hint': 'Questo server richiede una chiave API. Puoi anche aprire l\'interfaccia con ?api_key=... nell\'indirizzo.',
+    'auth.label': 'Chiave API',
+    'auth.submit': 'Entra',
+    'auth.wrong': 'La chiave salvata non è valida.',
     'auth.required': 'API key richiesta',
 
     // Common

@@ -314,17 +314,37 @@ const App = {
     },
 
     // The server requires a key and ours is missing/wrong: ask for it once
-    // (concurrent 401s share the prompt) and reload with the new key.
+    // (concurrent 401s share the form) and reload with the new key. The form
+    // is a panel over the whole page, not inside #app: pages that catch the
+    // same 401 render their error into #app and must not replace it.
     _handleUnauthorized() {
         if (!this._authPrompting) {
             this._authPrompting = true;
-            const key = window.prompt(i18n('auth.promptKey'));
-            if (key && key.trim()) {
-                localStorage.setItem('myagent_api_key', key.trim());
+            const panel = document.createElement('div');
+            panel.className = 'position-fixed top-0 start-0 w-100 h-100 bg-body d-flex align-items-center justify-content-center p-3';
+            panel.style.zIndex = '2000';
+            panel.setAttribute('role', 'dialog');
+            panel.setAttribute('aria-modal', 'true');
+            panel.setAttribute('aria-labelledby', 'api-key-title');
+            panel.innerHTML = `
+                <form class="card card-body shadow-sm w-100" style="max-width: 26rem">
+                    <h1 class="h5 mb-2" id="api-key-title"><i class="bi bi-key" aria-hidden="true"></i> ${i18n('auth.title')}</h1>
+                    <p class="text-secondary small mb-3">${i18n('auth.hint')}</p>
+                    ${this.apiKey ? `<div class="alert alert-danger py-2 small" role="alert">${i18n('auth.wrong')}</div>` : ''}
+                    <input type="text" name="username" value="myagent" autocomplete="username" hidden>
+                    <label class="form-label" for="api-key-input">${i18n('auth.label')}</label>
+                    <input type="password" id="api-key-input" class="form-control" autocomplete="current-password" required>
+                    <button type="submit" class="btn btn-primary mt-3">${i18n('auth.submit')}</button>
+                </form>`;
+            panel.querySelector('form').addEventListener('submit', evt => {
+                evt.preventDefault();
+                const key = panel.querySelector('#api-key-input').value.trim();
+                if (!key) return;
+                localStorage.setItem('myagent_api_key', key);
                 location.reload();
-            } else {
-                this._authPrompting = false;
-            }
+            });
+            document.body.appendChild(panel);
+            panel.querySelector('#api-key-input').focus();
         }
         throw new Error(i18n('auth.required'));
     },
