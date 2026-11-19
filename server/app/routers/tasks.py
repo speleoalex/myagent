@@ -77,10 +77,15 @@ async def delete_task(task_id: str, request: Request):
 @router.post("/{task_id}/run")
 async def run_task(task_id: str, request: Request):
     """Make a task due now. The agent must be live for anything to happen —
-    say so instead of leaving the user watching a row that never changes."""
+    say so instead of leaving the user watching a row that never changes.
+
+    It also lifts the agent's error backoff: after a failure streak the next
+    retry can be half an hour away, and a "run now" that silently waits for it
+    is the button lying. Pressing it is the user saying the cause is fixed."""
     data = _tasks(request).run_now(task_id)
     if data is None:
         raise HTTPException(404, f"Task not found: {task_id}")
+    await request.app.state.autonomy.resume(data["agent_id"])
     agent = request.app.state.stores.agents.get(data["agent_id"]) or {}
     return {"ok": True, "next_at": data["next_at"],
             "live": bool(agent.get("enabled", True) and agent.get("live"))}
