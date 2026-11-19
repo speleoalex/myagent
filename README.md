@@ -62,7 +62,8 @@ disk, searched full-text in moments, quoted with their source
 ![The Librarian agent answering from the offline library](docs/images/chat-librarian.png)
 
 *A local model answering from the offline library: the Librarian searches, opens
-the best hit and answers from it. Nothing in that path touches the network.*
+the best hits and answers from them, showing the figures they contain. Nothing
+in that path touches the network.*
 
 ## Pictures, on the same machine
 
