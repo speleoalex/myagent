@@ -71,9 +71,10 @@ from email.policy import default as default_policy
 from html.parser import HTMLParser
 from pathlib import Path
 
+from app import markdown_html
 from app.storage.store import JsonStore
 
-from myagent_connectors import config, markdown_html
+from myagent_connectors import config
 from myagent_connectors.channels.base import (BaseConnector, Unreachable,
                                              redact)
 

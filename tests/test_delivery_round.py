@@ -15,7 +15,11 @@ Pinned here:
     ALONE, and its notify_user calls then run (up to _DELIVERY_CALLS_MAX);
   * the offer is made once: a second non-delivery call forces the answer as
     before;
-  * an attended turn is unchanged: the budget forces the answer, no extra round;
+  * an attended turn is unchanged: the budget forces the answer, no extra round
+    — unless the agent holds write_pdf (catasto mailbox, 2026-11-11: asked for a
+    PDF report, 25 calls of 25 went into queries): then the round is offered
+    with prompts.DOCUMENT_ROUND and write_pdf alone, at no extra LLM call when
+    the model just answers;
   * an unattended agent WITHOUT notify_user is unchanged too.
 
 Run:  server/.venv/bin/python tests/test_delivery_round.py
@@ -193,6 +197,34 @@ def case_attended_unchanged():
     check(done is not None and done["reply"] == "risposta forzata", "forced answer as before")
 
 
+def case_attended_document_round():
+    print("attended, write_pdf held: the budget buys a document round")
+    ex, prov, ran = _executor([
+        [_call("shell_exec", '{"command": "a"}')],
+        [_call("shell_exec", '{"command": "b"}')],          # over budget
+        [_call("write_pdf", '{"path": "r.pdf", "content": "# R"}')],
+        [_text("In allegato il report.")],
+    ], unattended=False, tools=("shell_exec", "notify_user", "write_pdf"))
+    done = asyncio.run(_run(ex))
+    check(ran == ["shell_exec", "write_pdf"], f"the PDF is written past the budget: {ran}")
+    rounds = [r for r in prov.rounds
+              if r["messages"][-1].get("content") == prompts.DOCUMENT_ROUND]
+    check(len(rounds) == 1 and rounds[0]["tools"] == ["write_pdf"],
+          f"the document round sees write_pdf alone: {rounds and rounds[0]['tools']}")
+    check(done is not None and done["reply"] == "In allegato il report.",
+          "the model's own closing line is the reply")
+
+    print("attended, write_pdf held, no document asked: same rounds as a forced answer")
+    ex, prov, ran = _executor([
+        [_call("shell_exec", '{"command": "a"}')],
+        [_call("shell_exec", '{"command": "b"}')],
+        [_text("risposta")],
+    ], unattended=False, tools=("shell_exec", "write_pdf"))
+    done = asyncio.run(_run(ex))
+    check(ran == ["shell_exec"] and len(prov.rounds) == 3 and done["reply"] == "risposta",
+          f"the plain answer ends the turn, no extra LLM call: {len(prov.rounds)} rounds")
+
+
 def case_without_notify_user_unchanged():
     print("unattended but notify_user not held: nothing to offer")
     ex, prov, ran = _executor([
@@ -207,7 +239,8 @@ def case_without_notify_user_unchanged():
 
 if __name__ == "__main__":
     for case in (case_unattended_delivers, case_offer_is_made_once, case_delivery_cap,
-                 case_attended_unchanged, case_without_notify_user_unchanged):
+                 case_attended_unchanged, case_attended_document_round,
+                 case_without_notify_user_unchanged):
         case()
     if failures:
         print(f"\n{len(failures)} FAILED")

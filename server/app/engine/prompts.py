@@ -129,6 +129,19 @@ DELIVERY_ROUND = (
     "else. If everything was already delivered, just summarise what you did."
 )
 
+#: Attended turn of an agent holding write_pdf, out of budget. The forced reply
+#: reaches the user either way; what it cannot be is the document they asked
+#: for. A model that was not asked for one just answers, and the turn ends
+#: exactly as a forced answer would.
+DOCUMENT_ROUND = (
+    "TOOL BUDGET EXHAUSTED: that call was not run and no other tool will run in "
+    "this turn, with ONE exception: write_pdf. Answer NOW with what you have "
+    "gathered so far. If the user asked for a PDF, a report or a document, do "
+    "not answer in prose: call write_pdf with the whole document in Markdown, "
+    "stating in it what is missing rather than inventing it. Otherwise just "
+    "write your answer. Do not call anything else."
+)
+
 #: Shown as the reply when the loop ran out of iterations without answering.
 NO_FINAL_RESPONSE = "[Agent reached maximum iterations without a final response]"
 

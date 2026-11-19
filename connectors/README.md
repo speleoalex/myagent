@@ -171,7 +171,7 @@ Worth knowing:
   write) goes out as HTML, with the Markdown source as the plain-text
   alternative; a body written in HTML goes out as HTML; plain prose stays
   a single text/plain part. The renderer is standard library only
-  (`myagent_connectors/markdown_html.py`): headings, emphasis, links,
+  (`server/app/markdown_html.py`, shared with the `write_pdf` tool): headings, emphasis, links,
   code, tables, quotes and lists nested at any indent.
 - A `notify_user` **with a subject** is a new mail under exactly that Subject,
   files attached, deliberately **not** threaded onto an earlier question (an

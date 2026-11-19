@@ -262,7 +262,9 @@ What happens to it:
 To show a file that already exists (e.g. an HTML report the agent just built
 with `file_write`), the bundled **`show_file`** tool in the `file_management/`
 group prints the marker for you — the classic flow is `file_write` the page,
-then `show_file` it. The `library/local_read` tool uses the same channel to
+then `show_file` it. **`write_pdf`**, in the same group, takes a document in
+Markdown, renders it to a PDF (headless Chrome/Chromium, the browser
+`browse_web` already uses) and delivers it in one call. The `library/local_read` tool uses the same channel to
 deliver a ZIM article's images — and, with `export=true`, the full document
 itself (a ZIM article as a self-contained HTML page, a PDF or text file as the
 original).

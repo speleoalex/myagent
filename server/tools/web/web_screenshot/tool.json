@@ -1,0 +1,38 @@
+{
+  "name": "Web Screenshot",
+  "description": "Take a picture (PNG) of a public web page as a real browser draws it: a map, a chart, a page layout. The picture is shown to the user and saved in the workspace, so it can go into a PDF with write_pdf. For a map, put the place and the zoom in the page address when the site supports it, and raise 'wait' so the map tiles finish loading.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "url": {
+        "type": "string",
+        "description": "Full http(s) address of the page"
+      },
+      "width": {
+        "type": "integer",
+        "description": "Browser window width in pixels, 320-2000 (default 1200)"
+      },
+      "height": {
+        "type": "integer",
+        "description": "Browser window height in pixels, 240-2000 (default 800)"
+      },
+      "full_page": {
+        "type": "boolean",
+        "description": "Capture the whole page height instead of the window (default false)"
+      },
+      "wait": {
+        "type": "integer",
+        "description": "Extra seconds to wait after the page has loaded, 0-20 (default 2; 5-8 for maps)"
+      },
+      "title": {
+        "type": "string",
+        "description": "Short human title of the picture"
+      }
+    },
+    "required": [
+      "url"
+    ]
+  },
+  "timeout": 120,
+  "max_output": 2000
+}

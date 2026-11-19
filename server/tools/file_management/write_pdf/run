@@ -1,0 +1,234 @@
+#!/usr/bin/env python3
+"""Render Markdown to a PDF in the workspace and flag it for the user.
+
+Markdown -> HTML with the app's own renderer (app/markdown_html.py, the one
+the mail channel uses), HTML -> PDF with a headless Chrome/Chromium, the same
+optional dependency browse_web has. The PDF is announced with the resource
+marker (docs/TOOLS.md, "Returning files to the user"), so a messaging channel
+attaches it to the reply.
+
+The input is Markdown only, never HTML: the renderer escapes everything that
+is not markup, so nothing the model was fed (a mail, a web page) can make
+Chrome run a script or embed a local file in a document that is then mailed.
+
+Images are embedded here, as data: URIs, and Chrome prints with no network
+at all: a workspace image (a screenshot, a chart) is read from the workspace
+only, a web image is downloaded only from a public address, every redirect
+included. Left to Chrome, an image address could point at a service on this
+machine or the LAN and the PDF would carry it out by mail.
+"""
+import base64
+import html
+import ipaddress
+import json
+import os
+import shutil
+import socket
+import subprocess
+import sys
+import tempfile
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+# The server exports its install dir; the fallback is for a run by hand from
+# the bundled location (server/tools/file_management/write_pdf/run).
+sys.path.insert(0, os.environ.get("MYAGENT_APP_DIR")
+                or str(Path(__file__).resolve().parents[3]))
+from app import markdown_html  # noqa: E402
+
+# Seconds. A snap-confined Chromium on a Jetson-class board needs most of a
+# minute on its first launch (see browse_web); tool.json allows 120 in total.
+CHROME_TIMEOUT = 100
+
+# Print layout. The renderer styles its elements inline for mail clients; this
+# adds what only matters on paper.
+PAGE_CSS = """
+@page { size: A4; margin: 18mm 16mm; }
+body { font-size: 11pt; }
+h1 { font-size: 20pt; } h2 { font-size: 15pt; } h3 { font-size: 12.5pt; }
+h1, h2, h3, h4 { page-break-after: avoid; }
+table { width: 100%; font-size: 9.5pt; }
+tr, pre, blockquote, img { page-break-inside: avoid; }
+a { color: #1a4f8b; text-decoration: none; }
+"""
+
+IMAGE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+               ".gif": "image/gif", ".webp": "image/webp", ".svg": "image/svg+xml"}
+MAX_IMAGE_BYTES = 10 * 1024 * 1024
+MAX_IMAGES = 30
+DOWNLOAD_TIMEOUT = 20
+
+# Chrome sends every request to a proxy that does not exist, loopback
+# included (<-loopback> removes the implicit bypass): the page is a local file
+# and its images are data: URIs, so nothing legitimate needs the network.
+NO_NETWORK = ["--proxy-server=http://127.0.0.1:9", "--proxy-bypass-list=<-loopback>"]
+
+BROWSER_NAMES = ("chromium", "chromium-browser", "google-chrome",
+                 "google-chrome-stable", "chrome", "msedge")
+MAC_BROWSERS = (
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+)
+
+
+def find_browser() -> str | None:
+    """PUPPETEER_EXECUTABLE_PATH wins, as in browse_web; then the PATH, then
+    the macOS application bundles."""
+    override = os.environ.get("PUPPETEER_EXECUTABLE_PATH")
+    if override and os.path.isfile(override):
+        return override
+    for name in BROWSER_NAMES:
+        found = shutil.which(name)
+        if found:
+            return found
+    return next((p for p in MAC_BROWSERS if os.path.isfile(p)), None)
+
+
+def is_public(url: str) -> bool:
+    """Every address the host name resolves to is a global one."""
+    host = urllib.parse.urlsplit(url).hostname
+    if not host:
+        return False
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError:
+        return False
+    return bool(infos) and all(
+        ipaddress.ip_address(info[4][0].split("%")[0]).is_global for info in infos)
+
+
+class PublicRedirects(urllib.request.HTTPRedirectHandler):
+    """A redirect is a new address: it gets the same check as the first."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not newurl.lower().startswith(("http://", "https://")) or not is_public(newurl):
+            raise urllib.error.URLError("redirected to an address that is not public")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+class ImageEmbedder:
+    """The image_src of markdown_html.render(): an image address -> a data:
+    URI, or None (the alt text is printed) with the reason kept in notes."""
+
+    def __init__(self, root: Path):
+        self.root = root
+        self.notes: list[str] = []
+        self.count = 0
+        self.opener = urllib.request.build_opener(PublicRedirects)
+
+    def __call__(self, src: str) -> str | None:
+        src = (src or "").strip()
+        if self.count >= MAX_IMAGES:
+            self.notes.append(f"{src}: more than {MAX_IMAGES} images")
+            return None
+        try:
+            if src.lower().startswith(("http://", "https://")):
+                data, mime = self.download(src)
+            else:
+                data, mime = self.read_workspace(src)
+        except (OSError, ValueError) as e:
+            self.notes.append(f"{src}: {e}")
+            return None
+        self.count += 1
+        return f"data:{mime};base64,{base64.b64encode(data).decode()}"
+
+    def read_workspace(self, src: str) -> tuple[bytes, str]:
+        while src.startswith("./"):
+            src = src[2:]
+        if not src or src.startswith("/") or ".." in src.split("/"):
+            raise ValueError("an image must be a file in the workspace or an http(s) address")
+        target = (self.root / src).resolve()
+        mime = IMAGE_TYPES.get(target.suffix.lower())
+        if not target.is_relative_to(self.root) or not mime:
+            raise ValueError("not an image file in the workspace")
+        if not target.is_file():
+            raise ValueError("file not found in the workspace")
+        if target.stat().st_size > MAX_IMAGE_BYTES:
+            raise ValueError("image larger than 10 MB")
+        return target.read_bytes(), mime
+
+    def download(self, url: str) -> tuple[bytes, str]:
+        if not is_public(url):
+            raise ValueError("the address is not public")
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "MyAgent (write_pdf)", "Accept": "image/*"})
+        with self.opener.open(req, timeout=DOWNLOAD_TIMEOUT) as resp:
+            mime = resp.headers.get_content_type()
+            if not mime.startswith("image/"):
+                raise ValueError(f"not an image ({mime})")
+            data = resp.read(MAX_IMAGE_BYTES + 1)
+        if len(data) > MAX_IMAGE_BYTES:
+            raise ValueError("image larger than 10 MB")
+        return data, mime
+
+
+def fail(message: str) -> None:
+    print(f"ERROR: {message}")
+    sys.exit(0)
+
+
+def main() -> None:
+    args = json.loads(sys.stdin.read())
+    content = str(args.get("content") or "")
+    path = str(args.get("path") or "").strip()
+    while path.startswith("./"):
+        path = path[2:]
+    if not content.strip():
+        fail("'content' is required: the whole document, in Markdown")
+    # cwd IS the workspace. The marker only accepts a path inside it, so an
+    # absolute or escaping path would produce a PDF nobody receives.
+    if not path or path.startswith("/") or ".." in path.split("/"):
+        fail("path must be a file name inside the workspace (no .. or absolute paths)")
+    if not path.lower().endswith(".pdf"):
+        path += ".pdf"
+    root = Path.cwd().resolve()
+    target = (root / path).resolve()
+    if not target.is_relative_to(root):
+        fail("path must stay inside the workspace")
+    title = " ".join(str(args.get("title") or "").split()) or target.stem
+
+    browser = find_browser()
+    if not browser:
+        fail("no Chrome/Chromium found to render the PDF. Tell the user to "
+             "install one (or set PUPPETEER_EXECUTABLE_PATH); meanwhile send "
+             "the document as text")
+
+    images = ImageEmbedder(root)
+    page = markdown_html.document(
+        markdown_html.render(content, image_src=images),
+        head=f"<title>{html.escape(title)}</title><style>{PAGE_CSS}</style>")
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    # The page goes next to the PDF, not in the system temp dir: a snap
+    # Chromium cannot read /tmp of the host.
+    fd, html_path = tempfile.mkstemp(suffix=".html", prefix="write_pdf_", dir=target.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(page)
+        target.unlink(missing_ok=True)
+        result = subprocess.run(
+            [browser, "--headless", "--no-sandbox", "--disable-gpu",
+             "--disable-dev-shm-usage", "--no-pdf-header-footer", *NO_NETWORK,
+             f"--print-to-pdf={target}", Path(html_path).as_uri()],
+            capture_output=True, text=True, timeout=CHROME_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        fail("the PDF renderer timed out; try again, or with a shorter document")
+    finally:
+        os.unlink(html_path)
+    if not target.is_file() or target.stat().st_size == 0:
+        detail = (result.stderr or "").strip().splitlines()[-1:] or ["no output"]
+        fail(f"the PDF renderer produced no file ({detail[0][:200]})")
+
+    safe_title = title.replace("|", "/").replace("]]", ")")
+    print(f"[[resource:{path}|application/pdf|{safe_title}]]")
+    print(f"PDF written: {path} ({target.stat().st_size // 1024 + 1} kB, "
+          f"{images.count} image(s))")
+    if images.notes:
+        print("Images left out (their alt text is printed instead):")
+        print("\n".join(f"- {n}" for n in images.notes))
+
+
+main()

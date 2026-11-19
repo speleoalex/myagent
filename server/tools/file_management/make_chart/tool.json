@@ -1,0 +1,43 @@
+{
+  "name": "Make Chart",
+  "description": "Draw a chart from numbers you already have: bar (columns), barh (horizontal bars, best with long names), line (a trend over ordered categories, e.g. years) or scatter (x/y points). Saves an SVG in the workspace and shows it to the user; put it in a PDF with write_pdf as ![caption](file.svg). One chart answers one question: for two measures with different units make two charts.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "type": {
+        "type": "string",
+        "enum": ["bar", "barh", "line", "scatter"],
+        "description": "Chart type (default bar)"
+      },
+      "title": {
+        "type": "string",
+        "description": "What the chart shows, e.g. 'Sviluppo delle grotte di Borgio Verezzi (m)'"
+      },
+      "categories": {
+        "type": "array",
+        "items": {"type": "string"},
+        "description": "bar/barh/line: the labels, one per value (names, years...). Max 60"
+      },
+      "series": {
+        "type": "array",
+        "description": "The data. bar/barh/line: [{\"name\": \"Sviluppo\", \"values\": [1442, 250, ...]}], values in the order of categories, null for a gap; max 8 series. scatter: [{\"name\": \"Grotte\", \"points\": [[x, y], ...]}]; max 3 series",
+        "items": {"type": "object"}
+      },
+      "x_label": {
+        "type": "string",
+        "description": "Optional axis title for x (with the unit)"
+      },
+      "y_label": {
+        "type": "string",
+        "description": "Optional axis title for the values (with the unit)"
+      },
+      "path": {
+        "type": "string",
+        "description": "Optional file name in the workspace (default: from the title, under _resources/)"
+      }
+    },
+    "required": ["series"]
+  },
+  "timeout": 20,
+  "max_output": 2000
+}

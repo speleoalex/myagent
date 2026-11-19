@@ -52,7 +52,8 @@ scripted or container install keeps answering no to everything.
     *(needs internet)*
 - **`libzim`** — to search offline Wikipedia archives. Installed by `install.sh`
   into its own virtualenv, so there is nothing to do.
-- **Node.js + Chrome/Chromium** *(optional)* — only for the online web tools.
+- **Node.js + Chrome/Chromium** *(optional)* — for the online web tools. Chrome
+  alone also renders the PDFs of `write_pdf`.
 
 `install.sh` offers to install the missing system packages, then reports what
 it found, backend included:

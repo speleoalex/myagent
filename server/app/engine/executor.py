@@ -64,9 +64,17 @@ _ACTIVATE_TOOLS = "activate_tools"
 # on a production install, 2026-09-21: a sysadmin agent hit the limit at call
 # 21 in both runs of its daily report (6 of the 22 calls were the same
 # time-tracking query cut in 2-day windows), wrote "non ho potuto inviare la
-# notifica" and the report stayed in the log. Attended turns are untouched: the user reads the reply.
+# notifica" and the report stayed in the log.
 _NOTIFY_USER = "notify_user"
 _DELIVERY_CALLS_MAX = 3
+
+# The same reserved round, for an ATTENDED turn whose user asked for a document.
+# The forced reply does reach them, but it cannot be the PDF: observed on the
+# catasto mailbox, 2026-11-11, an agent asked for "un report pdf" spent 25 calls
+# out of 25 querying and answered with the report as mail text. The round costs
+# nothing when no document was asked: it replaces the forced answer, and a
+# model that just answers ends the turn as before.
+_WRITE_PDF = "write_pdf"
 
 # Cap (chars) on the quoted transcript of history turns another agent answered
 # (see _split_history). Generous on purpose: the user's rule is that the agent
@@ -1007,13 +1015,19 @@ class AgentExecutor:
             return False
         return (tool_call.get("function") or {}).get("name") == _ACTIVATE_TOOLS
 
+    def _delivery_tool(self, tool_defs: list[dict]) -> str | None:
+        """The one tool the reserved round offers, if this agent holds it:
+        notify_user when nobody reads the reply, write_pdf when somebody does."""
+        wanted = _NOTIFY_USER if self.unattended else _WRITE_PDF
+        return wanted if any(d["id"] == wanted for d in tool_defs) else None
+
     @staticmethod
-    def _delivery_defs(tool_defs: list[dict]) -> list[dict]:
-        """The payload of the reserved round: notify_user and nothing else.
+    def _delivery_defs(tool_defs: list[dict], tool_id: str | None) -> list[dict]:
+        """The payload of the reserved round: the delivery tool and nothing else.
 
         The model is told that one tool is left; sending it the others as well
         would contradict the prompt with the schema, and the schema wins."""
-        return [d for d in tool_defs if d["id"] == _NOTIFY_USER]
+        return [d for d in tool_defs if d["id"] == tool_id]
 
     def activate_tool_categories(self, keys: list[str]) -> tuple[list[str], list[str]]:
         """Switch categories on for the rest of this turn.
@@ -1973,9 +1987,10 @@ class AgentExecutor:
         tools_downgrade_retried = False  # one free redo when the endpoint rejects `tools` mid-run
         use_response_temp = False  # switch to response_temperature after tool results
         stream_error: str | None = None  # last LLM failure, surfaced if no reply
-        # Unattended turns only: the reserved notify_user round (see the budget
-        # check). Offered once; while it lasts, notify_user alone is let past
-        # max_tool_calls, at most _DELIVERY_CALLS_MAX times.
+        # The reserved delivery round (see the budget check). Offered once;
+        # while it lasts, delivery_tool alone is let past max_tool_calls, at
+        # most _DELIVERY_CALLS_MAX times.
+        delivery_tool: str | None = None
         delivery_round = False
         delivery_offered = False
         delivery_calls = 0
@@ -2211,35 +2226,39 @@ class AgentExecutor:
                 for tc in tool_calls:
                     if self._is_gate_call(tc):
                         free.append(tc)
-                    elif (delivery_round and _tool_call_name(tc) == _NOTIFY_USER
+                    elif (delivery_round and _tool_call_name(tc) == delivery_tool
                             and delivery_calls < _DELIVERY_CALLS_MAX):
                         delivery_calls += 1
-                        self._debug_log(f"  DELIVERY: {_NOTIFY_USER} let past the budget "
+                        self._debug_log(f"  DELIVERY: {delivery_tool} let past the budget "
                                         f"({delivery_calls}/{_DELIVERY_CALLS_MAX})")
                         free.append(tc)
                 if len(free) < len(tool_calls):
-                    # Unattended and the agent holds notify_user: do not force
-                    # the answer yet — nobody would read it. Drop the refused
-                    # calls, tell the model the budget is gone and that ONE tool
-                    # is left, and send it that schema alone. Once per turn, and
-                    # only while a round is still available to spend.
-                    if (self.unattended and not delivery_offered
-                            and iterations < self.agent.max_iterations
-                            and any(d["id"] == _NOTIFY_USER for d in callable_defs)):
+                    # The agent holds the delivery tool of this kind of turn
+                    # (notify_user unattended, where nobody would read a forced
+                    # answer; write_pdf attended, where the answer cannot be the
+                    # document that was asked for): do not force the answer yet.
+                    # Drop the refused calls, tell the model the budget is gone
+                    # and that ONE tool is left, and send it that schema alone.
+                    # Once per turn, and only while a round is still available.
+                    if not delivery_offered and iterations < self.agent.max_iterations:
+                        delivery_tool = self._delivery_tool(callable_defs)
+                    if delivery_tool and not delivery_offered:
                         delivery_offered = delivery_round = True
                         refused = ", ".join(_tool_call_name(tc) for tc in tool_calls
                                             if tc not in free)
                         self._debug_log(f"  MAX TOOL CALLS reached ({max_tool_calls}): "
-                                        f"refused {refused}; unattended -> reserving a "
-                                        f"{_NOTIFY_USER} round")
-                        log.warning("Agent '%s' hit max_tool_calls limit (%d) unattended; "
+                                        f"refused {refused}; reserving a "
+                                        f"{delivery_tool} round")
+                        log.warning("Agent '%s' hit max_tool_calls limit (%d); "
                                     "offering a %s round", self.agent.id, max_tool_calls,
-                                    _NOTIFY_USER)
+                                    delivery_tool)
                         if full_content.strip():
                             messages.append({"role": "assistant", "content": full_content})
-                        messages.append({"role": "user", "content": prompts.DELIVERY_ROUND})
+                        messages.append({"role": "user", "content": (
+                            prompts.DELIVERY_ROUND if delivery_tool == _NOTIFY_USER
+                            else prompts.DOCUMENT_ROUND)})
                         system_content, tool_defs, openai_tools = self._prepare_turn(
-                            self._delivery_defs(callable_defs), attachments,
+                            self._delivery_defs(callable_defs, delivery_tool), attachments,
                             memory_context, transcribed=transcribed,
                             foreign_context=foreign_context)
                         messages[0] = {"role": "system", "content": system_content}
@@ -2311,7 +2330,14 @@ class AgentExecutor:
                     result, config.WORKSPACE_DIR, unattended=self.unattended
                 )
 
-                executed_calls.add(_tool_call_key(tc))
+                # A call that FAILED has not been answered, so it must stay
+                # retryable: keying the dedup on (name, args) alone turned the
+                # archive's own "the database is busy, retry in about 10
+                # seconds" into a final answer — observed 2026-11-11, when a
+                # mail report was forced out of half the data it had asked
+                # for. The turn's max_tool_calls is what bounds the retries.
+                if not result.lstrip().startswith("ERROR"):
+                    executed_calls.add(_tool_call_key(tc))
                 # The model cannot count its own calls, and ten sequential
                 # local_read(offset=…) reads of one manual is the loop this
                 # exists for. The note rides the RESULT and not the tool schema,
@@ -2391,7 +2417,7 @@ class AgentExecutor:
                 self._lazy_dirty = False
                 rebuilt = self._lazy_filter(self._full_tool_defs)
                 if delivery_round:
-                    rebuilt = self._delivery_defs(rebuilt)
+                    rebuilt = self._delivery_defs(rebuilt, delivery_tool)
                 system_content, tool_defs, openai_tools = self._prepare_turn(
                     rebuilt, attachments,
                     memory_context, transcribed=transcribed,

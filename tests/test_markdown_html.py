@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Markdown → HTML for outgoing mail (connectors plugin, ``markdown_html``).
+"""Markdown → HTML for outgoing mail (``app.markdown_html``: mail bodies and ``write_pdf``).
 
 Born from a live mail (2026-11-05, catasto mailbox): a cave sheet written in
 Markdown arrived as ``**Numero catastale:** LI191``. Pinned here, all pure:
@@ -23,9 +23,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "server"))
-sys.path.insert(0, str(ROOT / "connectors" / "plugin"))
 
-from myagent_connectors import markdown_html as md  # noqa: E402
+from app import markdown_html as md  # noqa: E402
 
 failures: list[str] = []
 

@@ -1,0 +1,230 @@
+#!/usr/bin/env node
+/**
+ * web_screenshot - a PNG of a web page, rendered by a headless Chrome.
+ * Input (JSON on stdin): { "url", "width", "height", "full_page", "wait", "title" }
+ * Output: the resource marker of the PNG (saved under _resources/ in the
+ * workspace, the tool's cwd) and one line telling the model how to use it.
+ *
+ * Public addresses only, checked on EVERY request the page makes (redirects,
+ * frames, scripts, images), not just on the url given: a public page can
+ * embed a service of this machine or of the LAN, and the screenshot would
+ * then carry its content out, by mail when the agent answers mail.
+ */
+
+const puppeteer = require('puppeteer-core');
+const crypto = require('crypto');
+const dns = require('dns').promises;
+const fs = require('fs');
+const net = require('net');
+const path = require('path');
+const os = require('os');
+
+// System browser locations per OS. Linux, macOS and Windows so the tool works
+// on all three; PUPPETEER_EXECUTABLE_PATH always wins if set.
+function systemBrowserCandidates() {
+    if (process.platform === 'darwin') {
+        return [
+            '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+            '/Applications/Chromium.app/Contents/MacOS/Chromium',
+            '/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary',
+            '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+        ];
+    }
+    if (process.platform === 'win32') {
+        const pf = process.env['PROGRAMFILES'] || 'C:\\Program Files';
+        const pf86 = process.env['PROGRAMFILES(X86)'] || 'C:\\Program Files (x86)';
+        const local = process.env['LOCALAPPDATA'] || '';
+        return [
+            path.join(pf, 'Google/Chrome/Application/chrome.exe'),
+            path.join(pf86, 'Google/Chrome/Application/chrome.exe'),
+            local && path.join(local, 'Google/Chrome/Application/chrome.exe'),
+            path.join(pf, 'Microsoft/Edge/Application/msedge.exe'),
+        ].filter(Boolean);
+    }
+    // linux
+    return [
+        '/usr/bin/chromium',
+        '/usr/bin/chromium-browser',
+        '/usr/bin/google-chrome-stable',
+        '/usr/bin/google-chrome',
+        // Ubuntu 24.04+ ships chromium ONLY as a snap: the apt package is a shim
+        // that installs it, and /usr/bin/chromium never appears. Last, so a real
+        // deb/tarball install still wins — the snap is confined and slower to start.
+        '/snap/bin/chromium',
+    ];
+}
+
+// The per-platform layout of a puppeteer-managed Chrome-for-Testing download:
+// version folders are prefixed by platform, and the binary sits at a
+// platform-specific inner path.
+function puppeteerChromeInBase(basePath) {
+    const specs = process.platform === 'darwin'
+        ? [
+            { prefix: 'mac_arm-', inner: 'chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing' },
+            { prefix: 'mac-',     inner: 'chrome-mac-x64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing' },
+          ]
+        : process.platform === 'win32'
+        ? [{ prefix: 'win64-', inner: 'chrome-win64/chrome.exe' }]
+        : [{ prefix: 'linux-', inner: 'chrome-linux64/chrome' }];
+    let entries;
+    try { entries = fs.readdirSync(basePath); } catch (e) { return null; }
+    for (const { prefix, inner } of specs) {
+        const versions = entries.filter(f => f.startsWith(prefix));
+        if (versions.length > 0) {
+            const chromePath = path.join(basePath, versions[0], inner);
+            if (fs.existsSync(chromePath)) return chromePath;
+        }
+    }
+    return null;
+}
+
+function findChromePath() {
+    // 1. Prefer an explicit override, then a system-installed browser binary.
+    const systemBinaries = [
+        process.env.PUPPETEER_EXECUTABLE_PATH,
+        ...systemBrowserCandidates(),
+    ];
+    for (const bin of systemBinaries) {
+        if (bin && fs.existsSync(bin)) return bin;
+    }
+
+    // 2. Fall back to a puppeteer-managed Chrome download (for the running OS).
+    const possiblePaths = [
+        path.join(os.homedir(), '.cache/puppeteer/chrome'),
+        path.join(__dirname, '.cache/puppeteer/chrome'),
+        '/root/.cache/puppeteer/chrome',
+        '/var/www/.cache/puppeteer/chrome',
+    ];
+    for (const basePath of possiblePaths) {
+        if (fs.existsSync(basePath)) {
+            const found = puppeteerChromeInBase(basePath);
+            if (found) return found;
+        }
+    }
+    return null;
+}
+
+// Non-public ranges (RFC 6890 and friends). An IPv4-mapped IPv6 address is
+// checked as the IPv4 address it carries.
+const PRIVATE = new net.BlockList();
+for (const [a, p] of [['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8],
+                      ['169.254.0.0', 16], ['172.16.0.0', 12], ['192.0.0.0', 24],
+                      ['192.168.0.0', 16], ['198.18.0.0', 15], ['224.0.0.0', 3]]) {
+    PRIVATE.addSubnet(a, p, 'ipv4');
+}
+for (const [a, p] of [['::', 127], ['fc00::', 7], ['fe80::', 10], ['ff00::', 8], ['64:ff9b::', 96]]) {
+    PRIVATE.addSubnet(a, p, 'ipv6');
+}
+
+function isPublicAddress(address) {
+    const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(address);
+    if (mapped) address = mapped[1];
+    const type = net.isIP(address);
+    return type !== 0 && !PRIVATE.check(address, type === 4 ? 'ipv4' : 'ipv6');
+}
+
+const hostVerdicts = new Map();
+function isPublicHost(hostname) {
+    const host = hostname.replace(/^\[|\]$/g, '');
+    if (!hostVerdicts.has(host)) {
+        hostVerdicts.set(host, net.isIP(host)
+            ? Promise.resolve(isPublicAddress(host))
+            : dns.lookup(host, { all: true })
+                .then(list => list.length > 0 && list.every(a => isPublicAddress(a.address)))
+                .catch(() => false));
+    }
+    return hostVerdicts.get(host);
+}
+
+function clamp(value, low, high, fallback) {
+    const n = Number(value);
+    return Number.isFinite(n) ? Math.min(high, Math.max(low, Math.round(n))) : fallback;
+}
+
+function say(lines) {
+    console.log(lines.join('\n'));
+}
+
+async function screenshot(args) {
+    let url;
+    try {
+        url = new URL(String(args.url || ''));
+    } catch (e) {
+        return say(['ERROR: url must be a full http(s) address']);
+    }
+    if (!['http:', 'https:'].includes(url.protocol)) {
+        return say(['ERROR: url must be a full http(s) address']);
+    }
+    if (!(await isPublicHost(url.hostname))) {
+        return say([`ERROR: ${url.hostname} is not a public address: only public web pages can be captured`]);
+    }
+    const width = clamp(args.width, 320, 2000, 1200);
+    const height = clamp(args.height, 240, 2000, 800);
+    // Maps draw their tiles after the network goes quiet: the extra wait.
+    const wait = clamp(args.wait, 0, 20, 2);
+    const fullPage = args.full_page === true;
+    const title = String(args.title || '').replace(/\s+/g, ' ').trim() || url.hostname;
+
+    const chromePath = findChromePath();
+    let browser = null;
+    const blocked = new Set();
+    try {
+        browser = await puppeteer.launch({
+            headless: 'new',
+            executablePath: chromePath || undefined,
+            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
+                   '--disable-gpu', '--incognito', '--hide-scrollbars'],
+            timeout: 90000,  // first launch of a snap Chromium (see browse_web)
+        });
+        const page = await browser.newPage();
+        await page.setViewport({ width, height });
+        await page.setRequestInterception(true);
+        page.on('request', async req => {
+            let u;
+            try { u = new URL(req.url()); } catch (e) { return req.abort('accessdenied'); }
+            if (u.protocol === 'data:' || u.protocol === 'blob:') return req.continue();
+            if (!['http:', 'https:'].includes(u.protocol)) return req.abort('accessdenied');
+            if (await isPublicHost(u.hostname)) return req.continue();
+            blocked.add(u.hostname);
+            return req.abort('addressunreachable');
+        });
+        try {
+            await page.goto(url.href, { waitUntil: 'networkidle2', timeout: 45000 });
+        } catch (e) {
+            // A page that never goes quiet (live map, ads) is still worth the
+            // picture of what it has drawn; a page that never loaded is not.
+            if (!/timeout/i.test(e.message)) throw e;
+        }
+        await new Promise(resolve => setTimeout(resolve, wait * 1000));
+
+        const name = crypto.createHash('sha1')
+            .update(`${url.href}|${width}x${height}|${fullPage}`).digest('hex').slice(0, 12);
+        const rel = `_resources/screenshot-${name}.png`;
+        fs.mkdirSync('_resources', { recursive: true });
+        await page.screenshot({ path: rel, fullPage });
+
+        const safeTitle = title.replace(/\|/g, '/').replace(/\]\]/g, ')');
+        const out = [
+            `[[resource:${rel}|image/png|${safeTitle}]]`,
+            `Screenshot saved: ${rel} (${width}x${height}${fullPage ? ', full page' : ''}). `
+            + `To put it in a PDF write ![caption](${rel}) in write_pdf's content.`,
+        ];
+        if (blocked.size) {
+            out.push(`Not loaded (not public addresses): ${[...blocked].join(', ')}`);
+        }
+        say(out);
+    } finally {
+        if (browser) await browser.close();
+    }
+}
+
+let input = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', chunk => { input += chunk; });
+process.stdin.on('end', async () => {
+    try {
+        await screenshot(JSON.parse(input || '{}'));
+    } catch (err) {
+        say(['ERROR: ' + err.message]);
+    }
+});

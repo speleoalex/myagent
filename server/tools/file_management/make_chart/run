@@ -1,0 +1,411 @@
+#!/usr/bin/env python3
+"""Draw a chart from data as an SVG file in the workspace. Standard library only.
+
+The model passes the numbers, never code: that is what makes the tool safe to
+give to an agent that answers mail (a plotting script would need a shell).
+The SVG is shown to the user through the resource marker and goes into a PDF
+with write_pdf (![caption](chart.svg)).
+
+Static and light only: it is printed or attached, never hovered. The rules
+are the usual ones for a readable chart: categorical colours in a fixed order
+from a palette validated for colour blindness, one y axis, bars at most 24 px
+thick with a rounded data end and a 2 px gap, 2 px lines, hairline grid, a
+legend from two series up, values printed only where they stay readable.
+"""
+import json
+import math
+import os
+import re
+import sys
+from html import escape
+from pathlib import Path
+
+# Categorical slots, light mode, in this order and never cycled.
+PALETTE = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100",
+           "#e87ba4", "#008300", "#6250d6", "#e34948"]
+SURFACE, INK, INK_2, MUTED = "#fcfcfb", "#0b0b0b", "#52514e", "#898781"
+GRID, AXIS = "#e1e0d9", "#c3c2b7"
+FONT = "Arial,Helvetica,sans-serif"
+CHAR_W = 6.6             # average width of a 12 px glyph, for layout estimates
+MAX_SERIES = {"bar": 8, "barh": 8, "line": 8, "scatter": 3}
+MAX_CATEGORIES = 60
+MAX_POINTS = 2000
+BAR_MAX, BAR_GAP, RADIUS = 24, 2, 4
+WIDTH, HEIGHT = 800, 480
+
+
+class ChartError(ValueError):
+    pass
+
+
+def number(value):
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        raise ChartError(f"not a number: {value!r}")
+    try:
+        n = float(str(value).replace(",", ".")) if isinstance(value, str) else float(value)
+    except (TypeError, ValueError):
+        raise ChartError(f"not a number: {value!r}")
+    if not math.isfinite(n):
+        raise ChartError(f"not a finite number: {value!r}")
+    return n
+
+
+def fmt(n, compact=False):
+    """Italian style: comma decimals, thin grouping; 12.000 -> 12K on axes."""
+    if compact and abs(n) >= 10000:
+        for div, suffix in ((1e9, "G"), (1e6, "M"), (1e3, "K")):
+            if abs(n) >= div:
+                return fmt(n / div) + suffix
+    text = f"{n:,.2f}".rstrip("0").rstrip(".")
+    return text.replace(",", " ").replace(".", ",")
+
+
+def nice_ticks(low, high, count=5):
+    if low == high:
+        low, high = (low - 1, high + 1) if low else (0, 1)
+    raw = (high - low) / count
+    magnitude = 10 ** math.floor(math.log10(raw))
+    step = next(m * magnitude for m in (1, 2, 2.5, 5, 10) if m * magnitude >= raw)
+    start = math.floor(low / step) * step
+    stop = math.ceil(high / step) * step
+    ticks, t = [], start
+    while t <= stop + step / 2:
+        ticks.append(round(t, 10))
+        t += step
+    return ticks
+
+
+def text_width(s, size=12):
+    return len(s) * CHAR_W * size / 12
+
+
+def shorten(s, limit):
+    return s if len(s) <= limit else s[:limit - 1] + "…"
+
+
+def text(x, y, s, size=12, color=INK_2, anchor="start", weight="normal", extra=""):
+    return (f'<text x="{x:.1f}" y="{y:.1f}" font-size="{size}" fill="{color}" '
+            f'text-anchor="{anchor}" font-weight="{weight}"{extra}>{escape(s)}</text>')
+
+
+def bar_path(x, y, w, h, end):
+    """A bar with its data end rounded and its baseline end square. ``end`` is
+    the side of the data end: top, bottom, right or left."""
+    r = min(RADIUS, w / 2, h / 2) if w > 0 and h > 0 else 0
+    if r <= 0.5:
+        return f'M{x:.1f},{y:.1f}h{w:.1f}v{h:.1f}h{-w:.1f}z'
+    if end == "top":
+        return (f'M{x:.1f},{y + h:.1f}v{-(h - r):.1f}a{r},{r} 0 0 1 {r},{-r}'
+                f'h{w - 2 * r:.1f}a{r},{r} 0 0 1 {r},{r}v{h - r:.1f}z')
+    if end == "bottom":
+        return (f'M{x:.1f},{y:.1f}v{h - r:.1f}a{r},{r} 0 0 0 {r},{r}'
+                f'h{w - 2 * r:.1f}a{r},{r} 0 0 0 {r},{-r}v{-(h - r):.1f}z')
+    if end == "right":
+        return (f'M{x:.1f},{y:.1f}h{w - r:.1f}a{r},{r} 0 0 1 {r},{r}'
+                f'v{h - 2 * r:.1f}a{r},{r} 0 0 1 {-r},{r}h{-(w - r):.1f}z')
+    return (f'M{x + w:.1f},{y:.1f}h{-(w - r):.1f}a{r},{r} 0 0 0 {-r},{r}'
+            f'v{h - 2 * r:.1f}a{r},{r} 0 0 0 {r},{r}h{w - r:.1f}z')
+
+
+def parse(args):
+    kind = str(args.get("type") or "bar").strip().lower()
+    if kind not in MAX_SERIES:
+        raise ChartError("type must be bar, barh, line or scatter")
+    raw = args.get("series")
+    if isinstance(raw, dict):
+        raw = [raw]
+    if not isinstance(raw, list) or not raw:
+        raise ChartError("'series' is required: a list of {name, values} "
+                         "(scatter: {name, points: [[x, y], ...]})")
+    if len(raw) > MAX_SERIES[kind]:
+        raise ChartError(f"at most {MAX_SERIES[kind]} series for a {kind} chart: "
+                         "fold the small ones into 'Other' or make one chart per group")
+    series = []
+    for i, s in enumerate(raw):
+        if not isinstance(s, dict):
+            raise ChartError("each series must be an object {name, values}")
+        name = " ".join(str(s.get("name") or f"Serie {i + 1}").split())
+        if kind == "scatter":
+            pts = [(number(p[0]), number(p[1])) for p in (s.get("points") or [])
+                   if isinstance(p, (list, tuple)) and len(p) == 2]
+            pts = [p for p in pts if None not in p]
+            if not pts:
+                raise ChartError(f"series '{name}': 'points' must be [[x, y], ...]")
+            series.append({"name": name, "points": pts[:MAX_POINTS]})
+        else:
+            values = [number(v) for v in (s.get("values") or [])]
+            if not any(v is not None for v in values):
+                raise ChartError(f"series '{name}': 'values' must hold numbers")
+            series.append({"name": name, "values": values})
+    categories = [" ".join(str(c).split()) for c in (args.get("categories") or [])]
+    if kind != "scatter":
+        longest = max(len(s["values"]) for s in series)
+        if not categories:
+            categories = [str(i + 1) for i in range(longest)]
+        if len(categories) > MAX_CATEGORIES:
+            raise ChartError(f"at most {MAX_CATEGORIES} categories: keep the largest, "
+                             "or sum the rest into 'Other'")
+        for s in series:
+            if len(s["values"]) > len(categories):
+                raise ChartError(f"series '{s['name']}' has more values than categories")
+            s["values"] += [None] * (len(categories) - len(s["values"]))
+    return kind, categories, series
+
+
+def legend(series, y, width):
+    """One row (or more) of swatch + name, ink-coloured text, under the title."""
+    out, x = [], 0
+    rows = 1
+    for i, s in enumerate(series):
+        label = shorten(s["name"], 40)
+        w = 22 + text_width(label) + 18
+        if x and x + w > width:
+            x, rows = 0, rows + 1
+        yy = y + (rows - 1) * 20
+        out.append(f'<rect x="{x:.1f}" y="{yy - 9:.1f}" width="14" height="10" rx="2" '
+                   f'fill="{PALETTE[i]}"/>')
+        out.append(text(x + 20, yy, label, color=INK_2))
+        x += w
+    return out, rows * 20
+
+
+def draw(args):
+    kind, categories, series = parse(args)
+    title = " ".join(str(args.get("title") or "").split())
+    x_label = " ".join(str(args.get("x_label") or "").split())
+    y_label = " ".join(str(args.get("y_label") or "").split())
+
+    width = WIDTH
+    height = HEIGHT
+    if kind == "barh":
+        rows = len(categories)
+        height = max(HEIGHT, 120 + rows * (min(BAR_MAX, 18) * len(series) + 16))
+    top = 16
+    head = []
+    if title:
+        head.append(text(0, top + 14, title, size=16, color=INK, weight="bold"))
+        top += 30
+    if len(series) > 1:
+        items, used = legend(series, top + 10, width - 40)
+        head += items
+        top += used + 6
+    top += 10
+
+    if kind == "scatter":
+        xs = [p[0] for s in series for p in s["points"]]
+        ys = [p[1] for s in series for p in s["points"]]
+        x_ticks, y_ticks = nice_ticks(min(xs), max(xs)), nice_ticks(min(ys), max(ys))
+    else:
+        vals = [v for s in series for v in s["values"] if v is not None]
+        low, high = min(vals), max(vals)
+        if kind != "line" or low > 0 and low < high * 0.3:
+            low, high = min(low, 0), max(high, 0)   # bars grow from zero
+        y_ticks = nice_ticks(low, high)
+
+    value_ticks = y_ticks
+    tick_labels = [fmt(t, compact=True) for t in value_ticks]
+    if kind == "barh":
+        cat_w = min(220, max(text_width(shorten(c, 32)) for c in categories) + 12)
+        left = cat_w
+    else:
+        left = max(text_width(t) for t in tick_labels) + 14 + (18 if y_label else 0)
+    right = 56 if kind == "line" else 24  # room for the end value of a line
+    bottom = 34 + (18 if x_label else 0)
+
+    # Category labels along x: rotated when they do not fit side by side.
+    rotate = False
+    if kind in ("bar", "line"):
+        band = (width - left - right) / len(categories)
+        longest = max(text_width(shorten(c, 24)) for c in categories)
+        if longest > band - 4:
+            rotate = True
+            bottom += min(140, longest * 0.7)
+    plot_w = width - left - right
+    plot_h = height - top - bottom
+    if plot_h < 120:
+        height += 120 - plot_h
+        plot_h = 120
+
+    body = []
+    if kind == "barh":
+        lo, hi = value_ticks[0], value_ticks[-1]
+
+        def sx(v):
+            return left + (v - lo) / (hi - lo) * plot_w
+        for t, lab in zip(value_ticks, tick_labels):
+            body.append(f'<line x1="{sx(t):.1f}" y1="{top}" x2="{sx(t):.1f}" '
+                        f'y2="{top + plot_h:.1f}" stroke="{GRID}" stroke-width="1"/>')
+            body.append(text(sx(t), top + plot_h + 18, lab, color=MUTED, anchor="middle"))
+        zero = sx(max(lo, min(0, hi)))
+        band = plot_h / len(categories)
+        bar = min(BAR_MAX, (band * 0.75 - BAR_GAP * (len(series) - 1)) / len(series))
+        group = bar * len(series) + BAR_GAP * (len(series) - 1)
+        for ci, cat in enumerate(categories):
+            y0 = top + ci * band + (band - group) / 2
+            body.append(text(left - 8, top + ci * band + band / 2 + 4,
+                             shorten(cat, 32), color=INK_2, anchor="end"))
+            for si, s in enumerate(series):
+                v = s["values"][ci]
+                if v is None:
+                    continue
+                y = y0 + si * (bar + BAR_GAP)
+                x1, x2 = sorted((zero, sx(v)))
+                body.append(f'<path d="{bar_path(x1, y, x2 - x1, bar, "right" if v >= 0 else "left")}" '
+                            f'fill="{PALETTE[si]}"><title>{escape(cat)} · {escape(s["name"])}: '
+                            f'{fmt(v)}</title></path>')
+                if len(series) == 1:
+                    tx = x2 + 6 if v >= 0 else x1 - 6
+                    body.append(text(tx, y + bar / 2 + 4, fmt(v), size=11, color=INK_2,
+                                     anchor="start" if v >= 0 else "end"))
+        body.append(f'<line x1="{zero:.1f}" y1="{top}" x2="{zero:.1f}" y2="{top + plot_h:.1f}" '
+                    f'stroke="{AXIS}" stroke-width="1"/>')
+        if x_label:
+            body.append(text(left + plot_w / 2, height - 8, x_label, color=MUTED, anchor="middle"))
+        if y_label:
+            body.append(text(0, top - 6, y_label, color=MUTED))
+    else:
+        lo, hi = value_ticks[0], value_ticks[-1]
+
+        def sy(v):
+            return top + plot_h - (v - lo) / (hi - lo) * plot_h
+        for t, lab in zip(value_ticks, tick_labels):
+            body.append(f'<line x1="{left}" y1="{sy(t):.1f}" x2="{left + plot_w:.1f}" '
+                        f'y2="{sy(t):.1f}" stroke="{GRID}" stroke-width="1"/>')
+            body.append(text(left - 8, sy(t) + 4, lab, color=MUTED, anchor="end"))
+        if y_label:
+            cy = top + plot_h / 2
+            body.append(text(12, cy, y_label, color=MUTED, anchor="middle",
+                             extra=f' transform="rotate(-90 12 {cy:.1f})"'))
+        if x_label:
+            body.append(text(left + plot_w / 2, height - 8, x_label, color=MUTED, anchor="middle"))
+
+        if kind == "scatter":
+            xlo, xhi = x_ticks[0], x_ticks[-1]
+
+            def sxs(v):
+                return left + (v - xlo) / (xhi - xlo) * plot_w
+            for t in x_ticks:
+                body.append(text(sxs(t), top + plot_h + 18, fmt(t, compact=True),
+                                 color=MUTED, anchor="middle"))
+            body.append(f'<line x1="{left}" y1="{top + plot_h:.1f}" x2="{left + plot_w:.1f}" '
+                        f'y2="{top + plot_h:.1f}" stroke="{AXIS}" stroke-width="1"/>')
+            for si, s in enumerate(series):
+                for x, y in s["points"]:
+                    body.append(f'<circle cx="{sxs(x):.1f}" cy="{sy(y):.1f}" r="4.5" '
+                                f'fill="{PALETTE[si]}" fill-opacity="0.85" stroke="{SURFACE}" '
+                                f'stroke-width="2"><title>{escape(s["name"])}: '
+                                f'{fmt(x)}; {fmt(y)}</title></circle>')
+        else:
+            band = plot_w / len(categories)
+
+            def cx(i):
+                return left + band * (i + 0.5)
+            for ci, cat in enumerate(categories):
+                label = shorten(cat, 24)
+                if rotate:
+                    body.append(text(cx(ci) + 4, top + plot_h + 14, label, size=11,
+                                     color=INK_2, anchor="end",
+                                     extra=f' transform="rotate(-40 {cx(ci) + 4:.1f} '
+                                           f'{top + plot_h + 14:.1f})"'))
+                else:
+                    body.append(text(cx(ci), top + plot_h + 18, label, size=11,
+                                     color=INK_2, anchor="middle"))
+            zero = sy(max(lo, min(0, hi)))
+            if kind == "bar":
+                bar = min(BAR_MAX, (band * 0.75 - BAR_GAP * (len(series) - 1)) / len(series))
+                group = bar * len(series) + BAR_GAP * (len(series) - 1)
+                label_values = len(series) == 1 and band >= text_width("00000", 11)
+                for ci, cat in enumerate(categories):
+                    x0 = cx(ci) - group / 2
+                    for si, s in enumerate(series):
+                        v = s["values"][ci]
+                        if v is None:
+                            continue
+                        x = x0 + si * (bar + BAR_GAP)
+                        y1, y2 = sorted((zero, sy(v)))
+                        body.append(f'<path d="{bar_path(x, y1, bar, y2 - y1, "top" if v >= 0 else "bottom")}" '
+                                    f'fill="{PALETTE[si]}"><title>{escape(cat)} · '
+                                    f'{escape(s["name"])}: {fmt(v)}</title></path>')
+                        if label_values:
+                            ty = y1 - 5 if v >= 0 else y2 + 14
+                            body.append(text(x + bar / 2, ty, fmt(v), size=11,
+                                             color=INK_2, anchor="middle"))
+            else:
+                markers = len(categories) <= 30
+                for si, s in enumerate(series):
+                    run = []
+                    for ci, v in enumerate(s["values"]):
+                        if v is None:
+                            if len(run) > 1:
+                                body.append(polyline(run, PALETTE[si]))
+                            run = []
+                            continue
+                        run.append((cx(ci), sy(v)))
+                    if len(run) > 1:
+                        body.append(polyline(run, PALETTE[si]))
+                    for ci, v in enumerate(s["values"]):
+                        if v is not None and markers:
+                            body.append(f'<circle cx="{cx(ci):.1f}" cy="{sy(v):.1f}" r="4" '
+                                        f'fill="{PALETTE[si]}" stroke="{SURFACE}" stroke-width="2">'
+                                        f'<title>{escape(categories[ci])} · {escape(s["name"])}: '
+                                        f'{fmt(v)}</title></circle>')
+                    last = max((i for i, v in enumerate(s["values"]) if v is not None))
+                    # The end value of each line, the one label lines get.
+                    if len(series) <= 4:
+                        body.append(text(cx(last) + 8, sy(s["values"][last]) + 4,
+                                         fmt(s["values"][last]), size=11, color=INK_2))
+            body.append(f'<line x1="{left}" y1="{zero:.1f}" x2="{left + plot_w:.1f}" '
+                        f'y2="{zero:.1f}" stroke="{AXIS}" stroke-width="1"/>')
+
+    summary = title or f"{kind} chart"
+    names = ", ".join(s["name"] for s in series)
+    svg = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height:.0f}" '
+           f'viewBox="-16 0 {width + 16} {height:.0f}" font-family="{FONT}" role="img">',
+           f'<title>{escape(summary)}</title><desc>{escape(names)}</desc>',
+           f'<rect x="-16" y="0" width="{width + 16}" height="{height:.0f}" fill="{SURFACE}"/>',
+           *head, *body, '</svg>']
+    return "\n".join(svg) + "\n", summary
+
+
+def polyline(points, color):
+    pts = " ".join(f"{x:.1f},{y:.1f}" for x, y in points)
+    return (f'<polyline points="{pts}" fill="none" stroke="{color}" stroke-width="2" '
+            f'stroke-linejoin="round" stroke-linecap="round"/>')
+
+
+def main():
+    args = json.loads(sys.stdin.read() or "{}")
+    path = str(args.get("path") or "").strip()
+    while path.startswith("./"):
+        path = path[2:]
+    if not path:
+        title = str(args.get("title") or "grafico")
+        path = "_resources/" + (re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:50]
+                                or "grafico")
+    # cwd IS the workspace; the marker only accepts a path inside it.
+    if path.startswith("/") or ".." in path.split("/"):
+        print("ERROR: path must be a file name inside the workspace (no .. or absolute paths)")
+        return
+    if not path.lower().endswith(".svg"):
+        path = os.path.splitext(path)[0] + ".svg"
+    root = Path.cwd().resolve()
+    target = (root / path).resolve()
+    if not target.is_relative_to(root):
+        print("ERROR: path must stay inside the workspace")
+        return
+    try:
+        svg, summary = draw(args)
+    except ChartError as e:
+        print(f"ERROR: {e}")
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(svg, encoding="utf-8")
+    safe_title = summary.replace("|", "/").replace("]]", ")")
+    print(f"[[resource:{path}|image/svg+xml|{safe_title}]]")
+    print(f"Chart saved: {path}. To put it in a PDF write ![caption]({path}) in "
+          f"write_pdf's content; give the numbers there as a table too.")
+
+
+main()
