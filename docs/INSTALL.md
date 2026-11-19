@@ -184,7 +184,21 @@ service it finds (your user unit, or the system-wide one — with sudo, in the
 same mode it was installed). If the checkout has commits GitHub does not have, or
 uncommitted edits to tracked files, **nothing is overwritten** — the script
 explains why and exits with code 2. `--check` reports what would happen
-without changing anything; `--no-deploy` updates the checkout only.
+without changing anything; `--no-deploy` updates the checkout only. After a
+reinstall it also refreshes the connectors plugin when it is installed under
+your own `~/myagent`; for a service account it prints the
+`sudo -u <account> bash connectors/install.sh` to run.
+
+The same is available from the UI, under *Settings → Server → Updates*:
+*Check for updates* runs `update.sh --check`, and *Install the update* runs
+`update.sh` and reloads the page once the service is back. The installed copy
+knows its checkout because `install.sh` records it in the unit
+(`MYAGENT_SOURCE_DIR`), so re-run `install.sh` once on an older install. The
+install button is offered only for a per-user (`systemctl --user`) install
+owned by the checkout's owner: the update has to outlive the restart it
+causes, so it runs as a `systemd-run --user` unit of its own, and a system
+unit would need sudo. Elsewhere the page checks and shows the command to run.
+Its output goes to `~/myagent/logs/update.log`.
 
 ## Uninstalling
 
@@ -214,9 +228,9 @@ own machine.
 On iPhone and iPad, Safari has no install button: use *Share → Add to Home
 Screen*.
 
-The installed app carries the server's name: *MyAgent orin*, *MyAgent
-Workshop*, whatever is set as instance name under Settings → *Server*, or the
-host name when nothing is. Two MyAgent servers installed on the same phone thus
+The installed app carries the server's name: *orin*, *Workshop*, whatever is
+set as instance name under Settings → *Server*, or the host name when nothing
+is. Two MyAgent servers installed on the same phone thus
 get two icons with two names (and the instance color as title bar), instead of
 two identical *MyAgent* icons. The name is read when the app is installed;
 after renaming a server, remove and reinstall its app to update it.
@@ -266,7 +280,7 @@ API lives.
 
 Two pieces make the split work:
 
-1. **Point the UI at the server** — in *Settings → MyAgent server*, or by
+1. **Point the UI at the server** — in *Settings → Advanced → MyAgent server*, or by
    opening the UI once as
    `http://apache-host/myagent/?server=http://myagent-host:8888`
    (stored in the browser and stripped from the URL, like `?api_key=`; an empty

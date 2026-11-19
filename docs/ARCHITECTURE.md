@@ -833,7 +833,7 @@ formulas are memoized because `renderMarkdown` re-runs on every streamed token.
 
 The UI does not have to be served by MyAgent: it is plain static HTML with
 relative asset paths, so any web server can host it, and `App.serverBase`
-(Settings → *MyAgent server*, or a one-shot `?server=` URL parameter; stored
+(Settings → *Advanced* → *MyAgent server*, or a one-shot `?server=` URL parameter; stored
 in `localStorage`, empty = same origin) points it at the API. Same origin means
 the folder the page came from (`App.pageBase()`), so the UI also works behind a
 reverse proxy under a path such as `/myagent/`. Every request —

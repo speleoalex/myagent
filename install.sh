@@ -750,6 +750,9 @@ ExecStart=$INSTALL_DIR/server/.venv/bin/python $INSTALL_DIR/server/main.py
 Restart=on-failure
 RestartSec=5
 Environment=PYTHONUNBUFFERED=1
+# The git checkout this copy came from: Settings -> Server checks for and
+# installs updates by running its update.sh (the copy has no .git).
+Environment="MYAGENT_SOURCE_DIR=$SOURCE_DIR"
 $extra
 # The API has no authentication by default and ships shell-executing tools: keep
 # it on localhost unless you know what you are doing (or front it with an
@@ -785,6 +788,8 @@ write_plist() {
     <dict>
         <key>PYTHONUNBUFFERED</key>
         <string>1</string>
+        <key>MYAGENT_SOURCE_DIR</key>
+        <string>${SOURCE_DIR}</string>
 $state_block
         <!-- The API has no authentication and ships shell-executing tools:
              keep it on localhost unless you know what you are doing. -->

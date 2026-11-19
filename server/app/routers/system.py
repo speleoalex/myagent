@@ -1,8 +1,10 @@
+import asyncio
 import getpass
 import os
 import platform
 import re
 import secrets as secrets_mod
+import shutil
 import socket
 import sys
 from pathlib import Path
@@ -325,3 +327,143 @@ def _require_editable() -> None:
             "The API key is pinned by the MYAGENT_API_KEY environment variable; "
             "unset it (e.g. in the systemd drop-in) to manage the key from here",
         )
+
+
+# --- Updates from Settings -------------------------------------------------- #
+#
+# The work is update.sh's, in the git checkout the install came from
+# (config.SOURCE_DIR): it compares with GitHub by ancestry, refuses to touch
+# local work, and reinstalls. These routes only run it and report.
+
+UPDATE_UNIT = "myagent-update"
+UPDATE_CHECK_TIMEOUT = 90  # a git fetch over a slow link, not more
+
+
+def _in_user_unit() -> bool:
+    """Running as a `systemctl --user` service? Read from our own cgroup
+    (".../user@1000.service/app.slice/myagent.service"), not from what the
+    install mode should have been."""
+    try:
+        cgroup = Path("/proc/self/cgroup").read_text()
+    except OSError:
+        return False
+    return "/user@" in cgroup and cgroup.strip().endswith(".service")
+
+
+def _install_blocker() -> str:
+    """Why "install" cannot be offered here, '' when it can.
+
+    The install must outlive the restart it causes. Started by this process it
+    would sit in the service's cgroup and die with it halfway through
+    install.sh, so it goes through `systemd-run --user`, a unit of its own.
+    That exists only for a user-mode install, run by the checkout's owner. A
+    system unit needs sudo to rewrite, which the service never has: there the
+    page shows the command instead."""
+    src = config.SOURCE_DIR
+    if not (src / "update.sh").is_file() or not (src / ".git").exists():
+        return "no_checkout"
+    if not _in_user_unit():
+        return "not_user_service"
+    if not shutil.which("systemd-run"):
+        return "no_systemd_run"
+    try:
+        if src.stat().st_uid != os.getuid():
+            return "not_owner"
+    except OSError:
+        return "no_checkout"
+    return ""
+
+
+async def _unit_active(unit: str) -> bool:
+    if not shutil.which("systemctl"):
+        return False
+    proc = await asyncio.create_subprocess_exec(
+        "systemctl", "--user", "is-active", "--quiet", unit,
+        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+    return await proc.wait() == 0
+
+
+def _update_log_tail(limit: int = 6000) -> str:
+    try:
+        return config.UPDATE_LOG_FILE.read_text(errors="replace")[-limit:]
+    except OSError:
+        return ""
+
+
+@router.get("/update")
+async def update_check(check: bool = True):
+    """Is there a newer version on GitHub? Runs `update.sh --check`, which
+    fetches and changes nothing.
+
+    state: up_to_date | available | blocked (local commits or edits that the
+    update would overwrite, so it refuses) | running | error | unsupported.
+    With check=false nothing is run and state is running | idle: the cheap
+    poll the page uses while an update it started is under way."""
+    src = config.SOURCE_DIR
+    blocker = _install_blocker()
+    result = {
+        "source_dir": str(src),
+        "command": f"cd {src} && ./update.sh",
+        "can_install": not blocker,
+        "install_blocker": blocker,
+        "output": "",
+        "last_log": _update_log_tail(),
+    }
+    if blocker == "no_checkout":
+        return {**result, "state": "unsupported"}
+    if await _unit_active(UPDATE_UNIT):
+        return {**result, "state": "running"}
+    if not check:
+        return {**result, "state": "idle"}
+    # No terminal to ask for credentials: a prompt would hang until the timeout.
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    proc = await asyncio.create_subprocess_exec(
+        "bash", "update.sh", "--check", cwd=src, env=env,
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(), UPDATE_CHECK_TIMEOUT)
+    except asyncio.TimeoutError:
+        proc.kill()
+        return {**result, "state": "error", "output": "timed out (network?)"}
+    text = out.decode(errors="replace")
+    if proc.returncode == 2:
+        state = "blocked"
+    elif proc.returncode != 0:
+        state = "error"
+    elif "would fast-forward" in text:
+        state = "available"
+    else:
+        state = "up_to_date"
+    return {**result, "state": state, "output": text}
+
+
+@router.post("/update", status_code=202)
+async def update_install():
+    """Start update.sh in a transient user unit and return at once: it will
+    restart this service, so the caller waits for /system/info to report a
+    new pid. Its output goes to logs/update.log (GET /system/update shows it).
+    update.sh itself refuses to overwrite local work, so the worst case of a
+    stale "available" is an update that stops with exit 2 and says why."""
+    blocker = _install_blocker()
+    if blocker:
+        raise HTTPException(409, f"Updating from here is not possible ({blocker}); "
+                                 f"run: cd {config.SOURCE_DIR} && ./update.sh")
+    log = config.UPDATE_LOG_FILE
+    log.parent.mkdir(parents=True, exist_ok=True)
+    cmd = ["systemd-run", "--user", "--unit", UPDATE_UNIT, "--collect", "--quiet",
+           f"--working-directory={config.SOURCE_DIR}", "-E", "GIT_TERMINAL_PROMPT=0"]
+    if os.environ.get("MYAGENT_HOME"):
+        # So the reinstall writes the same state root into the unit.
+        cmd += ["-E", f"MYAGENT_HOME={os.environ['MYAGENT_HOME']}"]
+    # The log path rides as $1, never inside the script text.
+    cmd += ["/bin/bash", "-c", 'exec bash ./update.sh >"$1" 2>&1 </dev/null',
+            "update", str(log)]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+    out, _ = await proc.communicate()
+    if proc.returncode != 0:
+        # The usual one: an update already running (the unit name is taken).
+        raise HTTPException(409, out.decode(errors="replace").strip()
+                            or "could not start the update")
+    return {"started": True}

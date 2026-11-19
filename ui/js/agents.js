@@ -42,23 +42,19 @@ const AgentsPage = {
             ${this.previewModalMarkup()}`;
 
         this.wireNative();
+        // No stopPropagation: these sit in the card footer, which the card's
+        // click-to-edit ignores, and stopping the event would keep Bootstrap
+        // from closing the menu they live in.
         App.container.querySelectorAll('[data-preview]').forEach(btn => {
-            btn.onclick = (e) => { e.stopPropagation(); this.openPreviewById(btn.dataset.preview); };
+            btn.onclick = () => this.openPreviewById(btn.dataset.preview);
         });
-        // stopPropagation, like every other card button: the card itself
-        // navigates to the editor on click, so without it cloning would ALSO
-        // open the source agent.
         App.container.querySelectorAll('[data-clone]').forEach(btn => {
-            btn.onclick = (e) => {
-                e.stopPropagation();
-                location.hash = `#/agents/new/${btn.dataset.clone}`;
-            };
+            btn.onclick = () => { location.hash = `#/agents/new/${btn.dataset.clone}`; };
         });
         // Start/stop = flip the persisted `live` flag: the scheduler notices
         // within one scan, and a started agent survives server restarts.
         App.container.querySelectorAll('[data-live-toggle]').forEach(btn => {
-            btn.onclick = async (e) => {
-                e.stopPropagation();
+            btn.onclick = async () => {
                 const agent = agents.find(x => x.id === btn.dataset.liveToggle);
                 if (!agent) return;
                 try {
@@ -130,38 +126,50 @@ const AgentsPage = {
                    <i class="bi bi-arrow-counterclockwise"></i>
                </button>`
             : '';
+        const toolCount = (a.tools || []).length;
+        const model = !a.model_id || a.model_id === 'default'
+            ? i18n('agents.modelBadgeDefault') : i18n('agents.modelBadge', { model: a.model_id });
+        // One visible action, the everyday one (chat); the rest behind "⋯".
+        // The footer is outside the card's click-to-edit: a click there never
+        // navigates, so the menu needs no stopPropagation (which would also
+        // keep Bootstrap from closing it).
         return `
             <div class="col-md-6 col-lg-4 col-xl-3">
-                <div class="card card-agent h-100" onclick="location.hash='#/agents/${id}'">
+                <div class="card card-agent h-100" onclick="if (!event.target.closest('.card-footer')) location.hash='#/agents/${id}'">
                     <div class="card-body">
                         <h5 class="card-title">${App.esc(a.name)}<i class="bi bi-pencil card-edit-hint"
                             title="${App.escAttr(i18n('common.edit'))}"></i></h5>
                         <p class="card-text text-secondary small card-desc"
                            title="${App.escAttr(a.description || '')}">${App.esc(a.description || '')}</p>
-                        <div class="small">
-                            <span class="badge bg-secondary">${App.esc(a.model_id)}</span>
-                            <span class="badge bg-info">${i18n('agents.toolsBadge', { count: (a.tools || []).length })}</span>
-                            ${nat && nat.modified ? `<span class="badge bg-warning text-dark">${i18n('agents.statusModified')}</span>` : ''}
+                        <div class="small d-flex flex-wrap gap-1">
                             ${this.liveBadge(a, status)}
+                            <span class="badge bg-secondary">${App.esc(model)}</span>
+                            <span class="badge bg-info">${App.esc(toolCount === 1
+                                ? i18n('agents.toolsBadgeOne') : i18n('agents.toolsBadge', { count: toolCount }))}</span>
+                            ${nat && nat.modified ? `<span class="badge bg-warning text-dark">${i18n('agents.statusModified')}</span>` : ''}
                         </div>
                     </div>
-                    <div class="card-footer d-flex flex-wrap gap-2 align-items-center">
-                        <a href="#/chat/${id}" class="btn btn-sm btn-outline-primary" onclick="event.stopPropagation()">
+                    <div class="card-footer d-flex gap-2 align-items-center">
+                        <a href="#/chat/${id}" class="btn btn-sm btn-outline-primary">
                             <i class="bi bi-chat-dots"></i> ${i18n('agents.chat')}
                         </a>
-                        <button type="button" class="btn btn-sm btn-outline-info" data-preview="${id}">
-                            <i class="bi bi-diagram-3"></i> ${i18n('agents.preview')}
-                        </button>
-                        <button type="button" class="btn btn-sm btn-outline-secondary" data-clone="${id}"
-                                title="${App.escAttr(i18n('agents.cloneTitle'))}">
-                            <i class="bi bi-copy"></i> ${i18n('agents.clone')}
-                        </button>
-                        <div class="ms-auto d-flex gap-2">
-                            ${resetBtn}
-                            <button type="button" class="btn btn-sm ${a.live ? 'btn-danger' : 'btn-outline-success'}"
-                                    data-live-toggle="${id}" title="${i18n(a.live ? 'agents.liveStop' : 'agents.liveStart')}">
-                                <i class="bi ${a.live ? 'bi-stop-fill' : 'bi-play-fill'}"></i>
+                        ${resetBtn}
+                        <div class="dropdown ms-auto">
+                            <button type="button" class="btn btn-sm btn-outline-secondary" data-bs-toggle="dropdown"
+                                    aria-expanded="false" title="${App.escAttr(i18n('agents.moreActions'))}"
+                                    aria-label="${App.escAttr(i18n('agents.moreActions'))}">
+                                <i class="bi bi-three-dots"></i>
                             </button>
+                            <ul class="dropdown-menu dropdown-menu-end">
+                                <li><button type="button" class="dropdown-item" data-preview="${id}">
+                                    <i class="bi bi-diagram-3"></i> ${i18n('agents.preview')}</button></li>
+                                <li><button type="button" class="dropdown-item" data-clone="${id}">
+                                    <i class="bi bi-copy"></i> ${i18n('agents.clone')}</button></li>
+                                <li><hr class="dropdown-divider"></li>
+                                <li><button type="button" class="dropdown-item" data-live-toggle="${id}">
+                                    <i class="bi ${a.live ? 'bi-stop-fill text-danger' : 'bi-play-fill text-success'}"></i>
+                                    ${i18n(a.live ? 'agents.liveStop' : 'agents.liveStart')}</button></li>
+                            </ul>
                         </div>
                     </div>
                 </div>
@@ -218,6 +226,36 @@ const AgentsPage = {
         } catch (err) {
             App.toast(err.message, 'danger');
         }
+    },
+
+    /** The form's help texts are paragraphs; CSS cuts each to two lines
+     *  (.form-text in #agent-form) and a click or Enter shows the rest.
+     *
+     *  Only a text that IS cut becomes a tab stop, which can be measured only
+     *  on a visible pane: hence the pass on every tab shown, not one at render.
+     *  Clicks on a link or button inside a hint are left alone. */
+    wireLongHints(form) {
+        if (!form) return;
+        const toggle = (el) => {
+            const open = el.classList.toggle('expanded');
+            el.setAttribute('aria-expanded', String(open));
+        };
+        const mark = (scope) => scope.querySelectorAll('.form-text:not([tabindex])').forEach(el => {
+            if (el.scrollHeight <= el.clientHeight + 1) return;
+            el.tabIndex = 0;
+            el.setAttribute('role', 'button');
+            el.setAttribute('aria-expanded', 'false');
+        });
+        form.addEventListener('click', (e) => {
+            const el = e.target.closest('.form-text[tabindex]');
+            if (el && !e.target.closest('a, button, input')) toggle(el);
+        });
+        form.addEventListener('keydown', (e) => {
+            const el = e.target.closest?.('.form-text[tabindex]');
+            if (el && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); toggle(el); }
+        });
+        form.addEventListener('shown.bs.tab', () => mark(form));
+        mark(form);
     },
 
     /** Tool grants the form manages on the user's behalf, and therefore does NOT
@@ -1020,16 +1058,6 @@ const AgentsPage = {
                         <div class="tab-content" id="agent-panes">
                             ${pane('general', `
                                 <div class="mb-3">
-                                    <label class="form-label" for="f-id">${i18n('common.id')}</label>
-                                    <!-- The hyphen MUST be escaped: browsers compile the pattern
-                                         attribute with the RegExp "v" flag, where a trailing bare "-"
-                                         in a character class is a syntax error. An uncompilable
-                                         pattern is silently ignored (the id was unconstrained), and
-                                         checkValidity() logs a SyntaxError on every submit. -->
-                                    <input type="text" class="form-control" id="f-id" value="${App.escAttr(agent.id)}" ${isEdit ? 'readonly' : ''} required
-                                           pattern="[a-z0-9_\\-]+" title="${i18n('agents.idHint')}">
-                                </div>
-                                <div class="mb-3">
                                     <label class="form-label" for="f-name">${i18n('common.name')}</label>
                                     <input type="text" class="form-control" id="f-name" value="${App.escAttr(agent.name)}" required>
                                 </div>
@@ -1223,6 +1251,22 @@ const AgentsPage = {
                                     <i class="bi bi-exclamation-triangle"></i> ${i18n('agents.liveNoTarget')}
                                 </div>`)}
                             ${pane('advanced', `
+                                <!-- The id is derived from the name (App.autoId) and fixed once
+                                     saved: a technical detail, so it lives here and not first
+                                     thing on General. A slug that comes out empty (a name with
+                                     no latin letters) is caught by validateAcrossTabs, which
+                                     switches to this tab. -->
+                                <div class="mb-3">
+                                    <label class="form-label" for="f-id">${i18n('common.id')}</label>
+                                    <!-- The hyphen MUST be escaped: browsers compile the pattern
+                                         attribute with the RegExp "v" flag, where a trailing bare "-"
+                                         in a character class is a syntax error. An uncompilable
+                                         pattern is silently ignored (the id was unconstrained), and
+                                         checkValidity() logs a SyntaxError on every submit. -->
+                                    <input type="text" class="form-control" id="f-id" value="${App.escAttr(agent.id)}" ${isEdit ? 'readonly' : ''} required
+                                           pattern="[a-z0-9_\\-]+" title="${i18n('agents.idHint')}">
+                                    <div class="form-text">${i18n('agents.idAuto')}</div>
+                                </div>
                                 <div class="row g-3">
                                     <div class="col-12 col-lg-6">${RangeField.render(specs['f-maxiter'], agent.max_iterations ?? 10)}</div>
                                     <div class="col-12 col-lg-6">${RangeField.render(specs['f-maxtools'], agent.max_tool_calls ?? 5)}</div>
@@ -1242,6 +1286,7 @@ const AgentsPage = {
             ${this.previewModalMarkup()}`;
 
         if (!isEdit) App.autoId('f-name', 'f-id');
+        this.wireLongHints(document.getElementById('agent-form'));
 
         // Sliders: listeners, cross-field dependencies and the first paint of every
         // value badge and explanation. No extra wiring is needed for f-memory or

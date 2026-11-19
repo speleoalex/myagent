@@ -365,9 +365,10 @@ if STATIC_DIR.is_dir():
         from Settings, or the host name when none is set (the same fallback the
         navbar badge uses, so an unnamed server is still not anonymous), goes
         into `name`/`short_name`, and `instance_color` into `theme_color` (the
-        title bar of the installed app on Android). `short_name` is what the
-        launcher prints under the icon, about twelve characters: "MyAgent orin"
-        fits, a longer host name is shown alone rather than cut mid-word.
+        title bar of the installed app on Android). The instance name comes
+        first: on a phone with two installs it is the part that differs.
+        `short_name` is what the launcher prints under the icon, about twelve
+        characters, so it is the name alone.
         Registered before the static mount because the mount would otherwise
         answer first. Same no-cache policy as _ShellStaticFiles, so a rename
         reaches the browser on the next visit.
@@ -380,9 +381,8 @@ if STATIC_DIR.is_dir():
         color = (getattr(config.settings, "instance_color", "") or "").strip()
         try:
             data = json.loads(raw)
-            data["name"] = f"MyAgent · {name}"
-            short = f"MyAgent {name}"
-            data["short_name"] = short if len(short) <= 12 else name[:12]
+            data["name"] = f"{name} · MyAgent"
+            data["short_name"] = name[:12]
             if color:
                 data["theme_color"] = color
             raw = json.dumps(data, ensure_ascii=False, indent=2)

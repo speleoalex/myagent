@@ -51,8 +51,9 @@ const App = {
      *
      * Label = the name the user gave in Settings -> Server, else the host
      * name: a server that was never named is still told apart from the next
-     * one. The color goes on the badge and as a 3px stripe under the navbar,
-     * which is visible from across the room in a way a word is not. */
+     * one. The label replaces "MyAgent" as the brand, and the color fills the
+     * whole navbar, which is visible from across the room in a way a word is
+     * not. */
     applyInstance(info) {
         const name = ((info && info.instance_name) || '').trim();
         const hostname = ((info && info.hostname) || '').trim();
@@ -64,27 +65,58 @@ const App = {
         const timezone_name = ((info && info.timezone_name) || '').trim();
         this.instance = { label, name, color, hostname, timezone_name };
 
-        const badge = document.getElementById('brand-instance');
-        if (badge) {
-            badge.textContent = label;
-            badge.classList.toggle('d-none', !label);
-            badge.style.backgroundColor = color;
-            badge.style.color = color ? this._contrastText(color) : '';
-            badge.classList.toggle('brand-instance-colored', !!color);
+        const brandName = document.getElementById('brand-name');
+        if (brandName) brandName.textContent = label || 'MyAgent';
+        // The account the server runs as, on every page: an agent's shell
+        // tools act with its rights, so "as whom" is not a detail for the
+        // Settings page alone. Root is flagged, not just named.
+        const user = ((info && info.user) || '').trim();
+        const isRoot = !!(info && info.is_root);
+        this.instance.user = user;
+        this.instance.is_root = isRoot;
+        const brandUser = document.getElementById('brand-user');
+        if (brandUser) {
+            brandUser.innerHTML = user ? `<i class="bi ${isRoot ? 'bi-exclamation-triangle-fill' : 'bi-person'}"></i> ${this.esc(user)}` : '';
+            brandUser.title = i18n(isRoot ? 'nav.runsAsRoot' : 'nav.runsAs', { user });
+            brandUser.classList.toggle('d-none', !user);
+            brandUser.classList.toggle('brand-user-root', isRoot);
         }
         const nav = document.querySelector('nav.navbar');
         if (nav) {
-            nav.style.borderBottomColor = color;
-            nav.classList.toggle('navbar-instance-colored', !!color);
+            // bg-dark is !important, so the inline color must be too. A light
+            // color flips the navbar to Bootstrap's light variant, which
+            // re-colors links and the toggler icon for contrast in one go.
+            if (color) nav.style.setProperty('background-color', color, 'important');
+            else nav.style.removeProperty('background-color');
+            nav.dataset.bsTheme = color && this._contrastText(color) === '#000' ? 'light' : 'dark';
         }
         document.title = label ? `${label} · MyAgent` : 'MyAgent';
         // iOS reads the home-screen name from this meta at "Add to Home
         // Screen" time, not from the manifest; Android colors the installed
-        // app's title bar from theme-color. Same fallbacks as the badge.
+        // app's title bar from theme-color. Same fallbacks as the brand.
         const appTitle = document.querySelector('meta[name="apple-mobile-web-app-title"]');
-        if (appTitle) appTitle.content = label ? `MyAgent ${label}` : 'MyAgent';
+        if (appTitle) appTitle.content = label || 'MyAgent';
         const themeMeta = document.querySelector('meta[name="theme-color"]');
         if (themeMeta) themeMeta.content = color || '#212529';
+        this._applyFavicon(label, color);
+    },
+
+    /** With several MyAgent tabs open the favicon is all that shows of each:
+     * the instance's initial on its color (grey when it has none). An unnamed
+     * page keeps the robot. */
+    _applyFavicon(label, color) {
+        const link = document.querySelector('link[rel="icon"]');
+        if (!link) return;
+        if (!label) {
+            link.href = "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🤖</text></svg>";
+            return;
+        }
+        const fill = color || '#6c757d';
+        const initial = this.esc(Array.from(label)[0].toUpperCase());
+        const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">`
+            + `<circle cx="50" cy="50" r="50" fill="${fill}"/>`
+            + `<text x="50" y="50" dy=".35em" text-anchor="middle" font-family="sans-serif" font-weight="bold" font-size="62" fill="${this._contrastText(fill)}">${initial}</text></svg>`;
+        link.href = 'data:image/svg+xml,' + encodeURIComponent(svg);
     },
 
     /** Black or white, whichever reads on this background (WCAG luminance). */
@@ -189,6 +221,9 @@ const App = {
         });
         document.querySelectorAll('[data-i18n-title]').forEach(el => {
             el.title = i18n(el.dataset.i18nTitle);
+        });
+        document.querySelectorAll('[data-i18n-aria]').forEach(el => {
+            el.setAttribute('aria-label', i18n(el.dataset.i18nAria));
         });
     },
 
@@ -329,6 +364,7 @@ const App = {
             panel.innerHTML = `
                 <form class="card card-body shadow-sm w-100" style="max-width: 26rem">
                     <h1 class="h5 mb-2" id="api-key-title"><i class="bi bi-key" aria-hidden="true"></i> ${i18n('auth.title')}</h1>
+                    <div class="fw-semibold mb-2 d-none" id="api-key-server"></div>
                     <p class="text-secondary small mb-3">${i18n('auth.hint')}</p>
                     ${this.apiKey ? `<div class="alert alert-danger py-2 small" role="alert">${i18n('auth.wrong')}</div>` : ''}
                     <input type="text" name="username" value="myagent" autocomplete="username" hidden>
@@ -345,6 +381,15 @@ const App = {
             });
             document.body.appendChild(panel);
             panel.querySelector('#api-key-input').focus();
+            // Which server is asking: /system/info is behind the key, the
+            // manifest is not and already carries the name (server/main.py).
+            // Same origin only: a UI hosted elsewhere serves the bare template.
+            if (!this.serverBase) {
+                fetch('manifest.webmanifest').then(r => r.json()).then(m => {
+                    const el = panel.querySelector('#api-key-server');
+                    if (el && m.name) { el.textContent = m.name; el.classList.remove('d-none'); }
+                }).catch(() => { /* the form works without it */ });
+            }
         }
         throw new Error(i18n('auth.required'));
     },
@@ -479,70 +524,80 @@ const App = {
         return `${d.toLocaleDateString(loc, { day: 'numeric', month: 'short' })} ${time}`;
     },
 
-    /** One dashboard counter. `sub` is an optional already-escaped small line
-     * (live agents, next task run) — only exceptional state gets one. */
-    statCard(href, icon, count, label, sub) {
-        return `
-            <div class="col-6 col-md-3">
-                <a href="${href}" class="text-decoration-none">
-                    <div class="card text-center p-3 h-100 home-stat">
-                        <div class="home-stat-icon"><i class="bi ${icon}"></i></div>
-                        <h3 class="mb-0">${count}</h3>
-                        <div class="text-secondary small">${this.esc(label)}</div>
-                        ${sub ? `<div class="small home-stat-sub">${sub}</div>` : ''}
-                    </div>
-                </a>
-            </div>`;
-    },
-
     async renderHome() {
-        // Each call caught on its own: the dashboard degrades panel by panel
-        // (an older server without /tasks must not blank the whole page).
-        const [agents, models, tools, tasks, ready, inst] = await Promise.all([
-            this.api('GET', '/agents').catch(() => []),
-            this.api('GET', '/models').catch(() => []),
-            this.api('GET', '/tools').catch(() => []),
+        // Each call caught on its own: the page degrades panel by panel (an
+        // older server without /tasks must not blank the whole page).
+        const [agents, tasks, ready, inst] = await Promise.all([
+            // The agents a user can talk to: the same list the chat offers.
+            this.api('GET', '/agents?selectable=true').catch(() => []),
             this.api('GET', '/tasks').catch(() => []),
-            // Whether a message would actually get an answer. The counters
-            // are non-zero even on a completely broken install (everything
-            // is seeded), so they cannot carry this signal themselves.
+            // Whether a message would actually get an answer.
             this.api('GET', '/system/ready').catch(() => null),
-            // Which server this is: the title says so, see applyInstance.
             this.instancePromise || Promise.resolve(this.instance),
         ]);
 
-        // "N live" under the agents counter, next due run under the tasks one:
-        // the two bits of runtime state worth surfacing on the landing page.
-        const liveCount = agents.filter(a => a.live && a.enabled !== false).length;
+        // Runtime state worth a line, and only when there is some: what runs
+        // on its own (autonomous agents, scheduled runs).
+        const liveCount = agents.filter(a => a.live).length;
         const nextRun = tasks.filter(t => t.enabled !== false && t.next_at)
             .map(t => t.next_at).sort()[0];
-        const activeTasks = tasks.filter(t => t.enabled !== false).length;
+        const status = [
+            liveCount ? `<a href="#/agents">${this.esc(i18n('home.liveAgents', { n: liveCount }))}</a>` : '',
+            nextRun ? `<a href="#/tasks">${this.esc(i18n('home.nextRun', { when: this.fmtWhen(nextRun) }))}</a>` : '',
+        ].filter(Boolean).join(' · ');
+
+        // The page is about what can be done here: one card per agent, each
+        // opening a chat with it. The question box above is the shortcut for
+        // "I don't know which one": a new chat in auto mode.
+        const card = (a) => `
+            <div class="col-12 col-sm-6 col-lg-4">
+                <a href="#/chat/${this.escAttr(a.id)}" class="card h-100 home-agent text-decoration-none">
+                    <div class="card-body">
+                        <div class="fw-semibold mb-1">
+                            <i class="bi bi-chat-dots text-primary me-1" aria-hidden="true"></i>${this.esc(a.name || a.id)}
+                            ${a.live ? `<span class="badge text-bg-success ms-1">${this.esc(i18n('home.liveBadge'))}</span>` : ''}
+                        </div>
+                        ${a.description ? `<div class="small text-secondary home-agent-desc">${this.esc(a.description)}</div>` : ''}
+                    </div>
+                </a>
+            </div>`;
 
         this.container.innerHTML = `
-            <div class="home-wrap mx-auto mt-4">
+            <div class="home-wrap mx-auto mt-3">
                 <div class="text-center">
-                    <h1><i class="bi bi-robot"></i> MyAgent</h1>
-                    ${inst && inst.label ? `<div class="home-instance mb-2">
-                        <span class="badge rounded-pill ${inst.color ? '' : 'text-bg-secondary'}"
-                              ${inst.color ? `style="background-color:${this.escAttr(inst.color)};color:${this._contrastText(inst.color)}"` : ''}>
-                            <i class="bi bi-hdd-network"></i> ${this.esc(inst.label)}
-                        </span>
-                    </div>` : ''}
-                    <p class="lead text-secondary mb-3">${i18n('home.subtitle')}</p>
-                    <a href="#/chat" class="btn btn-primary btn-lg px-4 home-chat-cta">
-                        <i class="bi bi-chat-dots-fill"></i> ${this.esc(i18n('home.openChat'))}
-                    </a>
+                    <h1 class="text-break"><i class="bi bi-robot" ${inst && inst.color ? `style="color:${this.escAttr(inst.color)}"` : ''}></i>
+                        ${this.esc((inst && inst.label) || 'MyAgent')}</h1>
+                    <p class="lead text-secondary mb-3">${inst && inst.label ? 'MyAgent · ' : ''}${i18n('home.subtitle')}</p>
                     ${this.readinessBanner(ready)}
+                    <form id="home-ask" class="home-ask mx-auto mt-3">
+                        <div class="input-group input-group-lg">
+                            <input type="text" id="home-ask-input" class="form-control" autocomplete="off"
+                                   placeholder="${this.escAttr(i18n('home.askPlaceholder'))}"
+                                   aria-label="${this.escAttr(i18n('home.askPlaceholder'))}">
+                            <button class="btn btn-primary" type="submit" aria-label="${this.escAttr(i18n('home.askSend'))}">
+                                <i class="bi bi-send"></i>
+                            </button>
+                        </div>
+                    </form>
+                    <a href="#/chat" class="d-inline-block mt-2 py-2">
+                        <i class="bi bi-chat-text"></i> ${this.esc(i18n('home.continueChat'))}
+                    </a>
+                    ${status ? `<div class="small text-secondary mt-1">${status}</div>` : ''}
                 </div>
-                <div class="row mt-4 g-3">
-                    ${this.statCard('#/agents', 'bi-cpu', agents.length, i18n('home.agents'),
-                        liveCount ? this.esc(i18n('home.liveCount', { n: liveCount })) : '')}
-                    ${this.statCard('#/models', 'bi-box', models.length, i18n('home.models'), '')}
-                    ${this.statCard('#/tools', 'bi-tools', tools.length, i18n('home.tools'), '')}
-                    ${this.statCard('#/tasks', 'bi-alarm', activeTasks, i18n('nav.tasks'),
-                        nextRun ? this.esc(i18n('home.nextRun', { when: this.fmtWhen(nextRun) })) : '')}
-                </div>
+                <h2 class="h5 mt-4 mb-3">${this.esc(i18n('home.capabilities'))}</h2>
+                ${agents.length ? `<div class="row g-3">${agents.map(card).join('')}</div>` : `
+                <div class="text-secondary">${this.esc(i18n('chat.noAgents'))}
+                    <a href="#/agents/new">${this.esc(i18n('chat.createAgent'))}</a></div>`}
             </div>`;
+
+        document.getElementById('home-ask').addEventListener('submit', (evt) => {
+            evt.preventDefault();
+            const text = document.getElementById('home-ask-input').value.trim();
+            if (!text) return;
+            // Picked up by ChatPage.render: a fresh chat in auto mode, sent.
+            ChatPage.pendingPrompt = text;
+            location.hash = '#/chat';
+        });
     },
 };
 

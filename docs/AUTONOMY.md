@@ -2,7 +2,8 @@
 
 Any agent can run unattended. Two things are needed, and only two:
 
-1. switch **Live** on (in the agent editor, or with the play button on its card);
+1. switch **Live** on (in the agent editor, or with *Run autonomously* in the
+   ⋯ menu on its card);
 2. give it at least one **task**.
 
 An agent with no task stays idle, live or not — there is no separate heartbeat.

@@ -250,17 +250,18 @@ under **Settings**:
   reachability.
 - **API key** — generated, rotated or removed without a restart. Overridden by
   `MYAGENT_API_KEY` when that is set.
-- **MyAgent server** — a browser-side preference, for when the UI is served
+- **MyAgent server** (Settings → *Advanced*) — a browser-side preference, for when the UI is served
   from somewhere other than the API.
 - **Instance name and color** (Settings → *Server*) — how this install
-  introduces itself: the name appears next to the *MyAgent* brand in the
-  navbar, in the browser tab title, on the home page and as the name of the
-  installed app; the color fills that badge and draws a stripe under the
-  navbar. Two servers with the same UI are otherwise indistinguishable
-  without reading the URL — which a reverse proxy, an installed app or a
-  phone hides. Leave the name empty and the host name is shown instead.
-  The installed app follows suit: it is called *MyAgent orin*, *MyAgent
-  Workshop* and so on rather than plain *MyAgent*, and its title bar takes the
+  introduces itself: the name takes the place of the *MyAgent* brand in the
+  navbar (followed by the account the server runs as, in red when it is root)
+  and on the home page, leads the browser tab title and names the
+  installed app; the color fills the whole navbar and the favicon (the
+  name's initial on that color). Two servers with the same UI are otherwise
+  indistinguishable without reading the URL — which a reverse proxy, an
+  installed app or a phone hides. Leave the name empty and the host name is
+  shown instead. The installed app follows suit: it is called *orin*,
+  *Workshop* and so on rather than plain *MyAgent*, and its title bar takes the
   instance color, so two servers installed on the same phone are told apart
   from the home screen. The name is read at install time; rename the server
   and reinstall the app to see the new one.
@@ -273,4 +274,4 @@ link can point at one.
 
 *Settings → Models: each select lists only models of its own kind (chat,
 embedding, image), the local backends are probed for reachability, and the
-instance name and color chosen under Server show up in the navbar badge.*
+instance name and color chosen under Server become the navbar brand and color.*

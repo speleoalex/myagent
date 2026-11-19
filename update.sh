@@ -9,7 +9,8 @@
 #   * histories diverged                     -> nothing is touched (exit 2)
 #
 # Usage:
-#   ./update.sh              # update this checkout (+ redeploy if installed)
+#   ./update.sh              # update this checkout (+ redeploy if installed,
+#                            #   connectors plugin included)
 #   ./update.sh --check      # report what would happen, change nothing
 #   ./update.sh --no-deploy  # update the checkout but skip the deploy step
 #
@@ -23,7 +24,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         -n|--check)  CHECK=1 ;;
         --no-deploy) NO_DEPLOY=1 ;;
-        -h|--help)   sed -n '2,17p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        -h|--help)   sed -n '2,18p' "$0" | sed 's/^# \?//'; exit 0 ;;
         *)           echo "Unknown option: $1 (see $0 --help)" >&2; exit 1 ;;
     esac
     shift
@@ -116,10 +117,12 @@ if [ -n "$NO_DEPLOY" ]; then
     exit 0
 fi
 
+DEPLOYED=""
 if [ "$(uname)" = "Darwin" ]; then
     if [ -f "$HOME/Library/LaunchAgents/com.myagent.agent.plist" ]; then
         echo ""
         bash install.sh
+        DEPLOYED=1
     else
         echo "No installed service found — checkout updated only. To install: ./install.sh"
     fi
@@ -157,7 +160,26 @@ else
         echo "Reinstalling to $INSTALL_DIR..."
         # shellcheck disable=SC2086  # REINSTALL_MODE is two words on purpose
         $SUDO env MYAGENT_INSTALL_DIR="$INSTALL_DIR" bash install.sh ${REINSTALL_MODE:-}
+        DEPLOYED=1
     else
         echo "No installed service found — checkout updated only. To install as a service: ./install.sh"
+    fi
+fi
+
+# The connectors plugin has its own installer (install.sh keeps it out of the
+# core copy), so the reinstall above leaves the INSTALLED plugin as it was:
+# the checkout would carry new plugin code that the server never runs. Refresh
+# it when it is installed under our own MyAgent home. A service account's
+# plugin lives in that account's home and is its to reinstall: say how.
+if [ -n "$DEPLOYED" ] && [ -f connectors/install.sh ]; then
+    PLUGIN_DIR="${MYAGENT_PLUGINS:-${MYAGENT_HOME:-$HOME/myagent}/plugins}/connectors"
+    if [ -d "$PLUGIN_DIR" ]; then
+        echo ""
+        echo "Updating the connectors plugin in $PLUGIN_DIR..."
+        bash connectors/install.sh
+    elif [ -n "${UNIT_USER:-}" ] && [ "$UNIT_USER" != root ]; then
+        echo ""
+        echo "If the connectors plugin is installed for '$UNIT_USER', refresh it too:"
+        echo "    sudo -u $UNIT_USER bash $(pwd)/connectors/install.sh"
     fi
 fi

@@ -13,55 +13,96 @@ body {
 
 /* ---- Instance identity (App.applyInstance) ------------------------------- */
 
-/* The server's name next to the brand. Neutral outline when it has no color
-   (the label alone already tells two servers apart); filled with the chosen
-   color otherwise, text color computed for contrast in JS. */
-.brand-instance {
+/* The instance name is the brand; the account the server runs as trails it,
+   quieter, on every width. Root gets a red pill instead of a quiet word. */
+.navbar-brand {
+    max-width: calc(100% - 4rem);
+}
+.brand-user {
     margin-left: 0.5rem;
-    font-size: 0.7rem;
-    font-weight: 500;
-    vertical-align: middle;
-    border: 1px solid rgba(255, 255, 255, 0.35);
-    color: rgba(255, 255, 255, 0.75);
+    font-size: 0.75rem;
+    font-weight: 400;
+    opacity: 0.75;
 }
-.brand-instance.brand-instance-colored {
-    border-color: transparent;
+.brand-user.brand-user-root {
+    opacity: 1;
+    font-weight: 600;
+    background: var(--bs-danger);
+    color: #fff;
+    border-radius: 1rem;
+    padding: 0.1rem 0.5rem;
 }
-/* The same color as a stripe under the whole navbar: readable at a glance
-   on every page, even one with the brand scrolled out of a phone's view. */
-.navbar-instance-colored {
-    border-bottom-width: 3px !important;
+
+/* Output of update.sh (Settings -> Server -> Updates): long lines wrap, a
+   long log scrolls inside its box. */
+.update-output {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    max-height: 18rem;
+    overflow-y: auto;
+    background: var(--bs-tertiary-bg);
+    padding: 0.5rem;
+    border-radius: 0.375rem;
+}
+
+/* Settings -> Server facts: label beside value where there is room, label
+   above value on a phone. Values are paths and must wrap anywhere. */
+.server-info dt {
+    font-weight: normal;
+    color: var(--bs-secondary-color);
+}
+.server-info dd {
+    overflow-wrap: anywhere;
+    margin-bottom: 0.4rem;
+}
+@media (min-width: 576px) {
+    .server-info {
+        display: grid;
+        grid-template-columns: max-content minmax(0, 1fr);
+        column-gap: 1rem;
+    }
+    .server-info dd {
+        margin-bottom: 0.25rem;
+    }
 }
 
 /* ---- Home dashboard ------------------------------------------------------ */
+
+/* Configuration entries (tools, models, channels, settings): to the right on
+   a wide navbar, under a divider in the collapsed phone menu. */
+@media (max-width: 991.98px) {
+    .nav-config {
+        border-top: 1px solid rgba(127, 127, 127, 0.35);
+        margin-top: 0.25rem;
+        padding-top: 0.25rem;
+    }
+}
 
 .home-wrap {
     max-width: 960px;
 }
 
-/* Room to breathe around the primary action: this is the button the page
-   exists for, so it must not sit flush against the subtitle or the stats. */
-.home-chat-cta {
-    margin-top: 0.25rem;
-    margin-bottom: 0.5rem;
+.home-ask {
+    max-width: 640px;
 }
 
-.home-stat {
-    transition: transform 0.1s;
+/* An agent card is one big link into a chat with it. */
+.home-agent {
+    color: var(--bs-body-color);
+    transition: border-color 0.1s, transform 0.1s;
 }
-
-.home-stat:hover {
+.home-agent:hover,
+.home-agent:focus-visible {
+    border-color: var(--bs-primary);
     transform: translateY(-2px);
 }
-
-.home-stat-icon {
-    font-size: 1.4rem;
-    color: var(--bs-primary);
-    line-height: 1;
-}
-
-.home-stat-sub {
-    color: var(--bs-success-text-emphasis);
+/* Seed descriptions run to several sentences: three lines say what the agent
+   is for, the rest is for the agent's own page. */
+.home-agent-desc {
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
 }
 
 /* Chat page wrapper. 100dvh (dynamic viewport) tracks the mobile URL bar and
@@ -70,10 +111,46 @@ body {
    it here too — otherwise the two stack and the page overflows by that inset
    on notched phones. Same --nav-h + 1rem (#app's mt-3) budget as #app, plus
    a little slack so no rounding ever yields a page scrollbar. */
-.chat-wrap {
+.chat-wrap,
+.history-side {
     height: calc(100vh - var(--nav-h) - 1rem - 6px);
     height: calc(100dvh - var(--nav-h) - 1rem - 6px - env(safe-area-inset-bottom));
+}
+.chat-wrap {
     max-width: 900px;
+    min-width: 0;
+}
+
+/* Chat page row: [history column (xl only)] [chat]. Both have the fixed
+   height above, so a long history scrolls inside its column instead of
+   stretching the row. */
+.chat-layout {
+    display: flex;
+    gap: 1rem;
+    justify-content: center;
+    max-width: calc(900px + 18rem + 1rem);
+}
+.history-side {
+    flex: 0 0 18rem;
+    /* Without it the min-content of a long nowrap title wins over the basis
+       and the column grows to 500px, squeezing the chat. */
+    min-width: 0;
+}
+
+/* The agent picker takes what the toolbar row leaves; the buttons beside it
+   keep their size. */
+.chat-agent-select {
+    flex: 1 1 auto;
+    min-width: 0;
+    max-width: 20rem;
+}
+@media (max-width: 575.98px) {
+    .chat-agent-select {
+        max-width: none;
+    }
+}
+.chat-options {
+    min-width: 16rem;
 }
 
 #chat-messages {
@@ -261,8 +338,10 @@ body {
 .tool-call .tc-name {
     font-weight: 600;
 }
-.tool-call .tc-arrow {
+/* "· 3 tools" after a delegation's name: secondary, like the rest of a summary. */
+.tool-call .tc-meta {
     opacity: 0.6;
+    font-weight: normal;
 }
 
 .tool-call-body {
@@ -454,6 +533,13 @@ body {
 .card-agent:hover {
     transform: translateY(-2px);
 }
+/* The hover transform makes each card its own stacking context, so an open
+   "⋯" menu would sit UNDER the next card in the grid and could not be
+   clicked. The card holding an open menu is lifted above its neighbours. */
+.card-agent:has(.dropdown-menu.show) {
+    position: relative;
+    z-index: 3;
+}
 
 /* The whole agent card is the link to its editor, and a card that navigates
    looks like a card that doesn't: the pencil next to the name is the only
@@ -535,6 +621,24 @@ body {
 /* Amber = saving would widen this agent's grants (see AgentsPage.refreshState). */
 .tab-dot.tab-dot-warn {
     background: var(--bs-warning);
+}
+
+/* Agent form help texts: two lines, the rest on click (AgentsPage.wireLongHints
+   makes the cut ones focusable). The clamp ellipsis says there is more.
+   Warnings are never cut: they are the part that must be read. */
+#agent-form .form-text:not(.text-warning-emphasis):not(.text-danger) {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+#agent-form .form-text[tabindex] {
+    cursor: pointer;
+}
+#agent-form .form-text.expanded {
+    display: block;
+    -webkit-line-clamp: unset;
+    cursor: auto;
 }
 
 /* The tab a failed submit points at (see validateAcrossTabs). */
@@ -996,8 +1100,10 @@ body {
 @media (pointer: coarse) {
     /* Expanding tool traces is a primary chat interaction: give the summary
        rows and small table buttons a real touch target. */
-    .tool-call > summary {
+    .tool-call > summary,
+    .msg-reasoning > summary {
         padding: 0.55rem 0.6rem;
+        min-height: 44px;
     }
     .table .btn-sm {
         padding: 0.375rem 0.75rem;
@@ -1011,6 +1117,36 @@ body {
     .chip-toggle {
         min-height: 44px;
     }
+    /* Chat toolbar and input row: Bootstrap's 38px controls are the most
+       tapped ones in the app. */
+    .chat-wrap .form-select,
+    .chat-wrap .btn {
+        min-height: 44px;
+    }
+    /* The switch itself is 32x16; the label is part of the target, so the
+       row is made tall enough to hit. As a flex row the input drops
+       .form-check's float + negative margin and sits beside the label. */
+    #reasoning-wrap {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding-left: 0;
+    }
+    #reasoning-wrap .form-check-input {
+        float: none;
+        margin: 0;
+    }
+    #reasoning-wrap .form-check-label {
+        display: flex;
+        align-items: center;
+        min-height: 44px;
+    }
+    /* Copy / edit / regenerate under each bubble: always visible on touch
+       (no hover), so they must be hittable too. The icon stays small. */
+    .msg-act {
+        min-width: 44px;
+        min-height: 44px;
+    }
 }
 
 @media (max-width: 576px) {
@@ -1018,17 +1154,17 @@ body {
     .system-prompt-textarea {
         font-size: 1rem;
     }
+    /* A phone has no width to spare for a frame around the conversation and
+       a margin beside the answer: the answer is the content, it gets the row. */
     .msg {
         max-width: 92%;
     }
-    #chat-messages {
-        padding: 0.6rem;
+    .msg-assistant {
+        max-width: 100%;
     }
-    /* Chat toolbar: let the agent select take the remaining row width */
-    #agent-select {
-        max-width: 100% !important;
-        flex: 1 1 40%;
-        min-width: 0;
+    #chat-messages {
+        padding: 0;
+        border: 0 !important;
     }
 }
 

@@ -18,6 +18,11 @@ from app.models import Settings
 # root.
 APP_DIR = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = APP_DIR.parent
+# The git checkout this install was copied from, which is where update.sh
+# lives: install.sh records it in the unit (MYAGENT_SOURCE_DIR), because the
+# installed copy (~/myagent/bin) carries no .git and no update.sh. An in-place
+# install (--dev, macOS) runs from the checkout itself, hence the fallback.
+SOURCE_DIR = Path(os.environ.get("MYAGENT_SOURCE_DIR") or PROJECT_ROOT).expanduser()
 
 # --------------------------------------------------------------------------- #
 # Runtime layout — everything the user owns, under ONE root
@@ -368,6 +373,9 @@ DEBUG_LOG_FILE = Path(
 # reply verbatim — including the calls made OUTSIDE a turn, like the classifier
 # that picks which agent answers. Interleaved they drowned each other.
 API_LOG_FILE = DEBUG_LOG_FILE.with_name("api.log")
+# Output of the last update started from Settings. Overwritten by each run:
+# it answers "how did the update go", not "what happened last month".
+UPDATE_LOG_FILE = HOME_DIR / "logs" / "update.log"
 
 # A trace file truncated every turn cannot answer "what did it do an hour ago",
 # which is most of what tracing is for. It APPENDS, and is bounded by rotation:

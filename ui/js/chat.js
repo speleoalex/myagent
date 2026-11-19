@@ -12,6 +12,8 @@ const ChatPage = {
     modelOverride: null,
     reasoning: null,
     viewingArchived: false,
+    // Text typed in the home page's question box, sent once on arrival.
+    pendingPrompt: null,
     _archivedId: null,
     _history: [],
     _historyModal: null,
@@ -56,38 +58,66 @@ const ChatPage = {
         // explicit pick, so loadCurrent() below must not switch back to the
         // agent the current session belongs to. One-shot: from then on the
         // session wins again, e.g. resuming an archived chat restores its agent.
-        // An unknown or non-selectable id falls back to the first agent.
+        // An unknown or non-selectable id falls back to auto: the first agent
+        // in alphabetical order was Agent Manager on a fresh install, so a
+        // newcomer's first message went to the agent that edits agents.
         this._agentFromUrl = agents.some(a => a.id === this.currentAgentId);
-        if (!this._agentFromUrl) this.currentAgentId = agents[0].id;
+        if (!this._agentFromUrl) this.currentAgentId = 'auto';
 
         App.container.innerHTML = `
-            <div class="d-flex flex-column mx-auto w-100 chat-wrap">
-                <div class="d-flex gap-2 mb-2 flex-wrap align-items-center">
-                    <select id="agent-select" class="form-select" style="max-width:200px">
+            <!-- From xl up the history is a column beside the chat (the width
+                 is there, and a modal hides the conversation it is about);
+                 below that it stays in the modal behind the History button. -->
+            <div class="chat-layout mx-auto">
+            <aside class="history-side d-none d-xl-flex flex-column" aria-label="${App.escAttr(i18n('chat.historyTitle'))}">
+                <div class="input-group input-group-sm mb-2">
+                    <span class="input-group-text"><i class="bi bi-search"></i></span>
+                    <input type="text" id="history-side-filter" class="form-control"
+                           placeholder="${i18n('chat.searchPlaceholder')}" autocomplete="off"
+                           aria-label="${App.escAttr(i18n('chat.searchPlaceholder'))}">
+                </div>
+                <div id="history-side-list" class="history-list flex-grow-1 overflow-auto"></div>
+            </aside>
+            <div class="d-flex flex-column w-100 chat-wrap">
+                <!-- One row on every width: agent, new chat, history, and the
+                     expert choices (model, reasoning) folded into the menu.
+                     Button labels only from sm up, the icons carry a phone. -->
+                <div class="d-flex gap-2 mb-2 align-items-center">
+                    <select id="agent-select" class="form-select chat-agent-select" aria-label="${App.escAttr(i18n('nav.agents'))}">
                         <option value="auto" ${this.currentAgentId === 'auto' ? 'selected' : ''}>${i18n('chat.agentAuto')}</option>
                         ${agents.map(a => `
                             <option value="${App.escAttr(a.id)}" ${a.id === this.currentAgentId ? 'selected' : ''}>${App.esc(a.name)}</option>
                         `).join('')}
                     </select>
-                    ${models.length ? `
-                    <select id="model-select" class="form-select" style="max-width:200px"
-                            title="${i18n('chat.modelTitle')}">
-                        <option value="">${i18n('chat.modelDefault')}</option>
-                        ${models.map(m => `
-                            <option value="${App.escAttr(m.id)}">${App.esc(m.name || m.id)}</option>
-                        `).join('')}
-                    </select>` : ''}
-                    <div class="form-check form-switch align-self-center mb-0" id="reasoning-wrap"
-                         style="display:none" title="${i18n('chat.reasoningTitle')}">
-                        <input class="form-check-input" type="checkbox" id="reasoning-toggle">
-                        <label class="form-check-label" for="reasoning-toggle">${i18n('chat.reasoning')}</label>
+                    <button class="btn btn-outline-primary text-nowrap" id="btn-new" title="${i18n('chat.newChatTitle')}">
+                        <i class="bi bi-plus-lg"></i><span class="d-none d-sm-inline"> ${i18n('chat.newChat')}</span>
+                    </button>
+                    <button class="btn btn-outline-secondary text-nowrap d-xl-none" id="btn-history" title="${i18n('chat.history')}">
+                        <i class="bi bi-clock-history"></i><span class="d-none d-sm-inline"> ${i18n('chat.history')}</span>
+                    </button>
+                    <div class="dropdown">
+                        <button class="btn btn-outline-secondary" id="btn-chat-options" type="button"
+                                data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false"
+                                title="${App.escAttr(i18n('chat.options'))}" aria-label="${App.escAttr(i18n('chat.options'))}">
+                            <i class="bi bi-three-dots"></i>
+                        </button>
+                        <div class="dropdown-menu dropdown-menu-end p-3 chat-options">
+                            ${models.length ? `
+                            <label class="form-label" for="model-select">${i18n('chat.modelLabel')}</label>
+                            <select id="model-select" class="form-select">
+                                <option value="">${i18n('chat.modelDefault')}</option>
+                                ${models.map(m => `
+                                    <option value="${App.escAttr(m.id)}">${App.esc(m.name || m.id)}</option>
+                                `).join('')}
+                            </select>
+                            <div class="form-text">${i18n('chat.modelTitle')}</div>` : ''}
+                            <div class="form-check form-switch mb-0 mt-2" id="reasoning-wrap"
+                                 style="display:none" title="${i18n('chat.reasoningTitle')}">
+                                <input class="form-check-input" type="checkbox" id="reasoning-toggle">
+                                <label class="form-check-label" for="reasoning-toggle">${i18n('chat.reasoning')}</label>
+                            </div>
+                        </div>
                     </div>
-                    <button class="btn btn-outline-primary" id="btn-new" title="${i18n('chat.newChatTitle')}">
-                        <i class="bi bi-plus-lg"></i> ${i18n('chat.newChat')}
-                    </button>
-                    <button class="btn btn-outline-secondary" id="btn-history" title="${i18n('chat.history')}">
-                        <i class="bi bi-clock-history"></i> ${i18n('chat.history')}
-                    </button>
                     <button class="btn btn-outline-danger" id="btn-del" title="${i18n('chat.deleteArchivedTitle')}" style="display:none">
                         <i class="bi bi-trash"></i>
                     </button>
@@ -112,6 +142,7 @@ const ChatPage = {
                 </div>
                 <input type="file" id="attach-input" multiple hidden
                        accept="image/*,text/*,.txt,.md,.csv,.json,.log,.py,.js,.html,.css,.xml,.yaml,.yml">
+            </div>
             </div>
 
             <div class="modal fade" id="history-modal" tabindex="-1" aria-hidden="true">
@@ -139,6 +170,22 @@ const ChatPage = {
         // A session that no longer exists (deleted, or resumed and reloaded)
         // fails silently inside viewArchived, leaving the current chat shown.
         if (openSession) await this.viewArchived(openSession);
+
+        // The home page's question box: a new topic, so a new chat, and auto
+        // because the user did not say who should answer. While the current
+        // chat is still generating, newChat would orphan that turn: the text
+        // waits in the input instead.
+        const pending = this.pendingPrompt;
+        this.pendingPrompt = null;
+        if (pending && this.sending) {
+            document.getElementById('chat-input').value = pending;
+        } else if (pending) {
+            this.currentAgentId = 'auto';
+            document.getElementById('agent-select').value = 'auto';
+            await this.newChat();
+            document.getElementById('chat-input').value = pending;
+            await this.sendMessage();
+        }
     },
 
     // ---- Server-backed sessions (one file per chat on disk) ---------------
@@ -151,6 +198,14 @@ const ChatPage = {
             const f = document.getElementById('history-filter');
             this.renderHistoryList(f ? f.value : '');
         }
+        this.renderSideHistory();
+    },
+
+    /** The xl column. Hidden by CSS below xl, rendered anyway: it is cheap,
+     * and a window widened later then shows a list that is already there. */
+    renderSideHistory() {
+        const f = document.getElementById('history-side-filter');
+        this.renderHistoryList(f ? f.value : '', 'history-side-list');
     },
 
     // Open the filterable history window (chats grouped by date, newest first).
@@ -180,9 +235,10 @@ const ChatPage = {
         return d.toLocaleDateString(I18n.getDateLocale(), { day: '2-digit', month: 'long', year: 'numeric' });
     },
 
-    // Render the (filtered) session list into the modal, with date-group headers.
-    renderHistoryList(query) {
-        const box = document.getElementById('history-list');
+    // Render the (filtered) session list, with date-group headers, into the
+    // modal's list or the xl side column's.
+    renderHistoryList(query, boxId = 'history-list') {
+        const box = document.getElementById(boxId);
         if (!box) return;
         const q = (query || '').trim().toLowerCase();
         // Provenance label shown on the badge of connector chats: the source
@@ -253,6 +309,7 @@ const ChatPage = {
     async loadCurrent() {
         this.viewingArchived = false;
         this._archivedId = null;
+        this.renderSideHistory();  // drop the highlight of the archived chat
         document.getElementById('archived-banner').style.display = 'none';
         document.getElementById('btn-del').style.display = 'none';
         this.setInputEnabled(true);
@@ -278,6 +335,7 @@ const ChatPage = {
             ? override : null;
         const msel = document.getElementById('model-select');
         if (msel) msel.value = this.modelOverride || '';
+        this._markOptions();
         // Same for the reasoning switch, except that `false` is a real stored
         // value here: test for presence, not for truthiness.
         this.reasoning = (session && session.reasoning !== undefined)
@@ -298,6 +356,7 @@ const ChatPage = {
         if (!session) return;
         this.viewingArchived = true;
         this._archivedId = id;
+        this.renderSideHistory();  // highlight it in the xl column
         // A LIVE channel session (Telegram, satellite, an autonomous agent) is
         // read-only for a different reason than an archived chat: its connector
         // is still writing to it, so "resume" has nothing to reopen and the
@@ -426,6 +485,8 @@ const ChatPage = {
         document.getElementById('btn-history').onclick = () => this.openHistory();
         const hf = document.getElementById('history-filter');
         if (hf) hf.oninput = () => this.renderHistoryList(hf.value);
+        const hsf = document.getElementById('history-side-filter');
+        if (hsf) hsf.oninput = () => this.renderSideHistory();
         document.getElementById('btn-del').onclick = async () => {
             if (!this._archivedId) return;
             try { await App.api('DELETE', '/sessions/' + this._archivedId); } catch (e) { /* ignore */ }
@@ -446,10 +507,20 @@ const ChatPage = {
         const ms = document.getElementById('model-select');
         if (ms) ms.onchange = (e) => {
             this.modelOverride = e.target.value || null;
+            this._markOptions();
             this.refreshReasoning();
         };
         const rt = document.getElementById('reasoning-toggle');
         if (rt) rt.onchange = (e) => { this.reasoning = e.target.checked; };
+    },
+
+    /** The model pick is folded into the options menu, so a chat that does
+     * not use the default model must say so on the closed button. */
+    _markOptions() {
+        const btn = document.getElementById('btn-chat-options');
+        if (!btn) return;
+        btn.classList.toggle('btn-outline-secondary', !this.modelOverride);
+        btn.classList.toggle('btn-outline-primary', !!this.modelOverride);
     },
 
     // Show the reasoning switch only when the model that will actually answer
@@ -740,6 +811,14 @@ const ChatPage = {
         const pct = Math.min(100, Math.round((used / ctx.window) * 100));
         const k = (n) => (n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + 'k'
                                     : String(n));
+        // Shown only once it explains something: past the amber threshold or
+        // after a compression. "Context 3.4k / 33k" under every answer was a
+        // fact about the machine that a non-technical reader cannot use.
+        const warn = pct >= 75;
+        if (!warn && !ctx.demoted) {
+            msgDiv.querySelector(':scope > .msg-context')?.remove();
+            return;
+        }
         let el = msgDiv.querySelector(':scope > .msg-context');
         if (!el) {
             el = document.createElement('div');
@@ -751,7 +830,7 @@ const ChatPage = {
         el.querySelector('.ctx-bar i').style.width = pct + '%';
         // Amber past the point where the executor starts compressing, red once
         // it actually did: the reader should be able to tell "close" from "cut".
-        el.classList.toggle('ctx-warn', pct >= 75);
+        el.classList.toggle('ctx-warn', warn);
         el.classList.toggle('ctx-cut', !!ctx.demoted);
         let text = i18n('chat.context') + ' ' + k(used) + ' / ' + k(ctx.window);
         if (ctx.demoted) {
@@ -1352,9 +1431,11 @@ const ChatPage = {
 
     // Summary label markup shared by the live entry and the settled render,
     // so a running delegation already reads "call_agent → <agent>".
+    // A delegation reads as what happened ("Asked Coder"), not as the wire
+    // call; the arguments stay one click away inside the block.
     _toolLabel(tool, args) {
         if (tool === 'call_agent' && args && args.agent_id) {
-            return `<i class="bi bi-diagram-3"></i> ${App.esc(tool)} <span class="tc-arrow">→</span> ${App.esc(args.agent_id)}`;
+            return `<i class="bi bi-diagram-3"></i> ${App.esc(i18n('chat.askedAgent', { name: this.agentName(args.agent_id) }))}`;
         }
         return `<i class="bi bi-gear-wide-connected"></i> ${App.esc(tool || 'tool')}`;
     },
@@ -1368,6 +1449,10 @@ const ChatPage = {
         det.innerHTML =
             `<summary><span class="tc-name">${this._toolLabel(data.tool, data.arguments)}</span>` +
             ` <span class="spinner-border spinner-border-sm ms-1"></span></summary>`;
+        // The code opens a delegation while its sub-agent runs; only a click
+        // is the user's own choice, and only that survives the end of the
+        // turn (_settleFlowTools).
+        det.querySelector('summary').addEventListener('click', () => { det.dataset.userToggled = '1'; });
         container.appendChild(det);
         return det;
     },
@@ -1546,7 +1631,10 @@ const ChatPage = {
             const det = this.renderToolCall(scratch, step);
             const live = lives[i];
             if (live) {
-                det.open = live.open;  // don't collapse what the user expanded
+                // Closed at the end of the turn, so the answer is what the
+                // bubble shows; a click still opens it. Kept open only if the
+                // user opened it, not if the live delegation did.
+                det.open = !!live.dataset.userToggled && live.open;
                 live.replaceWith(det);
             } else {
                 // No live entry for this step (an attach that raced the event
@@ -1576,6 +1664,12 @@ const ChatPage = {
 
         const summary = document.createElement('summary');
         summary.innerHTML = `<span class="tc-name">${this._toolLabel(step.tool, args)}</span>`;
+        // How much the sub-agent did, readable without opening the block.
+        const subSteps = step.sub_trace && (step.sub_trace.steps || []).length;
+        if (subSteps) {
+            summary.insertAdjacentHTML('beforeend', ` <span class="tc-meta">· ${App.esc(subSteps === 1
+                ? i18n('chat.toolCountOne') : i18n('chat.toolCountMany', { n: subSteps }))}</span>`);
+        }
         det.appendChild(summary);
 
         const body = document.createElement('div');

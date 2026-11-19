@@ -99,22 +99,6 @@ const SettingsPage = {
                             </div>
                         </div>
 
-                        <!-- Which server this UI talks to — a BROWSER preference
-                             like the two above, because the UI is static HTML that
-                             may be hosted anywhere (Apache, nginx) away from the
-                             API. Empty = same origin, i.e. the classic setup. -->
-                        <h5>${i18n('settings.connection')}</h5>
-                        <div class="mb-4">
-                            <label class="form-label"><i class="bi bi-hdd-network"></i> ${i18n('settings.serverBase')}</label>
-                            <div class="input-group">
-                                <input type="text" class="form-control" id="f-server-base"
-                                       value="${App.escAttr(App.serverBase)}"
-                                       placeholder="${i18n('settings.serverBasePlaceholder')}">
-                                <button type="button" class="btn btn-outline-primary" id="btn-server-base">${i18n('settings.serverBaseApply')}</button>
-                            </div>
-                            <small class="text-secondary">${i18n('settings.serverBaseHint')}</small>
-                        </div>
-
                         <!-- Install the UI as an app. Client-side only: nothing
                              here touches the server's settings. -->
                         <h5>${i18n('settings.install')}</h5>
@@ -196,6 +180,23 @@ const SettingsPage = {
                     `)}
 
                     ${pane('advanced', `
+                        <!-- Which server this UI talks to — a BROWSER preference
+                             like language and theme, because the UI is static HTML that
+                             may be hosted anywhere (Apache, nginx) away from the
+                             API. Empty = same origin, i.e. the classic setup. In
+                             Advanced: only someone hosting the UI elsewhere needs it. -->
+                        <h5>${i18n('settings.connection')}</h5>
+                        <div class="mb-4">
+                            <label class="form-label"><i class="bi bi-hdd-network"></i> ${i18n('settings.serverBase')}</label>
+                            <div class="input-group">
+                                <input type="text" class="form-control" id="f-server-base"
+                                       value="${App.escAttr(App.serverBase)}"
+                                       placeholder="${i18n('settings.serverBasePlaceholder')}">
+                                <button type="button" class="btn btn-outline-primary" id="btn-server-base">${i18n('settings.serverBaseApply')}</button>
+                            </div>
+                            <small class="text-secondary">${i18n('settings.serverBaseHint')}</small>
+                        </div>
+
                         <div class="mb-3">
                             <label class="form-label" for="f-ctx-compact">${i18n('settings.contextCompact')}</label>
                             <div class="d-flex align-items-center gap-2">
@@ -280,6 +281,18 @@ const SettingsPage = {
                         <h5>${i18n('settings.server')}</h5>
                         <div id="server-info" class="mb-3">
                             <div class="spinner-border spinner-border-sm"></div> ${i18n('settings.checking')}
+                        </div>
+
+                        <hr class="my-4">
+
+                        <!-- Updates: update.sh in the git checkout does the work
+                             (GET /system/update checks, POST installs). Checked
+                             on demand only: a check is a git fetch. -->
+                        <h5>${i18n('settings.updates')}</h5>
+                        <div id="update-box" class="mb-3">
+                            <button type="button" class="btn btn-outline-primary" id="btn-update-check">
+                                <i class="bi bi-arrow-repeat"></i> ${i18n('settings.updateCheck')}
+                            </button>
                         </div>
 
                         <hr class="my-4">
@@ -396,6 +409,7 @@ const SettingsPage = {
         PWA.onchange = () => this.renderInstall();
 
         this.loadServerInfo();
+        document.getElementById('btn-update-check').onclick = () => this.checkUpdates();
 
         this.checkStatus();
     },
@@ -716,6 +730,96 @@ const SettingsPage = {
         if (reset) reset.onclick = () => PWA.reset();
     },
 
+    /** Check for a newer version and say what can be done about it. */
+    async checkUpdates() {
+        const box = document.getElementById('update-box');
+        box.innerHTML = `<div class="spinner-border spinner-border-sm"></div> ${i18n('settings.updateChecking')}`;
+        let r;
+        try {
+            r = await App.api('GET', '/system/update');
+        } catch (e) {
+            box.innerHTML = `<div class="text-danger">${App.esc(e.message)}</div>${this._updateRetry()}`;
+            this._wireUpdateRetry();
+            return;
+        }
+        if (r.state === 'running') return this._followUpdate(box, null);
+
+        const icon = { up_to_date: 'bi-check-circle text-success', available: 'bi-arrow-up-circle text-primary',
+                       blocked: 'bi-exclamation-triangle text-warning', error: 'bi-x-circle text-danger',
+                       unsupported: 'bi-dash-circle text-secondary' }[r.state] || 'bi-question-circle';
+        let html = `<div class="mb-2"><i class="bi ${icon}"></i> ${App.esc(i18n('settings.updateState.' + r.state))}</div>`;
+        if (r.state === 'available') {
+            html += r.can_install
+                ? `<button type="button" class="btn btn-primary mb-2" id="btn-update-install">
+                       <i class="bi bi-download"></i> ${i18n('settings.updateInstall')}</button>`
+                : `<div class="small mb-2">${App.esc(i18n('settings.updateBlocker.' + r.install_blocker))}
+                       ${App.esc(i18n('settings.updateRunManually'))}<br><code>${App.esc(r.command)}</code></div>`;
+        }
+        if (r.output) {
+            html += `<details class="small mb-2"><summary>${i18n('settings.updateDetails')}</summary>
+                         <pre class="update-output">${App.esc(r.output)}</pre></details>`;
+        }
+        box.innerHTML = html + this._updateRetry();
+        this._wireUpdateRetry();
+        const install = document.getElementById('btn-update-install');
+        if (install) install.onclick = () => this.installUpdate();
+    },
+
+    _updateRetry() {
+        return `<button type="button" class="btn btn-sm btn-outline-secondary" id="btn-update-check">
+                    <i class="bi bi-arrow-repeat"></i> ${i18n('settings.updateCheck')}</button>`;
+    },
+
+    _wireUpdateRetry() {
+        const b = document.getElementById('btn-update-check');
+        if (b) b.onclick = () => this.checkUpdates();
+    },
+
+    async installUpdate() {
+        if (!confirm(i18n('settings.updateConfirm'))) return;
+        const box = document.getElementById('update-box');
+        let pid = null;
+        try { pid = (await App.api('GET', '/system/info')).pid; } catch (e) { /* follow anyway */ }
+        try {
+            await App.api('POST', '/system/update');
+        } catch (e) {
+            App.toast(e.message, 'danger');
+            return this.checkUpdates();
+        }
+        this._followUpdate(box, pid);
+    },
+
+    /** Wait for the update to end. It restarts this very server (twice when
+     *  the connectors plugin is installed), so requests fail for a while:
+     *  that is progress, not an error. Done = the update unit is gone; a new
+     *  pid then means it installed (reload into the new UI), the same pid
+     *  means it stopped before installing (show its log). */
+    _followUpdate(box, pid) {
+        box.innerHTML = `<div class="spinner-border spinner-border-sm"></div> ${i18n('settings.updateRunning')}`;
+        const started = Date.now();
+        const tick = async () => {
+            if (Date.now() - started > 15 * 60 * 1000) {
+                box.innerHTML = `<div class="text-warning">${i18n('settings.updateTimeout')}</div>${this._updateRetry()}`;
+                return this._wireUpdateRetry();
+            }
+            let r = null, info = null;
+            try {
+                r = await App.api('GET', '/system/update?check=false');
+                info = await App.api('GET', '/system/info');
+            } catch (e) { /* restarting */ }
+            if (!r || r.state === 'running') return setTimeout(tick, 3000);
+            if (pid !== null && info && info.pid !== pid) {
+                App.toast(i18n('settings.updateDone'));
+                setTimeout(() => location.reload(), 1500);
+                return;
+            }
+            box.innerHTML = `<div class="text-warning mb-2">${i18n('settings.updateNotInstalled')}</div>
+                <pre class="update-output small">${App.esc(r.last_log || '')}</pre>${this._updateRetry()}`;
+            this._wireUpdateRetry();
+        };
+        setTimeout(tick, 3000);
+    },
+
     async loadServerInfo() {
         const box = document.getElementById('server-info');
         let info;
@@ -725,19 +829,21 @@ const SettingsPage = {
             box.innerHTML = `<div class="text-secondary"><i class="bi bi-dash-circle"></i> ${i18n('settings.serverUnavailable')}</div>`;
             return;
         }
+        // A definition list, not a table: the values are long paths, and a
+        // table cell cannot wrap them on a phone, so the page scrolled sideways.
         const row = (label, value, extra = '') =>
-            `<tr><th class="text-nowrap fw-normal text-secondary pe-3">${label}</th><td><code>${App.esc(String(value ?? '?'))}</code>${extra}</td></tr>`;
+            `<dt>${label}</dt><dd><code>${App.esc(String(value ?? '?'))}</code>${extra}</dd>`;
         const rootWarn = info.is_root
             ? ` <span class="badge text-bg-warning ms-1">${i18n('settings.serverRoot')}</span>` : '';
         box.innerHTML = `
-            <table class="table table-sm table-borderless mb-0 w-auto">
+            <dl class="server-info mb-0">
                 ${info.instance_name ? row(i18n('settings.instanceName'), info.instance_name) : ''}
                 ${row(i18n('settings.serverUser'), info.uid != null ? `${info.user} (uid ${info.uid})` : info.user, rootWarn)}
                 ${row(i18n('settings.serverHost'), info.hostname)}
                 ${row(i18n('settings.serverHome'), info.home_dir)}
                 ${row(i18n('settings.serverCode'), info.app_dir)}
                 ${row(i18n('settings.serverProcess'), `pid ${info.pid} · Python ${info.python} · ${info.platform}`)}
-            </table>`;
+            </dl>`;
     },
 
     async checkStatus() {

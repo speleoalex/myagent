@@ -29,23 +29,26 @@ const ModelsPage = {
                     <a href="#/models/new" class="btn btn-primary"><i class="bi bi-plus-lg"></i> ${i18n('models.add')}</a>
                 </div>
             </div>
+            <!-- Below md the name is the edit link and ID, URL and the Edit
+                 button are dropped: six columns made a phone scroll sideways,
+                 with the one useful action off screen. -->
             <div class="table-responsive">
                 <table class="table table-hover">
                     <thead>
-                        <tr><th>${i18n('common.id')}</th><th>${i18n('common.name')}</th><th>${i18n('models.colProvider')}</th><th>${i18n('models.colModel')}</th><th>${i18n('models.colUrl')}</th><th></th></tr>
+                        <tr><th class="d-none d-md-table-cell">${i18n('common.id')}</th><th>${i18n('common.name')}</th><th>${i18n('models.colProvider')}</th><th>${i18n('models.colModel')}</th><th class="d-none d-md-table-cell">${i18n('models.colUrl')}</th><th class="d-none d-md-table-cell"></th></tr>
                     </thead>
                     <tbody>
                         ${models.map(m => `
                             <tr>
-                                <td><code>${App.esc(m.id)}</code></td>
-                                <td>${kindIcon(m)}${App.esc(m.name)}</td>
+                                <td class="d-none d-md-table-cell"><code>${App.esc(m.id)}</code></td>
+                                <td>${kindIcon(m)}<a href="#/models/${App.escAttr(m.id)}">${App.esc(m.name)}</a></td>
                                 <td><span class="badge bg-${providerBadge(m.provider)}">${App.esc(m.provider)}</span></td>
                                 <td class="model-cell" data-mid="${App.escAttr(m.id)}">
                                     <code>${App.esc(m.model || '—')}</code>
                                     <span class="model-live"></span>
                                 </td>
-                                <td class="small">${App.esc(m.base_url)}</td>
-                                <td>
+                                <td class="small d-none d-md-table-cell">${App.esc(m.base_url)}</td>
+                                <td class="d-none d-md-table-cell">
                                     <a href="#/models/${m.id}" class="btn btn-sm btn-outline-primary">${i18n('common.edit')}</a>
                                 </td>
                             </tr>
@@ -106,7 +109,7 @@ const ModelsPage = {
                 .map(c => this.capabilityBadge(String(c).toLowerCase())).join('');
             let html = badges;
             if (info.context_window) {
-                html += `<span class="badge text-bg-light border me-1" title="${i18n('models.ctxTitle')}">${this.fmtTokens(info.context_window)} ctx</span>`;
+                html += `<span class="badge text-bg-light border me-1" title="${i18n('models.ctxTitle')}">${App.esc(i18n('models.ctxBadge', { n: this.fmtTokens(info.context_window) }))}</span>`;
             }
             if (live && html) live.innerHTML = ' ' + html;
         }));
