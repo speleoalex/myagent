@@ -12,6 +12,8 @@ I18n.translations.en = {
     'nav.connectors': 'Channels',
     'nav.runsAs': 'The server runs as user {user}',
     'nav.runsAsRoot': "The server runs as ROOT: the agents' shell tools have full power over the machine",
+    'nav.logout': 'Log out',
+    'nav.logoutConfirm': 'Log out? This browser forgets the API key and asks for it next time. The key stays valid: to revoke it, change it in Settings → Access.',
     'nav.settings': 'Settings',
 
     // Auth (only when the server sets MYAGENT_API_KEY)

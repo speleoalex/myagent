@@ -12,6 +12,8 @@ I18n.translations.it = {
     'nav.connectors': 'Canali',
     'nav.runsAs': 'Il server gira come utente {user}',
     'nav.runsAsRoot': 'Il server gira come ROOT: gli strumenti shell degli agenti hanno pieni poteri sulla macchina',
+    'nav.logout': 'Esci',
+    'nav.logoutConfirm': 'Uscire? Questo browser dimentica la chiave API e alla prossima apertura la richiede. La chiave resta valida: per revocarla cambiala in Impostazioni → Accesso.',
     'nav.settings': 'Impostazioni',
 
     // Auth (solo quando il server imposta MYAGENT_API_KEY)

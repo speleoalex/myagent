@@ -28,6 +28,7 @@ const App = {
         this.instancePromise = this.loadInstance();
         window.addEventListener('hashchange', () => this.route());
         this._wireReveal();
+        this._wireLogout();
         this.route();
         this.updateActiveNav();
     },
@@ -342,6 +343,21 @@ const App = {
             history.replaceState(null, '', url);
         }
         return localStorage.getItem('myagent_api_key') || null;
+    },
+
+    /** Forget the key this browser holds and go back to the key form. The
+     * key itself stays valid on the server (rotating it is Settings -> Access):
+     * this ends THIS browser's access, e.g. on a shared or lost device. A turn
+     * still generating keeps running server-side, as when a tab is closed. */
+    _wireLogout() {
+        document.getElementById('nav-logout')?.classList.toggle('d-none', !this.apiKey);
+        const btn = document.getElementById('btn-logout');
+        if (!btn) return;
+        btn.onclick = () => {
+            if (!confirm(i18n('nav.logoutConfirm'))) return;
+            localStorage.removeItem('myagent_api_key');
+            location.reload();  // the first request 401s and shows the key form
+        };
     },
 
     authHeaders() {

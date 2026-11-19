@@ -39,7 +39,9 @@ set a key: every `/api` request then requires it, either as an
 
 The web UI asks for the key on first use — or open it once as
 `http://host:8888/?api_key=<key>`, and the key is stored in the browser and
-stripped from the URL.
+stripped from the URL. *Log out* in the menu (shown when the browser holds a
+key) makes that browser forget it, e.g. on a shared or lost device; the key
+itself stays valid until you change it in *Settings → Access*.
 
 Two ways to set it, and they are **not** interchangeable:
 

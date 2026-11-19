@@ -81,6 +81,12 @@
                     <li class="nav-item">
                         <a class="nav-link" href="#/settings"><i class="bi bi-gear"></i> <span data-i18n="nav.settings">Settings</span></a>
                     </li>
+                    <!-- Log out = forget the API key this browser saved. Shown
+                         only when there is one: on an open server there is
+                         nothing to log out of. Wired in App._wireLogout. -->
+                    <li class="nav-item d-none" id="nav-logout">
+                        <button type="button" class="nav-link" id="btn-logout"><i class="bi bi-box-arrow-right"></i> <span data-i18n="nav.logout">Log out</span></button>
+                    </li>
                 </ul>
                 <!-- Language and theme controls live in the Settings screen. -->
             </div>
@@ -95,9 +101,9 @@
     <script src="vendor/katex/katex.min.js"></script>
     <!-- i18n: core before dictionaries, dictionaries before app scripts -->
     <script src="js/i18n.js?v=2"></script>
-    <script src="js/i18n/en.js?v=73"></script>
-    <script src="js/i18n/it.js?v=73"></script>
-    <script src="js/app.js?v=23"></script>
+    <script src="js/i18n/en.js?v=74"></script>
+    <script src="js/i18n/it.js?v=74"></script>
+    <script src="js/app.js?v=24"></script>
     <script src="js/rangefield.js?v=2"></script>
     <script src="js/agents.js?v=34"></script>
     <script src="js/tasks.js?v=2"></script>
