@@ -1,4 +1,4 @@
-"""Markdown → HTML for outgoing mail. Standard library only.
+"""Markdown → HTML for outgoing mail and for write_pdf. Standard library only.
 
 Why it exists. Models write their answers in Markdown — every chat UI renders
 it — and a mail client shows it as source. Observed 2026-11-05 on the catasto
@@ -28,6 +28,8 @@ from __future__ import annotations
 
 import html
 import re
+from contextvars import ContextVar
+from typing import Callable
 
 __all__ = ["looks_like_markdown", "render", "plain", "document"]
 
@@ -90,6 +92,10 @@ _EMPHASIS = [
     (re.compile(r"(?<![\w_])_(?=[^\s_])(.+?)(?<=[^\s_])_(?![\w_])"), r"<em>\1</em>"),
     (re.compile(r"~~(?=\S)(.+?)(?<=\S)~~"), r"<del>\1</del>"),
 ]
+# The image_src of the render() in progress: a context variable rather than a
+# parameter threaded through every block and inline function.
+_IMAGE_SRC: ContextVar[Callable[[str], str | None] | None] = ContextVar("image_src", default=None)
+
 _TOKEN = re.compile(r"\x00(\d+)\x00")
 
 
@@ -108,10 +114,19 @@ def looks_like_markdown(text: str) -> bool:
     return any(_is_table(lines, i) for i in range(len(lines) - 1))
 
 
-def render(text: str) -> str:
-    """Markdown → an HTML fragment (no ``<html>``/``<body>``)."""
+def render(text: str, image_src: Callable[[str], str | None] | None = None) -> str:
+    """Markdown → an HTML fragment (no ``<html>``/``<body>``).
+
+    ``image_src`` takes over every image: it maps the address written in the
+    Markdown to the ``src`` to emit (write_pdf turns a workspace file or a
+    downloaded picture into a data: URI), or to None to print the alt text.
+    Without it only http(s) images are kept, as a mail body needs."""
     lines = (text or "").replace("\r\n", "\n").replace("\r", "\n").replace("\x00", "")
-    return _blocks([ln.expandtabs(4) for ln in lines.split("\n")])
+    token = _IMAGE_SRC.set(image_src)
+    try:
+        return _blocks([ln.expandtabs(4) for ln in lines.split("\n")])
+    finally:
+        _IMAGE_SRC.reset(token)
 
 
 def plain(text: str) -> str:
@@ -127,11 +142,12 @@ def plain(text: str) -> str:
     return "\n".join(out)
 
 
-def document(fragment: str) -> str:
-    """A fragment wrapped as the complete HTML document a text/html part is."""
+def document(fragment: str, head: str = "") -> str:
+    """A fragment wrapped as the complete HTML document a text/html part is.
+    ``head`` is extra markup for ``<head>`` (write_pdf's title and print CSS)."""
     return ('<!DOCTYPE html>\n<html><head><meta charset="utf-8">'
             '<meta name="viewport" content="width=device-width, initial-scale=1">'
-            f'</head>\n<body style="{_S_BODY}">\n{fragment}\n</body></html>\n')
+            f'{head}</head>\n<body style="{_S_BODY}">\n{fragment}\n</body></html>\n')
 
 
 # ------------------------------------------------------------------ blocks
@@ -390,7 +406,10 @@ def _inline(text: str, markup: bool = True) -> str:
 
         def image(m: re.Match) -> str:
             alt, href = m.group(1), _href(m.group(2))
-            if href.lower().startswith(("http://", "https://")):
+            resolve = _IMAGE_SRC.get()
+            if resolve is not None:
+                href = resolve(m.group(2)) or ""
+            if href.lower().startswith(("http://", "https://", "data:image/")):
                 return put(f'<img src="{html.escape(href, quote=True)}" '
                            f'alt="{html.escape(alt, quote=True)}" style="{_S_IMG}">')
             return put(html.escape(alt))

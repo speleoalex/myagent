@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -57,6 +58,16 @@ _ANTHROPIC_MIN_THINKING = 1024
 # the same reason: without it every turn re-pays the 400 that discovers the
 # ceiling. Separate dict because the values are numbers, not replacement names.
 _MAX_TOKENS_CAPS: dict[tuple[str, str], int] = {}
+
+# "Not now" rather than "not like that": the endpoint is busy or briefly down.
+# A cloud gateway answers 429 when it already has this model's quota in use, and
+# Ollama's cloud proxy does exactly that ("too many concurrent requests") when
+# another client of the same account is generating. Left unretried the turn dies
+# mid-flight — observed 2026-11-11, when a catasto report answered a real mail
+# with the half-collected tables it had at that moment. Seconds of backoff cost
+# nothing next to losing the turn.
+_TRANSIENT_STATUSES = frozenset({408, 425, 429, 500, 502, 503, 504})
+_TRANSIENT_RETRIES = 4                  # 2 + 4 + 8 + 16 s
 
 # What we ask for when nothing declares an output cap (unreachable Models API, a
 # gateway that doesn't state one). Deliberately conservative: too HIGH is a 400,
@@ -155,6 +166,23 @@ _TRUNCATION_NOTE = ("\n\n[... this tool result was cut to fit the context window
 #: Below this, cutting a tool result buys less context than the note costs
 #: honesty: it would mark a complete result as partial. See _trim_tool_results.
 _MIN_TRIM_CHARS = 400
+
+
+def _output_note(cap: int) -> str:
+    """Added to a reply the OUTPUT cap cut off mid-generation.
+
+    Staying silent here is the worst outcome: when the cut lands inside a tool
+    call's input_json_delta the executor gets unparseable arguments and the
+    model retries blind, and when the model burns the cap on its reasoning the
+    turn ends with an empty reply — a mail correspondent got "(no reply)"
+    (observed 2026-11-11, deepseek-v4.1-flash:cloud). Content and not an `error`
+    event, like the refusal note: whatever was generated is still worth keeping,
+    and the note lands in the turn the model reads back.
+    """
+    return (f"\n\n[Output truncated: this reply hit the max_tokens cap "
+            f"({cap}). Nothing above is necessarily complete. Raise "
+            f"max_tokens in the model options, or produce less per call "
+            f"— write a large file in several smaller pieces.]")
 
 
 def _clamp_from_error(detail: str, current: int) -> int | None:
@@ -944,6 +972,16 @@ class LLMProvider:
                     payload[replacement] = value
         return payload
 
+    def _length_note(self, chunk: dict) -> dict | None:
+        """The OpenAI-format twin of the Anthropic max_tokens branch: a chunk
+        carrying the cut-off signal becomes a content chunk, so the executor
+        and the log see the same sentence on both wire formats."""
+        choices = chunk.get("choices") or [{}]
+        if (choices[0] or {}).get("finish_reason") != "length":
+            return None
+        cap = int(self.config.options.get("max_tokens") or 8192)
+        return {"choices": [{"delta": {"content": _output_note(cap)}}]}
+
     def _anthropic_chunks(self, event: dict, tool_idx: dict[int, int]) -> list[dict]:
         """One Anthropic SSE event -> zero or more OpenAI-style stream chunks.
 
@@ -993,21 +1031,10 @@ class LLMProvider:
                 text += f": {note}]" if note else ".]"
                 return [{"choices": [{"delta": {"content": text}}]}]
             if stop == "max_tokens":
-                # The hard output cap cut the turn off mid-generation. Staying
-                # silent here is the worst outcome: when the cut lands inside a
-                # tool call's input_json_delta, the executor gets unparseable
-                # arguments and the model retries blind, with no idea it hit a
-                # ceiling (observed 2026-08-10, a file_write of a ~10 KB
-                # script). Content and not an `error` event, like the refusal
-                # above: whatever was generated is still worth keeping, and the
-                # note lands in the turn the model reads back.
+                # The hard output cap cut the turn off mid-generation. See
+                # _output_note for why this cannot stay silent.
                 cap = int(self.config.options.get("max_tokens") or 8192)
-                return [{"choices": [{"delta": {"content": (
-                    f"\n\n[Output truncated: this reply hit the max_tokens cap "
-                    f"({cap}). Nothing above is necessarily complete. Raise "
-                    f"max_tokens in the model options, or produce less per call "
-                    f"— write a large file in several smaller pieces.]"
-                )}}]}]
+                return [{"choices": [{"delta": {"content": _output_note(cap)}}]}]
             return []
         if etype == "error":
             message = (event.get("error") or {}).get("message", "unknown error")
@@ -1080,7 +1107,8 @@ class LLMProvider:
         # choke point, which is why the auto-routing classifier and the memory
         # compactor show up in the log without knowing anything about it.
         attempt = 0
-        for _ in range(len(DROPPABLE_PARAMS) + 3):
+        transient = 0
+        for _ in range(len(DROPPABLE_PARAMS) + 3 + _TRANSIENT_RETRIES):
             attempt += 1
             label = (self.trace_label if attempt == 1
                      else f"{self.trace_label} retry {attempt}")
@@ -1090,6 +1118,17 @@ class LLMProvider:
                 if resp.status_code >= 400:
                     body = await resp.aread()
                     detail = self._error_message(body)
+                    if resp.status_code in _TRANSIENT_STATUSES and transient < _TRANSIENT_RETRIES:
+                        transient += 1
+                        delay = min(2 ** transient, 16)
+                        log.warning("Model '%s' is busy (HTTP %s) — retrying in %ss (%d/%d)",
+                                    self.config.model, resp.status_code, delay,
+                                    transient, _TRANSIENT_RETRIES)
+                        trace.reply(label, "", error=f"HTTP {resp.status_code} "
+                                                     f"({detail or 'busy'}) — retrying "
+                                                     f"in {delay}s")
+                        await asyncio.sleep(delay)
+                        continue
                     if resp.status_code == 400 and self._adapt_payload(payload, detail):
                         log.warning("Model '%s' rejected the request (%s) — retrying adapted",
                                     self.config.model, detail or "no detail")
@@ -1129,6 +1168,16 @@ class LLMProvider:
                             seen_text, seen_reasoning = _accumulate(
                                 chunk, seen_text, seen_reasoning, seen_tools)
                             yield chunk
+                            # The OpenAI wire has the same event the Anthropic
+                            # one had to be taught: finish_reason "length" means
+                            # the output cap cut the reply. Ignored, a model
+                            # that spends the cap on its reasoning ends the
+                            # turn with NOTHING — not even a tool call.
+                            note = self._length_note(chunk)
+                            if note:
+                                seen_text, seen_reasoning = _accumulate(
+                                    note, seen_text, seen_reasoning, seen_tools)
+                                yield note
                 trace.reply(label, seen_text,
                             [seen_tools[k] for k in sorted(seen_tools)] or None,
                             seen_reasoning)
