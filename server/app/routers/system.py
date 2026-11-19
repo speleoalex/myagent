@@ -7,6 +7,7 @@ import secrets as secrets_mod
 import shutil
 import socket
 import sys
+import time
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
@@ -18,6 +19,13 @@ from app.engine import default_model, embedding, imagegen
 from app.models import Settings
 
 router = APIRouter()
+
+# Identifies THIS run of the server. A restart in place (POST /restart) keeps
+# the pid, so a page waiting for the new server watches this instead.
+BOOT_ID = f"{os.getpid()}-{time.time_ns()}"
+# How long a restart waits for open requests (a streaming chat, mostly) before
+# cutting them. Without a bound one forgotten browser tab would hold it forever.
+RESTART_GRACE_SECONDS = 10
 
 # A generated key is 24 random bytes as hex; a hand-typed one only has to clear
 # this floor. Short enough to be typeable on a phone, long enough that the port
@@ -86,6 +94,7 @@ async def info():
         "platform": platform.platform(terse=True),
         "python": sys.version.split()[0],
         "pid": os.getpid(),
+        "boot_id": BOOT_ID,
         "home_dir": str(config.HOME_DIR),
         "config_dir": str(config.CONFIG_DIR),
         "sessions_dir": str(config.SESSIONS_DIR),
@@ -327,6 +336,43 @@ def _require_editable() -> None:
             "The API key is pinned by the MYAGENT_API_KEY environment variable; "
             "unset it (e.g. in the systemd drop-in) to manage the key from here",
         )
+
+
+# --- Restart ---------------------------------------------------------------- #
+
+def restart_status(request: Request) -> dict:
+    """Whether this process can restart itself, and what a restart would cut."""
+    live = getattr(request.app.state, "live", None)
+    active = sum(1 for run in live.runs.values() if not run.done) if live else 0
+    return {
+        # Only when started through main.py: under another runner (uvicorn's
+        # CLI, a test client) there is no server handle and nothing to re-exec.
+        "can_restart": getattr(request.app.state, "server", None) is not None,
+        "active_runs": active,
+    }
+
+
+class RestartReq(BaseModel):
+    # Restart even while answers are being generated (they are cut).
+    force: bool = False
+
+
+@router.post("/restart", status_code=202)
+async def restart(request: Request, req: RestartReq | None = None):
+    """Stop gracefully and start again in place (see the end of main.py).
+    The caller waits for /system/info to report a new boot_id."""
+    status = restart_status(request)
+    if not status["can_restart"]:
+        raise HTTPException(409, "This server cannot restart itself; restart it "
+                                 "from the terminal or the service manager")
+    if status["active_runs"] and not (req and req.force):
+        raise HTTPException(409, f"{status['active_runs']} answer(s) are being "
+                                 "generated; retry with force to cut them")
+    server = request.app.state.server
+    request.app.state.restart_requested = True
+    server.config.timeout_graceful_shutdown = RESTART_GRACE_SECONDS
+    server.should_exit = True
+    return {"restarting": True}
 
 
 # --- Updates from Settings -------------------------------------------------- #

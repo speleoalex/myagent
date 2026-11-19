@@ -297,6 +297,17 @@ const SettingsPage = {
 
                         <hr class="my-4">
 
+                        <!-- Plugins: installed ones, the catalog, and install
+                             from any GitHub repository. The catalog is fetched
+                             on demand only (it is a request to GitHub). -->
+                        <h5>${i18n('settings.plugins')}</h5>
+                        <div class="form-text mb-2">${i18n('settings.pluginsHint')}</div>
+                        <div id="plugins-box" class="mb-3">
+                            <div class="spinner-border spinner-border-sm"></div> ${i18n('settings.checking')}
+                        </div>
+
+                        <hr class="my-4">
+
                         <h5>${i18n('settings.systemStatus')}</h5>
                         <div id="status-checks" class="mb-3">
                             <div class="spinner-border spinner-border-sm"></div> ${i18n('settings.checking')}
@@ -409,6 +420,8 @@ const SettingsPage = {
         PWA.onchange = () => this.renderInstall();
 
         this.loadServerInfo();
+        this._pluginCatalog = null;
+        this.loadPlugins();
         document.getElementById('btn-update-check').onclick = () => this.checkUpdates();
 
         this.checkStatus();
@@ -818,6 +831,198 @@ const SettingsPage = {
             this._wireUpdateRetry();
         };
         setTimeout(tick, 3000);
+    },
+
+    // ---------------------------------------------------------------- plugins
+    /** Installed plugins + the running install job. Re-rendered from the
+     *  server's answer every time: nothing about a plugin is kept in the page. */
+    async loadPlugins() {
+        const box = document.getElementById('plugins-box');
+        if (!box) return;  // the user left the page while a poll was pending
+        let r;
+        try {
+            r = await App.api('GET', '/plugins');
+        } catch (e) {
+            box.innerHTML = `<div class="text-danger">${App.esc(e.message)}</div>`;
+            return;
+        }
+        const job = r.job || {};
+        const cat = this._pluginCatalog;
+        const text = v => App.esc(typeof v === 'object' && v
+            ? (v[I18n.locale] || v.en || '') : (v || ''));
+        const badge = (cls, key) => `<span class="badge ${cls}">${i18n(key)}</span>`;
+        const row = (title, sub, state, actions, error) => `
+            <div class="list-group-item">
+                <div class="d-flex flex-wrap gap-2 justify-content-between align-items-center">
+                    <div><strong>${title}</strong> ${state}
+                        <div class="small text-secondary">${sub}</div></div>
+                    <div class="d-flex flex-wrap gap-2">${actions}</div>
+                </div>
+                ${error ? `<pre class="update-output small text-danger mb-0 mt-2">${App.esc(error)}</pre>` : ''}
+            </div>`;
+        const btn = (act, id, cls, icon, key) => `
+            <button type="button" class="btn btn-sm ${cls}" data-plugin-act="${act}"
+                    data-id="${App.escAttr(id)}" ${job.state === 'running' ? 'disabled' : ''}>
+                <i class="bi ${icon}"></i> ${i18n(key)}</button>`;
+        const sub = p => [p.id, p.version && `v${p.version}`,
+                          p.source?.repo && `${p.source.repo}@${(p.source.commit || p.source.ref || '').slice(0, 12)}`]
+            .filter(Boolean).map(App.esc).join(' · ');
+
+        const installed = [
+            ...(r.plugins || []).map(p => row(
+                text(p.name) || App.esc(p.id), sub(p),
+                p.removed ? badge('bg-secondary', 'settings.pluginRemoved')
+                    : p.loaded ? badge('bg-success', 'settings.pluginActive')
+                    : badge('bg-danger', 'settings.pluginBroken'),
+                p.removed ? '' : (p.can_rollback ? btn('rollback', p.id, 'btn-outline-secondary', 'bi-arrow-counterclockwise', 'settings.pluginRollback') : '')
+                    + btn('uninstall', p.id, 'btn-outline-danger', 'bi-trash', 'settings.pluginUninstall'),
+                p.loaded ? '' : p.error)),
+            ...(r.pending || []).map(p => row(
+                text(p.name) || App.esc(p.id), sub(p), badge('bg-warning text-dark', 'settings.pluginPending'),
+                btn('uninstall', p.id, 'btn-outline-danger', 'bi-trash', 'settings.pluginUninstall'))),
+        ];
+
+        let html = '';
+        if (r.restart_needed) {
+            html += `<div class="alert alert-warning d-flex flex-wrap gap-2 justify-content-between align-items-center">
+                <span>${i18n(r.can_restart ? 'settings.pluginRestartNeeded' : 'settings.pluginRestartManual')}</span>
+                ${r.can_restart ? `<button type="button" class="btn btn-warning" id="btn-plugin-restart">
+                    <i class="bi bi-arrow-clockwise"></i> ${i18n('settings.pluginRestart')}</button>` : ''}
+            </div>`;
+        }
+        if (job.state === 'running') {
+            html += `<div class="mb-2"><span class="spinner-border spinner-border-sm"></span>
+                ${i18n('settings.pluginInstalling', { name: App.esc(job.target) })}</div>
+                <pre class="update-output small">${App.esc(job.log)}</pre>`;
+        } else if (job.state === 'error') {
+            html += `<div class="text-danger mb-1">${i18n('settings.pluginInstallFailed', { name: App.esc(job.target) })}</div>
+                <pre class="update-output small">${App.esc(job.log)}</pre>`;
+        }
+        html += installed.length
+            ? `<div class="list-group mb-3">${installed.join('')}</div>`
+            : `<div class="text-secondary mb-3"><i class="bi bi-dash-circle"></i> ${i18n('settings.pluginsNone')}</div>`;
+
+        if (cat) {
+            const rows = cat.entries.map(e => row(
+                text(e.name), `${text(e.description)}${e.version ? ` · v${App.esc(e.version)}` : ''}`,
+                e.installed && !e.update_available ? badge('bg-secondary', 'settings.pluginInstalled') : '',
+                !e.installed ? btn('install', e.id, 'btn-primary', 'bi-download', 'settings.pluginInstall')
+                    : e.update_available ? btn('install', e.id, 'btn-primary', 'bi-arrow-up-circle', 'settings.pluginUpdate') : ''));
+            html += `<h6>${i18n('settings.pluginCatalog')}</h6>
+                ${cat.origin === 'bundled' ? `<div class="form-text mb-2">${i18n('settings.pluginCatalogOffline')}</div>` : ''}
+                ${rows.length ? `<div class="list-group mb-3">${rows.join('')}</div>`
+                    : `<div class="text-secondary mb-3">${i18n('settings.pluginCatalogEmpty')}</div>`}`;
+        }
+        html += `<button type="button" class="btn btn-outline-primary mb-2" id="btn-plugin-catalog">
+                <i class="bi bi-arrow-repeat"></i> ${i18n(cat ? 'settings.pluginCatalogRefresh' : 'settings.pluginCatalogShow')}</button>
+            <details class="mb-2"><summary>${i18n('settings.pluginFromRepo')}</summary>
+                <div class="form-text mb-2">${i18n('settings.pluginFromRepoHint')}</div>
+                <div class="row g-2">
+                    <div class="col-md-5"><input type="text" class="form-control" id="plugin-repo"
+                        placeholder="owner/repository" aria-label="${App.escAttr(i18n('settings.pluginRepo'))}"></div>
+                    <div class="col-md-3"><input type="text" class="form-control" id="plugin-ref"
+                        placeholder="main" aria-label="${App.escAttr(i18n('settings.pluginRef'))}"></div>
+                    <div class="col-md-4"><input type="text" class="form-control" id="plugin-subdir"
+                        placeholder="${App.escAttr(i18n('settings.pluginSubdir'))}" aria-label="${App.escAttr(i18n('settings.pluginSubdir'))}"></div>
+                </div>
+                <button type="button" class="btn btn-outline-danger mt-2" id="btn-plugin-repo"
+                        ${job.state === 'running' ? 'disabled' : ''}>
+                    <i class="bi bi-download"></i> ${i18n('settings.pluginInstall')}</button>
+            </details>`;
+        // Typing in the repository form must survive the 2 s poll of a running job.
+        const typed = ['plugin-repo', 'plugin-ref', 'plugin-subdir']
+            .map(id => document.getElementById(id)?.value || '');
+        const open = box.querySelector('details')?.open;
+        box.innerHTML = html;
+        ['plugin-repo', 'plugin-ref', 'plugin-subdir']
+            .forEach((id, i) => { document.getElementById(id).value = typed[i]; });
+        if (open) box.querySelector('details').open = true;
+
+        box.querySelectorAll('[data-plugin-act]').forEach(b => {
+            b.onclick = () => this.pluginAction(b.dataset.pluginAct, b.dataset.id);
+        });
+        document.getElementById('btn-plugin-catalog').onclick = () => this.loadPluginCatalog();
+        document.getElementById('btn-plugin-repo').onclick = () => this.installPluginFromRepo();
+        const restart = document.getElementById('btn-plugin-restart');
+        if (restart) restart.onclick = () => this.restartServer(r.active_runs);
+        if (job.state === 'running') setTimeout(() => this.loadPlugins(), 2000);
+        else if (this._pluginJobSeen === 'running') {
+            // The job this page was following just ended: the catalog's
+            // "installed" marks are stale.
+            if (job.state === 'done') App.toast(i18n('settings.pluginInstallDone'));
+            if (cat) this.loadPluginCatalog();
+        }
+        this._pluginJobSeen = job.state;
+    },
+
+    async loadPluginCatalog() {
+        const b = document.getElementById('btn-plugin-catalog');
+        if (b) b.disabled = true;
+        try {
+            this._pluginCatalog = await App.api('GET', '/plugins/catalog');
+        } catch (e) {
+            App.toast(e.message, 'danger');
+        }
+        this.loadPlugins();
+    },
+
+    async pluginAction(action, id) {
+        if (action !== 'install' && !confirm(i18n('settings.pluginConfirm.' + action, { name: id }))) return;
+        try {
+            if (action === 'install') await App.api('POST', '/plugins/install', { id });
+            else if (action === 'rollback') await App.api('POST', `/plugins/${encodeURIComponent(id)}/rollback`);
+            else await App.api('DELETE', `/plugins/${encodeURIComponent(id)}`);
+        } catch (e) {
+            App.toast(e.message, 'danger');
+        }
+        if (this._pluginCatalog && action !== 'install') return this.loadPluginCatalog();
+        this.loadPlugins();
+    },
+
+    async installPluginFromRepo() {
+        const val = id => document.getElementById(id).value.trim();
+        const repo = val('plugin-repo');
+        if (!repo) return document.getElementById('plugin-repo').focus();
+        // Asked every time, with the repository spelled out: this runs that
+        // repository's code inside the server, with access to every secret.
+        if (!confirm(i18n('settings.pluginConfirm.repo', { repo }))) return;
+        try {
+            await App.api('POST', '/plugins/install',
+                { repo, ref: val('plugin-ref'), subdir: val('plugin-subdir') });
+        } catch (e) {
+            App.toast(e.message, 'danger');
+        }
+        this.loadPlugins();
+    },
+
+    /** Restart the server in place and reload once the NEW one answers (the
+     *  pid does not change, so the marker is /system/info's boot_id). */
+    async restartServer(activeRuns) {
+        const msg = activeRuns
+            ? i18n('settings.restartConfirmBusy', { n: activeRuns }) : i18n('settings.restartConfirm');
+        if (!confirm(msg)) return;
+        const box = document.getElementById('plugins-box');
+        let boot = null;
+        try {
+            boot = (await App.api('GET', '/system/info')).boot_id;
+            await App.api('POST', '/system/restart', { force: !!activeRuns });
+        } catch (e) {
+            App.toast(e.message, 'danger');
+            return this.loadPlugins();
+        }
+        box.innerHTML = `<div class="spinner-border spinner-border-sm"></div> ${i18n('settings.restarting')}`;
+        const started = Date.now();
+        const tick = async () => {
+            let info = null;
+            try { info = await App.api('GET', '/system/info'); } catch (e) { /* restarting */ }
+            if (info && info.boot_id !== boot) return location.reload();
+            if (Date.now() - started > 2 * 60 * 1000) {
+                box.innerHTML = `<div class="text-warning">${i18n('settings.restartTimeout')}</div>`;
+                return;
+            }
+            setTimeout(tick, 1500);
+        };
+        setTimeout(tick, 1500);
     },
 
     async loadServerInfo() {

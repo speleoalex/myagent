@@ -18,6 +18,15 @@ const ConnectorsPage = {
         return this.renderList();
     },
 
+    /** The installed channel types, with each one's own translations merged in
+     *  before anything renders its labels (an installed channel cannot add to
+     *  the core dictionaries, so it ships them in its manifest). */
+    async _fetchTypes() {
+        const res = await App.api('GET', '/connectors/bindings/types');
+        (res.types || []).forEach(t => I18n.extend(t.i18n));
+        return res;
+    },
+
     // Plain buttons, not .nav-link: updateActiveNav() matches by href prefix and
     // would light both pills up on #/connectors/contacts.
     tabs(active) {
@@ -37,8 +46,8 @@ const ConnectorsPage = {
             <div class="row"><div class="col-lg-8 mx-auto">
                 <div class="alert alert-warning mt-3">
                     <h5><i class="bi bi-plug"></i> ${i18n('connectors.unavailable')}</h5>
-                    <p class="mb-2">${i18n('connectors.unavailableHint', { path: '~/myagent/plugins/connectors/' })}</p>
-                    <pre class="small mb-0">bash connectors/install.sh</pre>
+                    <p class="mb-2">${i18n('connectors.unavailableHint')}</p>
+                    <a href="#/settings" class="btn btn-primary"><i class="bi bi-gear"></i> ${i18n('connectors.openSettings')}</a>
                 </div>
                 ${broken ? `
                 <div class="alert alert-danger">
@@ -90,10 +99,110 @@ const ConnectorsPage = {
                    <tbody>${bindings.map(b => this.row(b)).join('')}</tbody>
                </table></div>`;
 
-        App.container.innerHTML = this.tabs('bindings') + header + body;
+        App.container.innerHTML = this.tabs('bindings') + header + body
+            + `<details class="mt-4" id="channel-types"><summary>${i18n('connectors.typesTitle')}</summary>
+                   <div id="channel-types-box" class="mt-2"></div></details>`;
+        // Loaded when opened: most visits are about the bots, not the types.
+        document.getElementById('channel-types').addEventListener('toggle', e => {
+            if (e.target.open) this.loadChannelTypes();
+        });
         if (bindings.length) {
             App.setPageInterval(() => this.tick(), 5000);
         }
+    },
+
+    // --------------------------------------------------------- channel types
+    /** Which channel types exist here, and installing more. A channel is a
+     *  folder the plugin discovers; installed ones live in the user's own
+     *  layer and are picked up without a restart. */
+    async loadChannelTypes(withCatalog = this._channelCatalog !== undefined) {
+        const box = document.getElementById('channel-types-box');
+        if (!box) return;
+        let status, job, cat = null;
+        try {
+            [status, job] = await Promise.all([
+                App.api('GET', '/connectors/status'),
+                App.api('GET', '/connectors/channels/job'),
+            ]);
+            if (withCatalog) cat = this._channelCatalog = await App.api('GET', '/connectors/channels/catalog');
+        } catch (e) {
+            box.innerHTML = `<div class="text-danger">${App.esc(e.message)}</div>`;
+            return;
+        }
+        (status.channels || []).forEach(c => I18n.extend(c.i18n));
+        const busy = job.state === 'running';
+        const text = v => App.esc(typeof v === 'object' && v ? (v[I18n.locale] || v.en || '') : (v || ''));
+        const item = (title, sub, right, error) => `
+            <div class="list-group-item">
+                <div class="d-flex flex-wrap gap-2 justify-content-between align-items-center">
+                    <div><strong>${title}</strong><div class="small text-secondary">${sub}</div></div>
+                    <div>${right}</div>
+                </div>
+                ${error ? `<pre class="small text-danger mb-0 mt-2" style="white-space:pre-wrap">${App.esc(error)}</pre>` : ''}
+            </div>`;
+        const button = (act, id, cls, icon, key) => `
+            <button type="button" class="btn btn-sm ${cls}" data-channel-act="${act}"
+                    data-id="${App.escAttr(id)}" ${busy ? 'disabled' : ''}>
+                <i class="bi ${icon}"></i> ${i18n(key)}</button>`;
+
+        let html = `<div class="list-group mb-3">${(status.channels || []).map(c => item(
+            `<i class="bi ${App.escAttr(c.icon || 'bi-plug')}"></i> ${App.esc(c.label)}`,
+            [c.type, c.version && `v${c.version}`, i18n('connectors.layer.' + c.layer)].filter(Boolean).map(App.esc).join(' · '),
+            c.layer === 'user' ? button('uninstall', c.type, 'btn-outline-danger', 'bi-trash', 'settings.pluginUninstall') : '',
+            c.loaded ? '' : c.error)).join('')}</div>`;
+        if (busy || job.state === 'error') {
+            html += `<div class="mb-1 ${busy ? '' : 'text-danger'}">
+                ${busy ? '<span class="spinner-border spinner-border-sm"></span>' : ''}
+                ${i18n(busy ? 'settings.pluginInstalling' : 'settings.pluginInstallFailed', { name: App.esc(job.target) })}</div>
+                <pre class="small" style="white-space:pre-wrap">${App.esc(job.log)}</pre>`;
+        }
+        if (cat) {
+            html += `<h6>${i18n('settings.pluginCatalog')}</h6>` + (cat.entries.length
+                ? `<div class="list-group mb-3">${cat.entries.map(e => item(
+                    text(e.name), `${text(e.description)}${e.version ? ` · v${App.esc(e.version)}` : ''}`,
+                    !e.installed ? button('install', e.id, 'btn-primary', 'bi-download', 'settings.pluginInstall')
+                        : e.update_available ? button('install', e.id, 'btn-primary', 'bi-arrow-up-circle', 'settings.pluginUpdate')
+                        : `<span class="badge bg-secondary">${i18n('settings.pluginInstalled')}</span>`)).join('')}</div>`
+                : `<div class="text-secondary mb-3">${i18n('connectors.catalogEmpty')}</div>`);
+        }
+        html += `<button type="button" class="btn btn-sm btn-outline-primary mb-2" id="btn-channel-catalog">
+                <i class="bi bi-arrow-repeat"></i> ${i18n(cat ? 'settings.pluginCatalogRefresh' : 'settings.pluginCatalogShow')}</button>
+            <div class="form-text mb-2">${i18n('connectors.fromRepoHint')}</div>
+            <div class="row g-2">
+                <div class="col-md-5"><input type="text" class="form-control" id="channel-repo"
+                    placeholder="owner/repository" aria-label="${App.escAttr(i18n('settings.pluginRepo'))}"></div>
+                <div class="col-md-3"><input type="text" class="form-control" id="channel-ref"
+                    placeholder="main" aria-label="${App.escAttr(i18n('settings.pluginRef'))}"></div>
+                <div class="col-md-4"><input type="text" class="form-control" id="channel-subdir"
+                    placeholder="${App.escAttr(i18n('settings.pluginSubdir'))}" aria-label="${App.escAttr(i18n('settings.pluginSubdir'))}"></div>
+            </div>
+            <button type="button" class="btn btn-sm btn-outline-danger mt-2" id="btn-channel-repo" ${busy ? 'disabled' : ''}>
+                <i class="bi bi-download"></i> ${i18n('settings.pluginInstall')}</button>`;
+        const fields = ['channel-repo', 'channel-ref', 'channel-subdir'];
+        const typed = fields.map(id => document.getElementById(id)?.value || '');
+        box.innerHTML = html;
+        fields.forEach((id, i) => { document.getElementById(id).value = typed[i]; });
+
+        const run = async (call) => {
+            try { await call(); } catch (e) { App.toast(e.message, 'danger'); }
+            this.loadChannelTypes();
+        };
+        box.querySelectorAll('[data-channel-act]').forEach(b => {
+            const id = b.dataset.id;
+            b.onclick = () => (b.dataset.channelAct === 'install'
+                ? run(() => App.api('POST', '/connectors/channels/install', { id }))
+                : confirm(i18n('connectors.channelUninstallConfirm', { name: id }))
+                    && run(() => App.api('DELETE', `/connectors/channels/${encodeURIComponent(id)}`)));
+        });
+        document.getElementById('btn-channel-catalog').onclick = () => this.loadChannelTypes(true);
+        document.getElementById('btn-channel-repo').onclick = () => {
+            const [repo, ref, subdir] = fields.map(id => document.getElementById(id).value.trim());
+            if (!repo) return document.getElementById('channel-repo').focus();
+            if (confirm(i18n('settings.pluginConfirm.repo', { repo }))) {
+                run(() => App.api('POST', '/connectors/channels/install', { repo, ref, subdir }));
+            }
+        };
+        if (busy) setTimeout(() => this.loadChannelTypes(), 2000);
     },
 
     row(b) {
@@ -177,7 +286,7 @@ const ConnectorsPage = {
         // Both lists are optional extras: the form must still work if either
         // fetch fails, so a failure degrades that one control, not the page.
         const [types, agents, contacts] = await Promise.all([
-            App.api('GET', '/connectors/bindings/types').catch(() => ({ types: [] })),
+            this._fetchTypes().catch(() => ({ types: [] })),
             App.api('GET', '/agents?selectable=true').catch(() => []),
             App.api('GET', '/connectors/contacts').catch(() => []),
         ]);
@@ -1107,7 +1216,7 @@ const ConnectorsPage = {
             isEdit ? App.api('GET', `/connectors/contacts/${encodeURIComponent(contactId)}`)
                         .catch(err => ({ _error: err.message }))
                    : null,
-            App.api('GET', '/connectors/bindings/types').catch(() => ({ types: [] })),
+            this._fetchTypes().catch(() => ({ types: [] })),
         ]);
         if (loaded && loaded._error) {
             App.toast(loaded._error, 'danger');

@@ -37,6 +37,19 @@ const I18n = {
         return text;
     },
 
+    /** Merge translations that arrive at runtime ({en: {key: text}, it: …}),
+     *  such as the ones an installed channel ships in its manifest. Never over
+     *  an existing key: an extension must not be able to reword the core. */
+    extend(dicts) {
+        Object.entries(dicts || {}).forEach(([lang, entries]) => {
+            const target = this.translations[lang];
+            if (!target || typeof entries !== 'object') return;
+            Object.entries(entries || {}).forEach(([key, text]) => {
+                if (!(key in target)) target[key] = String(text);
+            });
+        });
+    },
+
     setLocale(lang) {
         if (!this.translations[lang]) return;
         this.locale = lang;

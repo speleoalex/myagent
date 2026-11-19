@@ -164,6 +164,14 @@ def ensure_autonomy() -> Path:
 # separately, and an install without this directory is the normal case — the
 # loader treats it as "no plugins", not as an error, so nothing creates it.
 PLUGINS_DIR = _runtime_dir("MYAGENT_PLUGINS", "plugins")
+# The catalog of installable packages (app/plugin_installer.py). Read from
+# GitHub so entries published after this install show up; the copy shipped in
+# the install dir is the offline fallback. The override is for a fork or a
+# mirror on the local network.
+PLUGIN_INDEX_FILE = APP_DIR / "plugins-index.json"
+PLUGIN_INDEX_URL = os.environ.get("MYAGENT_PLUGIN_INDEX") or (
+    "https://raw.githubusercontent.com/speleoalex/myagent/main/server/plugins-index.json"
+)
 
 # Offline knowledge for the library/* tools: ZIM archives plus the user's own
 # documents. Placed by the user and only ever READ by the app, so nothing
@@ -376,6 +384,7 @@ API_LOG_FILE = DEBUG_LOG_FILE.with_name("api.log")
 # Output of the last update started from Settings. Overwritten by each run:
 # it answers "how did the update go", not "what happened last month".
 UPDATE_LOG_FILE = HOME_DIR / "logs" / "update.log"
+PLUGIN_LOG_FILE = HOME_DIR / "logs" / "plugins.log"
 
 # A trace file truncated every turn cannot answer "what did it do an hour ago",
 # which is most of what tracing is for. It APPENDS, and is bounded by rotation:

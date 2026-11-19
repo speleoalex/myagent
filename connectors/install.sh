@@ -83,34 +83,14 @@ if [ -z "$INSTALL_DIR" ] || [ ! -x "$VENV_PY" ]; then
 fi
 echo "myagent install: $INSTALL_DIR"
 
-echo "Installing plugin code to $TARGET_DIR"
-mkdir -p "$TARGET_DIR"
-rsync -a --delete --exclude __pycache__ --exclude '*.pyc' \
-    "$SOURCE_DIR/plugin/" "$TARGET_DIR/"
-
-# The plugin's shared requirements, then each channel's own. Never --upgrade: the
-# core's dependencies must not move underneath a working install just because a
-# plugin was added. A channel whose deps fail to install is still copied — it
-# reports itself as failed at startup instead of breaking the others.
-PIP="$INSTALL_DIR/server/.venv/bin/pip"
-for req in "$SOURCE_DIR/plugin/requirements.txt" \
-           "$SOURCE_DIR"/plugin/myagent_connectors/channels/*/requirements.txt; do
-    [ -f "$req" ] || continue
-    # Skip files that are only comments (the shared one currently is).
-    grep -qvE '^\s*(#|$)' "$req" || continue
-    name=$(basename "$(dirname "$req")")
-    echo "Installing dependencies for '$name' (first time: this can be ~380 MB)…"
-    if ! "$PIP" install -q -r "$req"; then
-        echo "WARNING: dependencies for '$name' could not be installed." >&2
-        echo "         Everything else works; that channel degrades." >&2
-    fi
-done
-
-# Prove the core still imports: a half-finished pip run must not leave a server
-# that cannot start.
-if ! "$VENV_PY" -c "import fastapi, httpx, pydantic" 2>/dev/null; then
-    echo "ERROR: myagent's virtualenv is broken after the install. Do NOT restart" >&2
-    echo "       the service; reinstall with ./install.sh." >&2
+# The install itself is the core's (server/app/plugin_installer.py) — the same
+# code Settings → Plugins runs, so there is one set of rules: staged copy and
+# swap (the previous version is kept for a rollback), each requirements.txt
+# into the server's virtualenv without --upgrade, and a check that the core
+# still imports before the new code goes live.
+if ! (cd "$INSTALL_DIR/server" && \
+      "$VENV_PY" -m app.plugin_installer install --path "$SOURCE_DIR/plugin"); then
+    echo "The plugin was NOT installed (see above). The service was not restarted." >&2
     exit 1
 fi
 

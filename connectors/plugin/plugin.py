@@ -18,7 +18,7 @@ from app.storage.store import JsonStore
 from myagent_connectors import config
 from myagent_connectors.channels.manager import ConnectorManager
 from myagent_connectors.core import CoreClient
-from myagent_connectors.routers import bindings, contacts, inbound, status
+from myagent_connectors.routers import bindings, channels, contacts, inbound, status
 from myagent_connectors.services import STATE_KEY, Connectors
 from myagent_connectors.storage import GrantStore
 
@@ -49,6 +49,8 @@ def register(app) -> None:
     # collide with a generic name like /api/contacts.
     app.include_router(status.router, prefix="/api/connectors", tags=["connectors"])
     app.include_router(bindings.router, prefix="/api/connectors/bindings",
+                       tags=["connectors"])
+    app.include_router(channels.router, prefix="/api/connectors/channels",
                        tags=["connectors"])
     app.include_router(contacts.router, prefix="/api/connectors/contacts",
                        tags=["connectors"])

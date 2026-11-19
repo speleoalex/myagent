@@ -201,6 +201,7 @@ own, and its own variable wins over the root:
 | `MYAGENT_LIBRARY` | `$MYAGENT_HOME/library` | offline knowledge folder (library tools) |
 | `MYAGENT_CACHE` | `$MYAGENT_HOME/cache` | derived data — currently the PDF text layers the library search reads; deleting it only costs one re-extraction |
 | `MYAGENT_PLUGINS` | `$MYAGENT_HOME/plugins` | installed plugins |
+| `MYAGENT_PLUGIN_INDEX` | the index on GitHub | URL of the plugin catalog (a fork, or a mirror on the local network) |
 | `MYAGENT_CONNECTORS_DIR` | `$MYAGENT_HOME/connectors` | connectors plugin state (bot tokens, address book) |
 
 Pointing `MYAGENT_LIBRARY` at an external disk is the common case — the library

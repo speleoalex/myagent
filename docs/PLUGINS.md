@@ -8,24 +8,42 @@ That separation is the point. myagent standalone works offline and carries no
 code for optional online services; adding one is an explicit act, and removing it
 is deleting a directory.
 
-The bundled `connectors` plugin (messaging bots) is the reference implementation:
-`connectors/plugin/` in this repo, installed by `connectors/install.sh`.
+The `connectors` plugin (messaging channels) is the reference implementation:
+`connectors/plugin/` in this repo, installed from **Settings → Server → Plugins**
+or with `connectors/install.sh`.
 
 ## Layout
 
 ```text
 ~/myagent/plugins/<id>/
+├── plugin.json          # manifest (required to be installable)
 ├── plugin.py            # entry point (required)
-├── requirements.txt     # extra Python deps, installed into server/.venv by your installer
+├── requirements.txt     # extra Python deps, installed into server/.venv
 └── myagent_<id>/        # the plugin's own package
 ```
 
-The directory name is the plugin id — there is no manifest file, because the only
-metadata anyone needs is that name. Override the root with `MYAGENT_PLUGINS`.
+```json
+{
+  "id": "connectors",
+  "name": {"en": "Channels", "it": "Canali"},
+  "version": "1.0.0",
+  "description": {"en": "…", "it": "…"},
+  "requires_api": 1
+}
+```
+
+`id` must equal the directory the plugin is installed in — the installer takes
+the directory name from it. `name` and `description` are a string or a
+per-language object. `requires_api` is the plugin API level the code was written
+against (`PLUGIN_API` in `server/app/plugin_installer.py`, bumped when the
+surface listed below changes incompatibly): a plugin asking for a newer one is
+refused with "update MyAgent first" instead of being installed to fail at
+import. Override the root with `MYAGENT_PLUGINS`.
 
 A directory is **skipped** when its name starts with `.` or `_`, or ends with
 `.disabled`. Renaming `connectors` to `connectors.disabled` is therefore the way
-to park a plugin without deleting it.
+to park a plugin without deleting it. The installer relies on the same rule: it
+stages a new version as `.<id>.new` and keeps the replaced one as `.<id>.prev`.
 
 ## Entry point
 
@@ -158,18 +176,70 @@ which prefixes to shim would mean naming a specific plugin.
 
 ## Installing
 
-There is no install command in the core. A plugin ships its own script; see
-`connectors/install.sh`, which:
+One code path installs a plugin, `server/app/plugin_installer.py`, reached three
+ways:
 
-1. refuses to run as root (it installs under `$HOME` — the *service* user's,
-   so for a service-account install it is run as `sudo -u myagent …`);
-2. `rsync`s its code into `~/myagent/plugins/<id>/`;
-3. installs its `requirements.txt` into the **running** install's `server/.venv`
-   (found via `MYAGENT_INSTALL_DIR`, else the `WorkingDirectory` of the user or
-   system unit), never
-   with `--upgrade`, so core dependencies do not move underneath a working setup;
-4. verifies the core still imports before restarting the service;
-5. restarts myagent (systemd or launchd).
+| From | How |
+|---|---|
+| Settings → Server → Plugins | `POST /api/plugins/install` with `{"id"}` (a catalog entry) or `{"repo","ref","subdir"}` (any GitHub repository) |
+| a git checkout | `bash connectors/install.sh` (also run by `update.sh`) |
+| a terminal | `cd server && .venv/bin/python -m app.plugin_installer install --repo owner/name [--ref main] [--subdir path]` (or `--path dir`) |
 
-Uninstalling is `rm -rf ~/myagent/plugins/<id>` plus a restart. Say so in your
-README, and say what state is left behind.
+A source is a **GitHub repository + ref + subdirectory**, downloaded as a
+tarball over HTTPS: no git and no checkout are needed, so it works for a
+service-account install too. The subdirectory is what lets one repository hold
+several packages. What the installer does, in order:
+
+1. extracts only regular files and directories under the subdirectory (links
+   and `..` members are dropped), and records the commit the archive was cut
+   from in `<plugin>/.installed.json`;
+2. validates the manifest: safe `id`, the id the caller asked for, a `plugin.py`,
+   a `requires_api` this core provides;
+3. installs every `requirements.txt` into the server's virtualenv, never with
+   `--upgrade`, so core dependencies do not move underneath a working setup — a
+   failure here is a warning and that part of the plugin degrades;
+4. verifies the core still imports, and only then swaps the new tree in, keeping
+   the previous one for `POST /api/plugins/{id}/rollback`.
+
+Plugins are loaded at startup, so a change takes effect at the next restart. The
+install does not restart anything: `GET /api/plugins` reports `restart_needed`
+and the page offers **Restart now** (`POST /api/system/restart`), which stops
+gracefully and re-executes the server in place — same pid, same unit — so it
+works in every install mode. It refuses while answers are being generated
+unless forced.
+
+Uninstalling (`DELETE /api/plugins/{id}`, or `rm -rf ~/myagent/plugins/<id>`
+plus a restart) removes the code only. Say in your README what state is left
+behind.
+
+### The catalog
+
+`server/plugins-index.json` lists the installable packages. The server reads it
+from GitHub (`MYAGENT_PLUGIN_INDEX` overrides the URL) and falls back to the
+copy shipped with the install when offline.
+
+```json
+{"packages": [{
+  "id": "connectors", "kind": "plugin",
+  "name": {"en": "Channels", "it": "Canali"}, "description": {"en": "…"},
+  "version": "1.0.0",
+  "repo": "speleoalex/myagent", "ref": "main", "subdir": "connectors/plugin"
+}]}
+```
+
+`version` must match the manifest at that location: it is what the UI compares
+with the installed one to offer an update (`tests/test_plugin_installer.py`
+checks every entry pointing into this repository). `kind` is `plugin`, or a kind
+a plugin defines for its own extensions — the connectors plugin uses `channel`
+(see `connectors/README.md`). Publishing a plugin kept in another repository is
+adding an entry here; nothing else in the core changes.
+
+### Trust
+
+A plugin is code running inside the server, with every API key, bot token and
+conversation in reach. The installer protects the install step — HTTPS only,
+validated ids, nothing written outside the target — and cannot make an untrusted
+plugin safe. So: installing requires the API key whenever the server listens
+beyond loopback, the UI asks for confirmation naming the repository for anything
+outside the catalog, the installed commit is recorded, and no agent tool exposes
+installation.

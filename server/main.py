@@ -4,6 +4,7 @@ import hmac
 import logging
 import mimetypes
 import os
+import sys
 from contextlib import asynccontextmanager
 
 import uvicorn
@@ -436,5 +437,25 @@ if __name__ == "__main__":
     ssl_certfile, ssl_keyfile = _tls_files()
     log.info("Starting MyAgent on %s://%s:%d",
              "https" if ssl_certfile else "http", host, port)
-    uvicorn.run(app, host=host, port=port,
-                ssl_certfile=ssl_certfile, ssl_keyfile=ssl_keyfile)
+    # A Server object rather than uvicorn.run(): POST /api/system/restart needs
+    # a handle to ask for a graceful stop (app.state.server), and what happens
+    # AFTER that stop is decided here.
+    server = uvicorn.Server(uvicorn.Config(
+        app, host=host, port=port,
+        ssl_certfile=ssl_certfile, ssl_keyfile=ssl_keyfile))
+    app.state.server = server
+    server.run()
+    if not server.started:
+        # Same exit code uvicorn.run() uses (port taken, lifespan failure), so
+        # the service manager still sees a failed start.
+        sys.exit(3)
+    if getattr(app.state, "restart_requested", False):
+        # Restart IN PLACE, after the full graceful shutdown above: same pid,
+        # same unit, same environment. This is what lets a newly installed
+        # plugin be picked up in every install mode — a system unit cannot
+        # `systemctl restart` itself without sudo, and a --dev run has no
+        # service manager at all. Not a signal: uvicorn re-raises a captured
+        # SIGTERM with the default handler, and systemd's Restart=on-failure
+        # reads that death as a clean stop and leaves the service down.
+        log.info("Restarting in place")
+        os.execv(sys.executable, [sys.executable, *sys.argv])

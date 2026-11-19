@@ -63,7 +63,7 @@ class Plugin:
         return {"id": self.id, "loaded": self.loaded, "error": self.error}
 
 
-def _enabled(name: str) -> bool:
+def is_enabled_name(name: str) -> bool:
     """Directory names that are skipped on purpose. The ``.disabled`` suffix is
     the documented way to park a plugin without deleting it (the rollback of an
     install renames the directory), so it has to actually disable it."""
@@ -115,7 +115,7 @@ def load_plugins(app) -> dict[str, Plugin]:
     if not PLUGINS_DIR.is_dir():
         return found
     for directory in sorted(PLUGINS_DIR.iterdir()):
-        if not directory.is_dir() or not _enabled(directory.name):
+        if not directory.is_dir() or not is_enabled_name(directory.name):
             continue
         if not (directory / "plugin.py").is_file():
             log.warning("Plugin '%s' has no plugin.py — skipped", directory.name)

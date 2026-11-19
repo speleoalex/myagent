@@ -80,6 +80,12 @@ MCP server, which is a different thing (MyAgent has those too, under *MCP*).
 
 ## Install
 
+From the UI: **Settings → Server → Plugins → Show the catalog → Install**, then
+**Restart now**. It downloads the plugin from GitHub, so it needs no checkout
+and works in every install mode.
+
+From a git checkout (same installer, local source):
+
 ```bash
 bash connectors/install.sh                    # from the git checkout, as the user the service runs as
 sudo -u myagent bash connectors/install.sh    # install made with sudo as the `myagent` service account
@@ -251,6 +257,33 @@ plugin/myagent_connectors/channels/<type>/
 ├── channel.py          # a BaseConnector subclass: receive, send, verify
 └── requirements.txt     # optional, installed by install.sh
 ```
+
+That folder can live in two places, scanned in this order with the second
+winning by `type`:
+
+| Layer | Where | For |
+|---|---|---|
+| bundled | `plugin/myagent_connectors/channels/` | the channels shipped with the plugin |
+| user | `~/myagent/connectors/channels/` | channels you install or write yourself |
+
+The user layer survives a reinstall of the plugin (which replaces its whole
+directory) and can override a bundled channel. Install into it from the
+**Channels** page (*Channel types*): from the catalog, or from any GitHub
+repository + folder holding a `channel.json`. No restart: the registry is
+scanned again and the bots of that type are restarted. To publish a channel in
+the catalog, add an entry with `"kind": "channel"` to
+`server/plugins-index.json` (see `docs/PLUGINS.md`); its `id` is the channel's
+`type`.
+
+A channel outside this repository cannot add to the UI's dictionaries, so it
+ships its own translations in the manifest, next to an optional `version`:
+
+```json
+"version": "0.1.0",
+"i18n": {"en": {"mychannel.tokenHint": "…"}, "it": {"mychannel.tokenHint": "…"}}
+```
+
+They are merged when the channel list loads, and never replace an existing key.
 
 Everything above the transport is already shared: access control, `/help` and
 `/reset`, session keys, the agent call with its timeout and concurrency limit, the

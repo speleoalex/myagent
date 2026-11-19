@@ -31,6 +31,11 @@ CONTACTS_DIR = STATE_DIR / "contacts"  # address book (name + messaging ids)
 # Chats already told the replies come from an AI (see Binding.disclose_ai).
 # State, not config: it records what has been said, not what should be.
 DISCLOSED_DIR = STATE_DIR / "disclosed"
+# Channels installed by the user (Channels page, or dropped in by hand), on top
+# of the ones bundled in the plugin's code — the same two-layer overlay as the
+# core's tools. Outside the plugin directory for the reason above: that one is
+# replaced wholesale on every reinstall, and a channel added there would vanish.
+USER_CHANNELS_DIR = STATE_DIR / "channels"
 # Plugin-level runtime state (currently the persisted kill switch). A file, not
 # a directory: it is a single small document.
 STATE_FILE = STATE_DIR / "state.json"

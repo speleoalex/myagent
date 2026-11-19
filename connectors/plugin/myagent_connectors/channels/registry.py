@@ -10,6 +10,12 @@ the module it names:
         channel.py       a BaseConnector subclass
         requirements.txt optional, installed by connectors/install.sh
 
+Two layers are scanned, the second winning by channel type: the channels
+bundled beside this file, and the user's own in ``config.USER_CHANNELS_DIR``
+(``~/myagent/connectors/channels/``), where the Channels page installs them. A
+bundled channel can therefore be replaced without touching the plugin's code,
+and an installed one survives the plugin's reinstall.
+
 Channels are **discovered, not imported by name**: nothing in the shared code
 mentions a specific transport, so adding one is dropping in a folder. The manifest
 carries what the rest of the system needs without importing the module — the label
@@ -31,6 +37,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from myagent_connectors import config
 from myagent_connectors.channels.base import BaseConnector
 from myagent_connectors.core import CoreClient
 from myagent_connectors.models import Binding
@@ -92,6 +99,15 @@ class Channel:
     # because the steps are the transport's business — the shared form knows
     # nothing about BotFather, and a channel without a guide shows none.
     guide: dict = field(default_factory=dict)
+    # The channel's OWN translations, {"en": {key: text}, "it": {...}}, for the
+    # i18n keys its manifest uses. The bundled channels keep theirs in the
+    # core's dictionaries; an installed one cannot add to those, so it brings
+    # them here and the UI merges them (never over an existing key).
+    i18n: dict = field(default_factory=dict)
+    version: str = ""
+    # "bundled" or "user": which layer it was found in. Only a user channel
+    # can be removed from the UI.
+    layer: str = "bundled"
     connector: type[BaseConnector] | None = None
     error: str = ""
 
@@ -117,6 +133,9 @@ class Channel:
             "sections": self.sections or None,
             "icon": self.icon,
             "guide": self.guide or None,
+            "i18n": self.i18n or None,
+            "version": self.version,
+            "layer": self.layer,
             "loaded": self.loaded,
             "error": self.error,
         }
@@ -150,6 +169,8 @@ def _load_one(directory: Path) -> Channel:
         sections=meta.get("sections") or [],
         icon=meta.get("icon", ""),
         guide=meta.get("guide") or {},
+        i18n=meta.get("i18n") or {},
+        version=str(meta.get("version") or ""),
     )
     try:
         entry = directory / (meta.get("module") or "channel.py")
@@ -175,17 +196,27 @@ def _load_one(directory: Path) -> Channel:
     return channel
 
 
-def discover() -> dict[str, Channel]:
-    """Scan for channels once and remember the result."""
-    if _channels:
+def discover(refresh: bool = False) -> dict[str, Channel]:
+    """Scan for channels once and remember the result. ``refresh`` scans again:
+    what makes a channel installed from the UI usable without a restart (a
+    channel mounts no routes, unlike a plugin)."""
+    global _channels
+    if _channels and not refresh:
         return _channels
-    for directory in sorted(CHANNELS_DIR.iterdir()):
-        if not directory.is_dir() or not _enabled(directory.name):
+    found: dict[str, Channel] = {}
+    for layer, root in (("bundled", CHANNELS_DIR), ("user", config.USER_CHANNELS_DIR)):
+        if not root.is_dir():
             continue
-        if not (directory / "channel.json").is_file():
-            continue
-        found = _load_one(directory)
-        _channels[found.type] = found
+        for directory in sorted(root.iterdir()):
+            if not directory.is_dir() or not _enabled(directory.name):
+                continue
+            if not (directory / "channel.json").is_file():
+                continue
+            channel = _load_one(directory)
+            channel.layer = layer
+            found[channel.type] = channel  # the user layer is scanned last: it wins
+    # Swapped in one assignment: a refresh runs while requests read the registry.
+    _channels = found
     if _channels:
         log.info("Channels: %s", ", ".join(
             f"{c.type}{'' if c.loaded else ' (FAILED)'}" for c in _channels.values()
