@@ -130,7 +130,8 @@ runtime state lives under the service user's `~/myagent`, never inside the code.
 **Per-user (no sudo).** The service runs as you, so it can do exactly what you
 can — and nothing more: several users on one machine each get their own
 instance, on their own port, and ordinary file permissions keep one user's
-agents out of another's home. A user unit stops at logout; to keep it running
+agents out of another's home (see
+[Several users on one machine](#several-users-on-one-machine)). A user unit stops at logout; to keep it running
 across logouts and reboots: `loginctl enable-linger $USER` (may need sudo —
 `install.sh` says whether it is already on). Commands: `systemctl --user status
 myagent`, `journalctl --user -u myagent -f`.
@@ -174,6 +175,51 @@ The connectors plugin and the voice satellite have their own installers and are
 deliberately not shipped by `install.sh`: see
 [connectors/README.md](../connectors/README.md) and
 [satellite/README.md](../satellite/README.md).
+
+## Several users on one machine
+
+MyAgent has no user accounts inside the app. Several people on one machine
+means **one instance per system user**: each runs `./install.sh` without sudo,
+as themselves, and gets a separate service.
+
+**Separate for each user:** the service (`systemctl --user`), the port (the
+first free one from 8888, kept on later runs; `install.sh` prints it), the
+state tree in their own `~/myagent` (agents, model list, API key, conversations,
+memory, workspace, connector bots) and the updates. The navbar shows the
+instance name and the account it runs as, so it is clear whose instance a
+browser tab is talking to.
+
+**The boundary is the operating system.** The agents' shell and file tools run
+as that user, so they reach what that user can reach and no more. That is only
+as strong as the home directories' permissions: check that they are not
+world-readable (`ls -ld /home/*`, `chmod 750 ~`).
+
+**Shared by everyone:**
+
+- *The model backend.* Every instance talks to the same Ollama or llama.cpp
+  server by default (`localhost:11434`, `localhost:8080`). Nothing breaks, but
+  there is one GPU: concurrent requests from different users queue on it.
+- *The library, if you want.* ZIM archives are large and read-only, so they can
+  live once in a common folder (e.g. `/srv/myagent-library`, readable by all).
+  Each user points their instance at it with `MYAGENT_LIBRARY` in a drop-in
+  (`systemctl --user edit myagent`). The semantic index stays per user, in
+  `~/myagent/cache`.
+
+**Each user does it for themselves:**
+
+- `loginctl enable-linger $USER` (may need sudo), or their instance stops at
+  logout.
+- Exposure on the LAN and the API key, in their own drop-in and Settings.
+- Connector bots. One bot token must never be configured in two instances:
+  Telegram delivers each message to only one of them, with no error.
+- Their own clone of the repo. `install.sh` copies the code from the checkout,
+  and another user's home is normally not readable.
+
+**The service-account mode is not multi-user.** `sudo ./install.sh` makes ONE
+instance under the `myagent` account. Everyone who has its API key is the same
+user: same agents, same conversations, same memory. Use it when one person, or
+a team that trusts each other, wants the agents kept out of real users' files.
+When people must not see each other's chats, use per-user installs.
 
 ## Updating
 

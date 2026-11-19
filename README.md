@@ -143,7 +143,8 @@ cd myagent
 Open the URL it prints (**<http://127.0.0.1:8888>** unless the port was taken),
 pick an agent and chat. No sudo: `install.sh` registers MyAgent as a service
 that runs *as you*, starts at login and keeps to your own home — several users
-on one machine each get their own instance. It reports which backend it found
+on one machine each get their own instance
+([how that works](docs/INSTALL.md#several-users-on-one-machine)). It reports which backend it found
 and offers to install the optional pieces that are missing, and MyAgent answers
 on whichever local model is reachable — so the first message works before you
 have configured anything. Machine-wide installs, a dedicated service account and

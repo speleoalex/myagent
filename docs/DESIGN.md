@@ -68,7 +68,10 @@ ever a command it prints, onto a disk only you can choose.
   index builds it competes with that model for the same backend. The embedding
   model must be a **local** one — indexing sends the contents of your documents
   to the endpoint, not just your question.
-- **No multi-user accounts or RBAC.** One trusted user — see
+- **No accounts or RBAC inside the app.** One trusted user per instance;
+  several people means one instance per system user, separated by the
+  operating system — see
+  [INSTALL.md](INSTALL.md#several-users-on-one-machine) and
   [SECURITY.md](SECURITY.md).
 - **No sandbox.** Tools run as the server user. That's what makes "a folder
   with a `run` script" powerful, and it's why the API binds to `127.0.0.1`.

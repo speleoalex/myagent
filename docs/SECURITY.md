@@ -7,9 +7,11 @@
 
 ## The threat model
 
-One trusted user, on their own machine. There are no accounts, no roles and no
-per-agent permissions beyond which tools you grant. Anyone who can reach the
-API can:
+One trusted user per instance. There are no accounts, no roles and no
+per-agent permissions beyond which tools you grant; several people on one
+machine get one instance each, under their own system user (see
+[INSTALL.md](INSTALL.md#several-users-on-one-machine)). Anyone who can reach an
+instance's API can:
 
 - run shell commands and read/write files as the server user;
 - read your conversations, your library and your address book;
