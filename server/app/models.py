@@ -631,6 +631,9 @@ class Settings(BaseModel):
     # An agent may override it (Agent.timezone); this is the fallback for the
     # ones that do not care. See config.now_in_timezone for the order.
     timezone: str = ""
+    # The agents' working directory (absolute path). Empty = the default under
+    # MYAGENT_HOME; MYAGENT_WORKSPACE, when set, wins. See config.workspace_dir.
+    workspace_dir: str = ""
     # No connectors_base_url / connectors_api_key any more: notify_user reaches
     # the connectors plugin in-process, so there is no URL or bearer key to
     # configure. Pydantic ignores unknown keys, so an existing settings.json

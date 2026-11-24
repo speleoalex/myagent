@@ -15,7 +15,7 @@ Security posture:
   workspace file through an agent with ``file_read``; this route grants no new
   reach, only a direct wire.
 - Path traversal: a lexical refusal of ``..``/absolute paths first (the path is
-  attacker-influencable), then realpath containment under WORKSPACE_DIR. The
+  attacker-influencable), then realpath containment under config.workspace_dir(). The
   realpath check is correct HERE, unlike local_read's lexical-only rule: a
   library is assembled from symlinks pointing outside its root, the workspace
   is not.
@@ -52,7 +52,7 @@ _HEADERS_BASE = {
 async def get_file(path: str, download: int = 0):
     if not path or path.startswith("/") or ".." in path.split("/"):
         raise HTTPException(status_code=404, detail="Not found")
-    root = config.WORKSPACE_DIR.resolve()
+    root = config.workspace_dir().resolve()
     try:
         target = (root / path).resolve()
     except OSError:

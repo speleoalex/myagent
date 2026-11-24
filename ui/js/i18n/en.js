@@ -511,6 +511,10 @@ I18n.translations.en = {
     'settings.timezone': 'Working timezone',
     'settings.timezonePlaceholder': 'This machine’s timezone',
     'settings.timezoneHint': 'The clock this server reasons in: it is the date given to the agents that state today’s date in their prompt, and the default each of them can override. Leave it empty to follow the machine. A server’s own timezone is usually an accident of the image it was built from — UTC on most of them — while the people it answers are somewhere in particular.',
+    'settings.workspace': 'Working folder',
+    'settings.workspaceBrowse': 'Browse',
+    'settings.workspaceHint': 'Where agents read and write files given by relative path (file_write, shell_exec, attachments, files delivered to the chat). Leave empty to use the default folder. Applies from the next turn, no restart; files already delivered stay in the previous folder.',
+    'settings.workspacePinned': 'Pinned by the service\u2019s MYAGENT_WORKSPACE environment variable: change that to move it.',
     'settings.updates': 'Updates',
     'settings.updateCheck': 'Check for updates',
     'settings.updateChecking': 'Checking (comparing with GitHub)…',
@@ -959,5 +963,13 @@ I18n.translations.en = {
     'tasks.day.3': 'Wed',
     'tasks.day.4': 'Thu',
     'tasks.day.5': 'Fri',
-    'tasks.day.6': 'Sat'
+    'tasks.day.6': 'Sat',
+    'folderPicker.title': 'Choose a folder',
+    'folderPicker.up': 'Up',
+    'folderPicker.home': 'Home',
+    'folderPicker.choose': 'Use this folder',
+    'folderPicker.cancel': 'Cancel',
+    'folderPicker.loading': 'Loading\u2026',
+    'folderPicker.empty': 'No subfolders.',
+    'folderPicker.unreadable': 'The server cannot read this folder.'
 };

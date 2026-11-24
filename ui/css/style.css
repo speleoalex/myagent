@@ -581,6 +581,17 @@ body {
 
 /* ---- Agent form tabs ---------------------------------------------------- */
 
+/* Title (with the agent's name) + tab strip stay on screen while a pane
+   scrolls. The navbar is not fixed, so top: 0 is the viewport edge. */
+.agent-form-head {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    background: var(--bs-body-bg);
+    padding-top: 0.5rem;
+    margin-bottom: 1rem;
+}
+
 /* Five tabs don't fit a phone, and a wrapped .nav-tabs stops reading as a tab
    strip (two rows, only one of them joined to the panel). Scroll instead:
    flex-nowrap + overflow-x is the whole trick, and the scrollbar is hidden

@@ -14,7 +14,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from app import config
-from app.config import save_settings, WORKSPACE_DIR
+from app.config import save_settings
 from app.engine import default_model, embedding, imagegen
 from app.models import Settings
 
@@ -46,7 +46,7 @@ class ApiKeyUpdate(BaseModel):
 
 @router.get("/health")
 async def health():
-    return {"status": "ok", "workspace": str(WORKSPACE_DIR)}
+    return {"status": "ok", "workspace": str(config.workspace_dir())}
 
 
 def _host_timezone() -> str:
@@ -98,7 +98,11 @@ async def info():
         "home_dir": str(config.HOME_DIR),
         "config_dir": str(config.CONFIG_DIR),
         "sessions_dir": str(config.SESSIONS_DIR),
-        "workspace_dir": str(config.WORKSPACE_DIR),
+        "workspace_dir": str(config.workspace_dir()),
+        # What an empty Settings field falls back to (the field's placeholder),
+        # and whether MYAGENT_WORKSPACE pins it (field read-only).
+        "workspace_default": str(config.WORKSPACE_DIR),
+        "workspace_pinned": config.workspace_pinned(),
         "app_dir": str(config.APP_DIR),
     }
 
@@ -125,6 +129,69 @@ async def get_settings():
     # Read config.settings live: update_settings rebinds it, so importing the
     # `settings` name directly would return a stale, pre-save snapshot.
     return config.settings.model_dump()
+
+
+def _validated_workspace(raw: str) -> str:
+    """The working directory as it will be stored: '' (= default) or an
+    absolute, existing-or-creatable, writable directory. Created here so a
+    typo is a 400 on save and not a tool failing on the next turn."""
+    raw = (raw or "").strip()
+    if not raw:
+        return ""
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        raise HTTPException(status_code=400,
+                            detail="The working folder must be an absolute path.")
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        raise HTTPException(status_code=400,
+                            detail="The working folder cannot be created.")
+    if not path.is_dir() or not os.access(path, os.W_OK | os.X_OK):
+        raise HTTPException(status_code=400,
+                            detail="The working folder is not a writable directory.")
+    return str(path)
+
+
+@router.get("/browse")
+async def browse(path: str = ""):
+    """Subdirectories of `path` (default: the working directory), for the UI's
+    folder picker. Folder names only, never file contents. Not confined to a
+    root on purpose: whoever holds the API key already reaches the whole
+    filesystem through the agents' shell tool, and the point is choosing a
+    folder ANYWHERE."""
+    if path.strip():
+        base = Path(path.strip()).expanduser()
+        if not base.is_absolute() or not base.is_dir():
+            raise HTTPException(status_code=400,
+                                detail="Not an absolute path to a directory.")
+    else:
+        # A workspace not created yet: start from its nearest existing parent.
+        base = config.workspace_dir()
+        while not base.is_dir() and base.parent != base:
+            base = base.parent
+    base = base.resolve()
+    dirs, readable = [], True
+    try:
+        with os.scandir(base) as entries:
+            for e in entries:
+                if e.name.startswith("."):
+                    continue
+                # Per entry: one that cannot be stat'ed (EACCES on a
+                # container's mount point, say) must not hide its siblings.
+                try:
+                    if e.is_dir(follow_symlinks=True):
+                        dirs.append(e.name)
+                except OSError:
+                    continue
+    except OSError:
+        readable = False
+    dirs.sort(key=str.lower)
+    return {"path": str(base),
+            "parent": str(base.parent) if base.parent != base else None,
+            "home": str(Path.home()),
+            "dirs": dirs,
+            "readable": readable}
 
 
 @router.put("/settings")
@@ -217,6 +284,7 @@ async def update_settings(new_settings: Settings, request: Request):
             detail=(f"Unknown timezone {tz!r}. Use an IANA name such as "
                     "'Europe/Rome', or leave it empty to follow this machine."))
     new_settings.timezone = tz
+    new_settings.workspace_dir = _validated_workspace(new_settings.workspace_dir)
     new_settings.instance_name = name
     new_settings.instance_color = color
     save_settings(new_settings)

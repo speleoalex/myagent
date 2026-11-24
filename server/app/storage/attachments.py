@@ -46,7 +46,7 @@ def _store_under(subdir: str, raw: bytes, name: str, kind: str) -> str | None:
     """Both the stem and the extension are sanitized: an unsanitized extension
     carrying a NUL byte made write_bytes raise ValueError, which is not an
     OSError and so aborted the whole turn."""
-    workdir = config.WORKSPACE_DIR / subdir
+    workdir = config.workspace_dir() / subdir
     try:
         workdir.mkdir(parents=True, exist_ok=True)
     except OSError as e:

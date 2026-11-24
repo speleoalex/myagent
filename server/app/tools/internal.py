@@ -554,7 +554,7 @@ def _notify_roots(executor) -> list[Path]:
     (the resource channel's one root) and, if the agent has one, its own
     folder. Nothing else — the argument is model-written, and a path that
     escapes these is a way to mail anything the server can read."""
-    roots = [app_config.WORKSPACE_DIR]
+    roots = [app_config.workspace_dir()]
     folder = getattr(getattr(executor, "agent", None), "folder", None)
     if folder is not None and getattr(folder, "path", ""):
         roots.append(Path(folder.path).expanduser())

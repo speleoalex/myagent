@@ -111,13 +111,32 @@ def ensure_tools_dir() -> Path:
 
 # Working directory for the agents' file operations. Relative paths used by
 # file/shell tools resolve here (see ToolRegistry / AgentExecutor).
+# This is the DEFAULT: read the live value through workspace_dir().
 WORKSPACE_DIR = _runtime_dir("MYAGENT_WORKSPACE", "workspace")
+
+
+def workspace_pinned() -> bool:
+    """MYAGENT_WORKSPACE set = deployment pin: it wins over Settings, and the UI
+    shows the field read-only (same precedence as the API key)."""
+    return bool(os.environ.get("MYAGENT_WORKSPACE"))
+
+
+def workspace_dir() -> Path:
+    """The working directory in use right now: env pin, else Settings ->
+    workspace_dir, else WORKSPACE_DIR. Resolved on every call like
+    debug_enabled(): changing it from the UI must not need a restart."""
+    if not workspace_pinned():
+        custom = (getattr(settings, "workspace_dir", "") or "").strip()
+        if custom:
+            return Path(custom).expanduser()
+    return WORKSPACE_DIR
 
 
 def ensure_workspace() -> Path:
     """Create the working directory if it doesn't exist and return it."""
-    WORKSPACE_DIR.mkdir(parents=True, exist_ok=True)
-    return WORKSPACE_DIR
+    ws = workspace_dir()
+    ws.mkdir(parents=True, exist_ok=True)
+    return ws
 
 
 # Chat sessions live on disk (decoupled from the browser). One file per chat:

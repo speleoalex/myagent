@@ -433,7 +433,7 @@ class BaseConnector:
         Stops at the first refusal: a transport that answered "not supported"
         once will answer it for every file (and the reply text already names
         them)."""
-        root = app_config.WORKSPACE_DIR.resolve()
+        root = app_config.workspace_dir().resolve()
         sent = 0
         for r in resources:
             if sent >= MAX_FILES_PER_REPLY:

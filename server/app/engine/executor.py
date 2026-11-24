@@ -1149,7 +1149,7 @@ class AgentExecutor:
         reused across turns keeps a stable path and isn't rewritten."""
         if not attachments:
             return attachments
-        workdir = config.WORKSPACE_DIR / "_attachments"
+        workdir = config.workspace_dir() / "_attachments"
         try:
             workdir.mkdir(parents=True, exist_ok=True)
         except OSError as e:
@@ -1163,7 +1163,7 @@ class AgentExecutor:
             kind = att.get("kind")
             data = att.get("data") or ""
             # Already materialized (e.g. forwarded to a sub-agent) or plain text.
-            if kind == "text" or not data or (att.get("path") and (config.WORKSPACE_DIR / att["path"]).exists()):
+            if kind == "text" or not data or (att.get("path") and (config.workspace_dir() / att["path"]).exists()):
                 out.append(att)
                 continue
             raw = self._decode_attachment_data(data)
@@ -2327,7 +2327,7 @@ class AgentExecutor:
                 # anywhere: the model (and the text protocol's replay) sees the
                 # short note, the UI gets {path, mime, title, size} on the step.
                 result, step_resources = resource_channel.extract(
-                    result, config.WORKSPACE_DIR, unattended=self.unattended
+                    result, config.workspace_dir(), unattended=self.unattended
                 )
 
                 # A call that FAILED has not been answered, so it must stay

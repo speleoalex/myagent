@@ -511,6 +511,10 @@ I18n.translations.it = {
     'settings.timezone': 'Fuso orario di lavoro',
     'settings.timezonePlaceholder': 'Fuso orario di questa macchina',
     'settings.timezoneHint': 'L’orologio in cui ragiona questo server: è la data dichiarata agli agenti che hanno la data nel prompt, e il valore predefinito che ognuno di loro può sovrascrivere. Lascia vuoto per seguire la macchina. Il fuso di un server è di solito un caso dell’immagine da cui è stato creato — UTC per la maggior parte — mentre le persone a cui risponde stanno in un posto preciso.',
+    'settings.workspace': 'Cartella di lavoro',
+    'settings.workspaceBrowse': 'Esplora file',
+    'settings.workspaceHint': 'Dove gli agenti leggono e scrivono i file con percorso relativo (file_write, shell_exec, allegati, file consegnati in chat). Lascia vuoto per usare la cartella predefinita. Vale dal turno successivo, senza riavvio; i file già consegnati restano nella cartella precedente.',
+    'settings.workspacePinned': 'Fissata dalla variabile d\u2019ambiente MYAGENT_WORKSPACE del servizio: per cambiarla modifica quella.',
     'settings.updates': 'Aggiornamenti',
     'settings.updateCheck': 'Verifica aggiornamenti',
     'settings.updateChecking': 'Verifica in corso (confronto con GitHub)…',
@@ -959,5 +963,13 @@ I18n.translations.it = {
     'tasks.day.3': 'Mer',
     'tasks.day.4': 'Gio',
     'tasks.day.5': 'Ven',
-    'tasks.day.6': 'Sab'
+    'tasks.day.6': 'Sab',
+    'folderPicker.title': 'Scegli una cartella',
+    'folderPicker.up': 'Su',
+    'folderPicker.home': 'Home',
+    'folderPicker.choose': 'Usa questa cartella',
+    'folderPicker.cancel': 'Annulla',
+    'folderPicker.loading': 'Caricamento\u2026',
+    'folderPicker.empty': 'Nessuna sottocartella.',
+    'folderPicker.unreadable': 'Cartella non leggibile dal server.'
 };

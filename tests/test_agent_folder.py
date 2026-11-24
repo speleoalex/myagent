@@ -44,7 +44,7 @@ stores = Stores(agents=agents, models=models)
 
 workspace = base / "workspace"
 tools_dir = base / "tools"
-registry = ToolRegistry(tools_dir, workdir=workspace)
+registry = ToolRegistry(tools_dir, workdir=lambda: workspace)
 
 # A tool that reports the environment it was actually launched with.
 probe = tools_dir / "envprobe"

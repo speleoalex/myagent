@@ -194,7 +194,7 @@ own, and its own variable wins over the root:
 | `MYAGENT_HOME` | `~/myagent` | **root of everything below** |
 | `MYAGENT_CONFIG` | `$MYAGENT_HOME/config` | agents, models, MCP servers, settings |
 | `MYAGENT_TOOLS` | `$MYAGENT_HOME/tools` | tool folders |
-| `MYAGENT_WORKSPACE` | `$MYAGENT_HOME/workspace` | agents' file-operation root |
+| `MYAGENT_WORKSPACE` | `$MYAGENT_HOME/workspace` | agents' file-operation root; when set it pins it, otherwise Settings → *Server* → *Working folder* can move it |
 | `MYAGENT_SESSIONS` | `$MYAGENT_HOME/sessions` | chat sessions |
 | `MYAGENT_MEMORY` | `$MYAGENT_HOME/memory` | per-agent long-term memory |
 | `MYAGENT_AUTONOMY` | `$MYAGENT_HOME/autonomy` | live agents' state and event queues |
@@ -251,6 +251,11 @@ under **Settings**:
   reachability.
 - **API key** — generated, rotated or removed without a restart. Overridden by
   `MYAGENT_API_KEY` when that is set.
+- **Working folder** (Settings → *Server*) — where relative paths of the file
+  and shell tools land. *Browse* picks a folder on the server's disk; empty =
+  `$MYAGENT_HOME/workspace`. Applies from the next turn, no restart. Files
+  already delivered to a chat stay in the old folder, so their links stop
+  working. Read-only when `MYAGENT_WORKSPACE` is set.
 - **MyAgent server** (Settings → *Advanced*) — a browser-side preference, for when the UI is served
   from somewhere other than the API.
 - **Instance name and color** (Settings → *Server*) — how this install

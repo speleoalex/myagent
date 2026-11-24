@@ -1032,23 +1032,28 @@ const AgentsPage = {
         App.container.innerHTML = `
             <div class="row">
                 <div class="col-lg-8 mx-auto">
-                    <h3>${isEdit ? i18n('agents.editTitle')
-                            : (cloning ? i18n('agents.cloneTitle') : i18n('agents.newTitle'))}</h3>
-                    ${cloning ? `<div class="alert alert-info py-2 small">
-                        <i class="bi bi-copy"></i>
-                        ${App.esc(i18n('agents.cloneHint', { source: sourceId }))}
-                    </div>` : ''}
                     <!-- novalidate: a required control inside a hidden tab pane is not
                          focusable, so the browser would refuse the submit and tell the
                          user NOTHING. validateAcrossTabs() drives validation instead. -->
                     <form id="agent-form" novalidate>
-                        <ul class="nav nav-tabs agent-tabs mb-3" id="agent-tabs" role="tablist">
+                        <!-- Sticky: deep in a long pane (tools) the title scrolled
+                             away and nothing said WHICH agent was being edited. -->
+                        <div class="agent-form-head">
+                        <h3 class="text-truncate">${isEdit
+                            ? `${i18n('agents.editTitle')}: <span class="text-body-emphasis" title="${App.escAttr(agent.id)}">${App.esc(agent.name || agent.id)}</span>`
+                            : (cloning ? i18n('agents.cloneTitle') : i18n('agents.newTitle'))}</h3>
+                        <ul class="nav nav-tabs agent-tabs" id="agent-tabs" role="tablist">
                             ${tab('general', 'bi-info-circle', i18n('agents.tabGeneral'))}
                             ${tab('tools', 'bi-tools', i18n('agents.tools'))}
                             ${tab('memory', 'bi-journal-text', i18n('agents.memory'))}
                             ${tab('autonomy', 'bi-broadcast', i18n('agents.autonomy'))}
                             ${tab('advanced', 'bi-sliders', i18n('agents.tabAdvanced'))}
                         </ul>
+                        </div>
+                        ${cloning ? `<div class="alert alert-info py-2 small">
+                            <i class="bi bi-copy"></i>
+                            ${App.esc(i18n('agents.cloneHint', { source: sourceId }))}
+                        </div>` : ''}
                         <!-- EVERY pane is rendered here, in one pass, ALWAYS. Bootstrap only
                              sets display:none on the inactive ones, and readForm() reaches
                              into all of them by id and by .tool-check:checked. Rendering a
@@ -1067,8 +1072,13 @@ const AgentsPage = {
                                 </div>
                                 <div class="mb-3">
                                     <label class="form-label" for="f-folder">${i18n('agents.folder')}</label>
-                                    <input type="text" class="form-control" id="f-folder" value="${App.escAttr(folderPath)}"
-                                           placeholder="${App.escAttr(i18n('agents.folderPlaceholder'))}">
+                                    <div class="input-group">
+                                        <input type="text" class="form-control" id="f-folder" value="${App.escAttr(folderPath)}"
+                                               placeholder="${App.escAttr(i18n('agents.folderPlaceholder'))}">
+                                        <button type="button" class="btn btn-outline-secondary" id="btn-folder-browse">
+                                            <i class="bi bi-folder2-open"></i> ${i18n('settings.workspaceBrowse')}
+                                        </button>
+                                    </div>
                                     <div class="form-text">${i18n('agents.folderHint')}</div>
                                 </div>
                                 <div class="mb-3">
@@ -1601,6 +1611,7 @@ const AgentsPage = {
         // The only text field driving an indicator. `change` alone would leave the
         // General dot stale until the field loses focus.
         document.getElementById('f-folder').addEventListener('input', refreshState);
+        App.wireFolderPicker('btn-folder-browse', 'f-folder');
 
         // Remember the tab so reopening the SAME agent lands where you left off,
         // and keep the active trigger on screen on a narrow, scrolling strip.

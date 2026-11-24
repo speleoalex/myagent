@@ -114,7 +114,7 @@ class ToolRegistry:
     the bundle and are not editable, so they never have overrides.
     """
 
-    def __init__(self, tools_dir: Path, workdir: Path | None = None,
+    def __init__(self, tools_dir: Path, workdir: Callable[[], Path] | None = None,
                  app_dir: Path | None = None, bundled_dir: Path | None = None,
                  tool_env: dict[str, str] | None = None):
         self._tools_dir = tools_dir
@@ -129,7 +129,8 @@ class ToolRegistry:
         self._bundled_dir = bundled_dir
         # Working directory that external tools run in. Relative paths passed to
         # file/shell tools resolve here; absolute paths are unaffected. When
-        # None, tools run in their own folder (legacy behaviour).
+        # None, tools run in their own folder (legacy behaviour). A callable, not
+        # a Path: the user can move it from Settings while the server runs.
         self._workdir = workdir
         # App install dir, exported to tools as MYAGENT_APP_DIR so launchers can
         # find the app venv (tools live outside the app tree at runtime).
@@ -566,7 +567,7 @@ class ToolRegistry:
         if self._app_dir is not None:
             env["MYAGENT_APP_DIR"] = str(self._app_dir)
         if self._workdir is not None:
-            env["MYAGENT_WORKSPACE"] = str(self._workdir)
+            env["MYAGENT_WORKSPACE"] = str(self._workdir())
         return env
 
     def is_modified(self, tool_id: str) -> bool:
@@ -848,12 +849,13 @@ class ToolRegistry:
         if self._app_dir is not None:
             env["MYAGENT_APP_DIR"] = str(self._app_dir)
         if self._workdir is not None:
+            workdir = self._workdir()
             try:
-                self._workdir.mkdir(parents=True, exist_ok=True)
-                cwd = self._workdir
+                workdir.mkdir(parents=True, exist_ok=True)
+                cwd = workdir
             except OSError as e:
-                log.warning("Cannot use workspace %s: %s", self._workdir, e)
-            env["MYAGENT_WORKSPACE"] = str(self._workdir)
+                log.warning("Cannot use workspace %s: %s", workdir, e)
+            env["MYAGENT_WORKSPACE"] = str(workdir)
 
         # A broken shebang / missing interpreter must come back to the model as
         # an in-band tool error, not blow up the whole chat turn with a 500.

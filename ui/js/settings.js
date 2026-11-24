@@ -47,6 +47,10 @@ const SettingsPage = {
             `<option value="${App.escAttr(m.id)}" ${m.id === selected ? 'selected' : ''}>${App.esc(m.name)} (${App.esc(m.provider)})</option>`;
         const ctxPct = Math.round((settings.context_compact_at ?? 0.9) * 100);
         const color = settings.instance_color || '';
+        // The placeholder (default path) and the pin come from /system/info,
+        // which App.loadInstance fetches at boot.
+        await App.instancePromise;
+        const wsPinned = !!(App.instance && App.instance.workspace_pinned);
 
         const tabBtn = (key, icon, label) => `
             <li class="nav-item" role="presentation">
@@ -272,6 +276,21 @@ const SettingsPage = {
                             </div>
                         </div>
                         <div class="form-text mb-3">${i18n('settings.timezoneHint')}</div>
+
+                        <!-- Where the agents' relative paths land (file_write,
+                             shell_exec, attachments, delivered files). Pinned by
+                             MYAGENT_WORKSPACE = read-only, like the API key. -->
+                        <h5>${i18n('settings.workspace')}</h5>
+                        <div class="input-group mb-2">
+                            <input type="text" class="form-control" id="f-workspace"
+                                   value="${App.escAttr(wsPinned ? (App.instance.workspace_dir || '') : (settings.workspace_dir || ''))}"
+                                   placeholder="${App.escAttr((App.instance && App.instance.workspace_default) || '')}"
+                                   ${wsPinned ? 'readonly' : ''}>
+                            <button type="button" class="btn btn-outline-secondary" id="btn-workspace-browse" ${wsPinned ? 'disabled' : ''}>
+                                <i class="bi bi-folder2-open"></i> ${i18n('settings.workspaceBrowse')}
+                            </button>
+                        </div>
+                        <div class="form-text mb-3">${i18n(wsPinned ? 'settings.workspacePinned' : 'settings.workspaceHint')}</div>
                         ${saveBtn}
 
                         <hr class="my-4">
@@ -356,6 +375,8 @@ const SettingsPage = {
         const colorInput = document.getElementById('f-instance-color');
         colorOn.onchange = () => { colorInput.disabled = !colorOn.checked; };
 
+        if (!wsPinned) App.wireFolderPicker('btn-workspace-browse', 'f-workspace');
+
         document.getElementById('settings-form').onsubmit = async (e) => {
             e.preventDefault();
             const data = {
@@ -370,12 +391,18 @@ const SettingsPage = {
                 context_compact_at:
                     Number(document.getElementById('f-ctx-compact').value) / 100,
                 timezone: document.getElementById('f-timezone').value.trim(),
+                // Pinned: send back what is stored, the field shows the pin.
+                workspace_dir: wsPinned ? (settings.workspace_dir || '')
+                    : document.getElementById('f-workspace').value.trim(),
                 instance_name: document.getElementById('f-instance-name').value.trim(),
                 instance_color: colorOn.checked ? colorInput.value : '',
             };
             try {
-                await App.api('PUT', '/system/settings', data);
+                const saved = await App.api('PUT', '/system/settings', data);
                 App.toast(i18n('settings.saved'));
+                // The server normalizes the path (~ expanded): show what it stored.
+                settings.workspace_dir = saved.workspace_dir;
+                if (!wsPinned) document.getElementById('f-workspace').value = saved.workspace_dir || '';
                 // Choosing an embedder is what turns indexing on: show the
                 // state now, not on the next visit to this page.
                 settings.embedding_model_id = data.embedding_model_id;

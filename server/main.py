@@ -24,7 +24,6 @@ from app.config import (
     MCP_DIR,
     TOOLS_DIR,
     DEFAULT_TOOLS_DIR,
-    WORKSPACE_DIR,
     SESSIONS_DIR,
     MEMORY_DIR,
     AUTONOMY_DIR,
@@ -188,14 +187,14 @@ stores = Stores(
 
 # Working directory for agent file operations (created under the user's home)
 ensure_workspace()
-log.info("Agent working directory: %s", WORKSPACE_DIR)
+log.info("Agent working directory: %s", config.workspace_dir())
 
 # Initialize tool registry: the bundled catalog (read-only, always present)
 # overlaid by the user dir, which holds custom tools and copy-on-write
 # overrides of edited native tools — those survive redeploys.
 ensure_tools_dir()
 log.info("Tools: user dir %s over bundled catalog %s", TOOLS_DIR, DEFAULT_TOOLS_DIR)
-tool_registry = ToolRegistry(TOOLS_DIR, workdir=WORKSPACE_DIR, app_dir=APP_DIR,
+tool_registry = ToolRegistry(TOOLS_DIR, workdir=config.workspace_dir, app_dir=APP_DIR,
                              bundled_dir=DEFAULT_TOOLS_DIR,
                              tool_env=config.tool_env())
 tool_registry.register_internal("call_agent", call_agent_handler)

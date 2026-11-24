@@ -65,6 +65,11 @@ const App = {
         // say what an empty timezone falls back to. '' on an older server.
         const timezone_name = ((info && info.timezone_name) || '').trim();
         this.instance = { label, name, color, hostname, timezone_name };
+        // The working folder in use, its default (the Settings placeholder)
+        // and whether MYAGENT_WORKSPACE pins it.
+        this.instance.workspace_dir = (info && info.workspace_dir) || '';
+        this.instance.workspace_default = (info && info.workspace_default) || '';
+        this.instance.workspace_pinned = !!(info && info.workspace_pinned);
 
         const brandName = document.getElementById('brand-name');
         if (brandName) brandName.textContent = label || 'MyAgent';
@@ -486,6 +491,101 @@ const App = {
             zones = Intl.supportedValuesOf('timeZone') || [];
         } catch (e) { zones = []; }
         return zones.map(z => `<option value="${this.escAttr(z)}"></option>`).join('');
+    },
+
+    /** Folder picker on the SERVER's filesystem (GET /system/browse): the
+     * browser's own picker cannot be used, it shows the client's disk and
+     * never returns a path. Resolves to the chosen absolute path, or null
+     * when cancelled. `start` empty = the working directory. */
+    pickFolder(start = '') {
+        return new Promise(resolve => {
+            document.body.insertAdjacentHTML('beforeend', `
+                <div class="modal fade" id="folder-picker" tabindex="-1" aria-labelledby="folder-picker-title">
+                    <div class="modal-dialog modal-dialog-scrollable modal-fullscreen-sm-down">
+                        <div class="modal-content">
+                            <div class="modal-header">
+                                <h5 class="modal-title" id="folder-picker-title"><i class="bi bi-folder2-open"></i> ${i18n('folderPicker.title')}</h5>
+                                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="${this.escAttr(i18n('folderPicker.cancel'))}"></button>
+                            </div>
+                            <div class="modal-body">
+                                <div class="d-flex gap-2 mb-2">
+                                    <button type="button" class="btn btn-outline-secondary" id="folder-picker-up" title="${this.escAttr(i18n('folderPicker.up'))}">
+                                        <i class="bi bi-arrow-up"></i> <span class="d-none d-sm-inline">${i18n('folderPicker.up')}</span>
+                                    </button>
+                                    <button type="button" class="btn btn-outline-secondary" id="folder-picker-home" title="${this.escAttr(i18n('folderPicker.home'))}">
+                                        <i class="bi bi-house"></i> <span class="d-none d-sm-inline">${i18n('folderPicker.home')}</span>
+                                    </button>
+                                </div>
+                                <code class="d-block text-break mb-2" id="folder-picker-path"></code>
+                                <div class="list-group" id="folder-picker-list"></div>
+                            </div>
+                            <div class="modal-footer">
+                                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">${i18n('folderPicker.cancel')}</button>
+                                <button type="button" class="btn btn-primary" id="folder-picker-ok">${i18n('folderPicker.choose')}</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>`);
+            const el = document.getElementById('folder-picker');
+            const list = el.querySelector('#folder-picker-list');
+            let current = null;
+            let chosen = null;
+
+            const open = async (path) => {
+                list.innerHTML = `<div class="list-group-item"><span class="spinner-border spinner-border-sm"></span> ${i18n('folderPicker.loading')}</div>`;
+                let data;
+                try {
+                    data = await this.api('GET', '/system/browse?path=' + encodeURIComponent(path || ''));
+                } catch (e) {
+                    // A typed path that does not exist (yet): start from the workspace.
+                    if (path) return open('');
+                    list.innerHTML = `<div class="list-group-item text-danger">${this.esc(e.message)}</div>`;
+                    return;
+                }
+                current = data;
+                el.querySelector('#folder-picker-path').textContent = data.path;
+                el.querySelector('#folder-picker-up').disabled = !data.parent;
+                el.querySelector('#folder-picker-home').onclick = () => open(data.home);
+                const sep = data.path.includes('\\') && !data.path.includes('/') ? '\\' : '/';
+                const join = (name) => data.path.endsWith(sep) ? data.path + name : data.path + sep + name;
+                if (!data.readable) {
+                    list.innerHTML = `<div class="list-group-item text-warning-emphasis"><i class="bi bi-lock"></i> ${i18n('folderPicker.unreadable')}</div>`;
+                } else if (!data.dirs.length) {
+                    list.innerHTML = `<div class="list-group-item text-secondary">${i18n('folderPicker.empty')}</div>`;
+                } else {
+                    list.innerHTML = data.dirs.map(d => `
+                        <button type="button" class="list-group-item list-group-item-action py-2" style="min-height:44px" data-path="${this.escAttr(join(d))}">
+                            <i class="bi bi-folder"></i> ${this.esc(d)}
+                        </button>`).join('');
+                    list.querySelectorAll('[data-path]').forEach(b => { b.onclick = () => open(b.dataset.path); });
+                }
+            };
+
+            el.querySelector('#folder-picker-up').onclick = () => current && current.parent && open(current.parent);
+            el.querySelector('#folder-picker-ok').onclick = () => {
+                if (!current) return;
+                chosen = current.path;
+                modal.hide();
+            };
+            el.addEventListener('hidden.bs.modal', () => { el.remove(); resolve(chosen); });
+            const modal = new bootstrap.Modal(el);
+            modal.show();
+            open(start);
+        });
+    },
+
+    /** Wire an "Explore" button to fill a text input from pickFolder(). The
+     * typed value is the starting point, so the picker opens where it points. */
+    wireFolderPicker(buttonId, inputId) {
+        const btn = document.getElementById(buttonId);
+        const input = document.getElementById(inputId);
+        if (!btn || !input) return;
+        btn.onclick = async () => {
+            const path = await this.pickFolder(input.value.trim());
+            if (path === null) return;
+            input.value = path;
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+        };
     },
 
     slugify(text) {
