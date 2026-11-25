@@ -1,4 +1,5 @@
-"""The write-only-secret sentinel shared by the models and MCP routers.
+"""The write-only-secret sentinel shared by the models and MCP routers and by
+the tool settings (app/tools/tool_config.py).
 
 Stored secrets (model API keys; MCP bearer/env/headers values) are never sent
 to the frontend: GET replaces them with this mask, and a PUT that sends the

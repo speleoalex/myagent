@@ -104,6 +104,11 @@ _RECOVERED_TEXT = (
 )
 
 
+class FolderMissing(RuntimeError):
+    """A wake refused before the model runs: an expected state (a disk that is
+    down), so it is logged as one line, not as a crash with a traceback."""
+
+
 def _retry_delay(errors: int) -> float:
     """Seconds to wait before retrying, after *errors* consecutive failures."""
     if errors <= 0:
@@ -119,6 +124,11 @@ def _iso_in(seconds: float) -> str:
     precision would silently order wrong.
     """
     return (datetime.now() + timedelta(seconds=seconds)).isoformat(timespec="seconds")
+
+# How many past wakes each agent keeps in its run log (<autonomy>/<id>/runs.json).
+# A month of a daily task, or a few days of a frequent one: enough to tell
+# "fails sometimes" from "failed once", small enough to rewrite every wake.
+RUN_LOG_MAX = 50
 
 # Naming convention of the dedicated per-agent autonomous session. Owned here;
 # other layers (the sessions router) must use these helpers, never the literal.
@@ -279,6 +289,10 @@ class AutonomyService:
         self._wakes: dict[str, asyncio.Task] = {}
         self._kick = asyncio.Event()
         self._states: dict[str, dict] = {}  # agent_id -> persisted state (cached)
+        # agent_id -> {"started", "task_ids"} of the wake running now. Kept apart
+        # from _wakes (a bare asyncio.Task) because the Tasks page asks per TASK:
+        # "is this one running?" needs the ids the wake was handed.
+        self._running: dict[str, dict] = {}
         # How the SERVICE speaks to the user, set in main.py with a closure over
         # app.state — the connectors plugin that delivers registers itself later,
         # exactly like ToolRegistry.notify_targets. None = no channel installed.
@@ -399,12 +413,20 @@ class AutonomyService:
                 return
             wake_tasks = self.tasks.due(aid, started)
             due_ids = {t["id"] for t in wake_tasks}
+            self._running[aid] = {"started": started, "task_ids": sorted(due_ids)}
             # What comes AFTER this wake, so the agent can answer "what's next?"
             # without a tool call. Skipping the ones running right now: they are
             # in the list above and will have moved on by the time it matters.
             upcoming = next((t for t in self.tasks.list_all(aid)
                              if t.get("enabled", True) and t.get("next_at")
                              and t["id"] not in due_ids), None)
+            # Before the model is involved: with its folder gone the agent
+            # would improvise around failing tools and the wake would look
+            # fine. A failure instead, so it is retried with backoff and, after
+            # max_consecutive_errors, reported — a mount that comes back fixes
+            # it by itself.
+            if agent.folder and await agent.folder.missing():
+                raise FolderMissing(f"the agent's folder is not reachable: {agent.folder.path}")
             executor = await AgentExecutor.create_for_agent(
                 aid, self.tool_registry, self.stores)
             granted = set(self.tool_registry.expand_tool_ids(agent.tools))
@@ -431,10 +453,14 @@ class AutonomyService:
                 except (asyncio.CancelledError, Exception):
                     pass
             stopped = run.stopped and not timed_out
+        except FolderMissing as e:
+            log.warning("wake of '%s' not started: %s", aid, e)
+            result["error"] = str(e)
         except Exception as e:
             log.exception("wake of '%s' failed", aid)
             result["error"] = str(e) or type(e).__name__
         finally:
+            self._running.pop(aid, None)
             self._finish_wake(agent, cfg, wake_tasks, result, timed_out,
                               stopped, manual)
             self._wakes.pop(aid, None)
@@ -457,7 +483,8 @@ class AutonomyService:
             reason = "wake timed out" if timed_out else result["error"]
             for t in wake_tasks:
                 self.tasks.advance(t["id"], "timeout" if timed_out else "error",
-                                   _short(reason or "", 120), reschedule=False)
+                                   _short(reason or "", 120), reschedule=False,
+                                   wake_tasks=len(wake_tasks))
             errors = st.get("consecutive_errors", 0) + 1
             st["consecutive_errors"] = errors
             st["last_result"] = "timeout" if timed_out else "error"
@@ -495,7 +522,8 @@ class AutonomyService:
             # Only now do the tasks move on: same run-once-on-success contract
             # the event queue had. All tasks of one wake share one outcome.
             for t in wake_tasks:
-                self.tasks.advance(t["id"], outcome, reply)
+                self.tasks.advance(t["id"], outcome, reply,
+                                   wake_tasks=len(wake_tasks))
             recovered = st.get("consecutive_errors", 0)
             st["consecutive_errors"] = 0
             st["last_result"] = outcome
@@ -508,8 +536,61 @@ class AutonomyService:
                 self._announce(agent, _RECOVERED_TEXT.format(
                     name=agent.name, n=recovered))
         self._save_state(aid, st)
+        # A wake that served no task and was not asked for by hand did nothing
+        # worth a row (the session was busy and it stood down).
+        if wake_tasks or manual:
+            self._log_run(aid, st, wake_tasks, result, timed_out, manual)
         log.info("wake of '%s' finished: %s%s", aid, st["last_result"],
                  " (manual)" if manual else "")
+
+    # -------------------------------------------------------------- run log
+    def _runs_path(self, agent_id: str) -> Path:
+        return self.base / agent_id / "runs.json"
+
+    def _log_run(self, agent_id: str, st: dict, wake_tasks: list[dict],
+                 result: dict, timed_out: bool, manual: bool) -> None:
+        """Append this wake to the agent's run log, newest first.
+
+        A task keeps only its LAST outcome, which cannot say whether a recurring
+        job is reliable: "acted" today hides that it timed out three days in a
+        row last week. Duration, tool count and the limit that cut it short are
+        what tell a healthy run from one that ran out of road. Best-effort: the
+        log is for a human, and failing to write it must not fail the wake."""
+        started = st.get("last_wake", "")
+        finished = now_iso()
+        try:
+            duration = (datetime.fromisoformat(finished)
+                        - datetime.fromisoformat(started)).total_seconds()
+        except ValueError:
+            duration = 0
+        entry = {
+            "started": started,
+            "duration_s": int(duration),
+            "result": st.get("last_result", ""),
+            "task_ids": [t["id"] for t in wake_tasks],
+            "tool_calls": result.get("tool_calls", 0),
+            "budget_hit": result.get("budget_hit", ""),
+            "manual": manual,
+            "reply": _short(result.get("reply") or "", 300),
+            "error": ("wake timed out" if timed_out else result.get("error") or
+                      result.get("delivery_error") or ""),
+        }
+        try:
+            runs = read_json(self._runs_path(agent_id)) or []
+            write_json(self._runs_path(agent_id), ([entry] + runs)[:RUN_LOG_MAX])
+        except Exception as e:
+            log.warning("could not write the run log of '%s': %s", agent_id, e)
+
+    def runs(self, agent_id: str, task_id: str = "") -> list[dict]:
+        """The agent's past wakes, newest first; only the ones that served
+        *task_id* when given."""
+        runs = read_json(self._runs_path(agent_id)) or []
+        return [r for r in runs if not task_id or task_id in r.get("task_ids", [])]
+
+    def running_since(self, agent_id: str, task_id: str) -> str:
+        """When the wake running *task_id* started, "" when it is not running."""
+        run = self._running.get(agent_id)
+        return run["started"] if run and task_id in run["task_ids"] else ""
 
     def _announce(self, agent: Agent, text: str) -> None:
         """Tell the user out-of-band about the SCHEDULER's own state.
@@ -611,6 +692,7 @@ class AutonomyService:
                             result["reply"] = reply
                             result["tool_calls"] = len(tool_events)
                             result["delivery_error"] = _delivery_error(tool_events)
+                            result["budget_hit"] = executor.budget_hit
                             noop = not tool_events and _NOOP_RE.match(reply or "")
                             if not noop:
                                 session["messages"].append({

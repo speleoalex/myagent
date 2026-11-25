@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from app import config
 from app.ids import is_valid_id
 from app.storage.sessions import write_json
+from app.tools import tool_config
 
 router = APIRouter()
 
@@ -92,6 +93,35 @@ async def get_tool(tool_id: str, request: Request):
     if d is None:
         raise HTTPException(404, f"Tool not found: {tool_id}")
     return d if d.get("mcp") else _annotate(registry, d)
+
+
+def _filesystem_meta(request: Request, tool_id: str) -> dict:
+    """A folder tool's definition, or 404. Settings belong to folder tools
+    only: an MCP tool is configured on its server, an internal one in code."""
+    _check_tool_id(tool_id)
+    meta = _registry(request).get_definition(tool_id)
+    if meta is None or meta.get("mcp") or meta.get("source") == "mcp":
+        raise HTTPException(404, f"Tool not found: {tool_id}")
+    return meta
+
+
+@router.get("/{tool_id}/config")
+async def get_tool_config(tool_id: str, request: Request):
+    """The settings the tool declares and their current values, secrets
+    masked (see app/tools/tool_config.py)."""
+    return tool_config.public(tool_id, _filesystem_meta(request, tool_id))
+
+
+@router.put("/{tool_id}/config")
+async def put_tool_config(tool_id: str, values: dict[str, str], request: Request):
+    """Store the tool's settings. A secret sent back as the mask keeps its
+    stored value; a key the tool does not declare is refused."""
+    meta = _filesystem_meta(request, tool_id)
+    try:
+        tool_config.save(tool_id, meta, values)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return tool_config.public(tool_id, meta)
 
 
 @router.get("/{tool_id}/source")
@@ -252,4 +282,6 @@ async def delete_tool(tool_id: str, request: Request):
         raise HTTPException(400, "Cannot delete internal tools")
 
     _remove_user_copy(request, user_copy)
+    # Its settings may be credentials: they do not outlive the tool.
+    tool_config.drop(tool_id)
     return {"ok": True}

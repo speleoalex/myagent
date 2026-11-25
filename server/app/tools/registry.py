@@ -11,7 +11,7 @@ import time
 from pathlib import Path, PurePosixPath
 from typing import Callable
 
-from app.tools import resources
+from app.tools import resources, tool_config
 
 log = logging.getLogger(__name__)
 
@@ -116,7 +116,8 @@ class ToolRegistry:
 
     def __init__(self, tools_dir: Path, workdir: Callable[[], Path] | None = None,
                  app_dir: Path | None = None, bundled_dir: Path | None = None,
-                 tool_env: dict[str, str] | None = None):
+                 tool_env: dict[str, str] | None = None,
+                 state_dir: Path | None = None):
         self._tools_dir = tools_dir
         # The read-only native catalog underlay. None (or pointing at the same
         # folder as tools_dir) disables the overlay and scans tools_dir alone.
@@ -140,6 +141,9 @@ class ToolRegistry:
         # re-derived them from $HOME would read a different library than the
         # one the server is serving whenever the two disagree.
         self._tool_env = dict(tool_env or {})
+        # Root of the per-tool state folders (config.STATE_DIR): each run gets
+        # its own subfolder as MYAGENT_STATE_DIR. None = not offered.
+        self._state_dir = state_dir
         self._cache: dict[str, dict] = {}
         self._mtimes: dict[str, float] = {}
         # category -> parsed group.json ({"name", "description"}). Only the
@@ -530,11 +534,6 @@ class ToolRegistry:
             return found
         return self.mcp_manager.get_meta(tool_id)
 
-    def tool_dir(self, tool_id: str) -> Path | None:
-        """RESOLVED folder of a filesystem tool (the override when present)."""
-        self._scan()
-        return self._dirs.get(tool_id)
-
     def native_dir(self, tool_id: str) -> Path | None:
         """Bundled folder of a native tool, None for custom tools."""
         self._scan()
@@ -846,6 +845,20 @@ class ToolRegistry:
         # Order: process env < install-wide resolved paths < per-agent. Only
         # the last one varies between two calls of the same tool.
         env = {**os.environ, **self._tool_env, **(env_extra or {})}
+        # The tool's declared settings (TOOL_*), which the user filled in on
+        # the Tools page. A file that cannot be read must not stop the run:
+        # the tool sees the setting as missing and says so itself.
+        try:
+            env.update(tool_config.env(tool_id, meta))
+        except Exception:
+            log.exception("could not read the settings of tool '%s'", tool_id)
+        if self._state_dir is not None:
+            state = Path(self._state_dir) / tool_id
+            try:
+                state.mkdir(parents=True, exist_ok=True)
+                env["MYAGENT_STATE_DIR"] = str(state)
+            except OSError as e:
+                log.warning("Cannot create state dir %s: %s", state, e)
         if self._app_dir is not None:
             env["MYAGENT_APP_DIR"] = str(self._app_dir)
         if self._workdir is not None:

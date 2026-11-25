@@ -98,6 +98,8 @@ const ToolsPage = {
                     ${t.language ? `<span class="badge fw-normal bg-secondary-subtle text-secondary-emphasis"
                          title="${App.escAttr(i18n('tools.languageHint'))}">${App.esc(t.language)}</span>` : ''}
                     ${t.modified ? `<span class="badge bg-warning text-dark">${i18n('tools.statusModified')}</span>` : ''}
+                    ${(t.config || []).length ? `<span class="badge bg-info-subtle text-info-emphasis"
+                        title="${App.escAttr(i18n('tools.hasSettings'))}"><i class="bi bi-gear"></i></span>` : ''}
                 </div>
                 ${t.description ? `<div class="small text-secondary tool-desc"
                      title="${App.escAttr(t.description)}">${App.esc(t.description)}</div>` : ''}
@@ -238,6 +240,37 @@ const ToolsPage = {
         }
     },
 
+    /** The settings the tool declares in tool.json ("config"), filled in here
+     *  and handed to every run as TOOL_<KEY>. Secrets come back masked: leaving
+     *  the mask in place keeps the stored value. */
+    async wireSettings(toolId) {
+        const box = document.getElementById('tool-settings-fields');
+        const form = document.getElementById('tool-settings');
+        const show = (cfg) => {
+            box.classList.remove('text-secondary');
+            box.innerHTML = cfg.fields.map(f => `
+                <div class="mb-2">
+                    <label class="form-label mb-1" for="cfg-${App.escAttr(f.key)}">${App.esc(f.label)}
+                        <code class="small text-secondary ms-1">TOOL_${App.esc(f.key.toUpperCase())}</code></label>
+                    <input class="form-control form-control-sm" id="cfg-${App.escAttr(f.key)}" data-key="${App.escAttr(f.key)}"
+                           type="${f.secret ? 'password' : 'text'}" autocomplete="off"
+                           value="${App.escAttr(cfg.values[f.key] || '')}">
+                    ${f.description ? `<div class="form-text">${App.esc(f.description)}</div>` : ''}
+                </div>`).join('');
+        };
+        try { show(await App.api('GET', `/tools/${toolId}/config`)); }
+        catch (e) { box.textContent = e.message; return; }
+        form.onsubmit = async (e) => {
+            e.preventDefault();
+            const values = {};
+            box.querySelectorAll('[data-key]').forEach(el => { values[el.dataset.key] = el.value; });
+            try {
+                show(await App.api('PUT', `/tools/${toolId}/config`, values));
+                App.toast(i18n('tools.settingsSaved'));
+            } catch (err) { App.toast(err.message, 'danger'); }
+        };
+    },
+
     async renderForm(toolId) {
         let tool = { id: '', name: '', description: '', parameters: {type:'object',properties:{},required:[]}, enabled: true };
         let isEdit = false;
@@ -284,6 +317,13 @@ const ToolsPage = {
                             <i class="bi bi-info-circle"></i>
                             ${i18n(tool.modified ? 'tools.nativeModifiedNotice' : 'tools.nativeNotice')}
                         </div>` : ''}
+                    ${isEdit && (tool.config || []).length ? `
+                        <form id="tool-settings" class="card mb-4"><div class="card-body">
+                            <h5 class="card-title"><i class="bi bi-gear"></i> ${i18n('tools.settingsTitle')}</h5>
+                            <p class="small text-secondary">${i18n('tools.settingsHint')}</p>
+                            <div id="tool-settings-fields" class="small text-secondary">…</div>
+                            <button type="submit" class="btn btn-primary btn-sm mt-2">${i18n('common.save')}</button>
+                        </div></form>` : ''}
                     <form id="tool-form">
                         <div class="mb-3">
                             <label class="form-label">${i18n('common.id')}</label>
@@ -334,6 +374,7 @@ const ToolsPage = {
             </div>`;
 
         if (!isEdit) App.autoId('f-name', 'f-id');
+        if (isEdit && (tool.config || []).length) this.wireSettings(toolId);
 
         // Tab key in script textarea
         document.getElementById('f-script').addEventListener('keydown', (e) => {

@@ -61,9 +61,36 @@ changes, and setting `enabled: false` hides a tool from the agents.
 | `max_output` | `10000` | output characters beyond which the result is truncated |
 | `enabled` | `true` | disabled tools are hidden from agents |
 | `internal` | `false` | `true` = handled by a Python handler in-process, no `run` script (only `call_agent` today) |
+| `config` | none | settings the user fills in on the Tools page (servers, accounts, passwords); see below |
 
 The folder name is the tool id — it's what agents list in their `tools` array
 and the function name the model calls.
+
+### Settings and credentials (`config`)
+
+A tool that needs a server address, an account or a password declares it
+instead of inventing its own file:
+
+```json
+"config": [
+  {"key": "smtp_host", "label": "SMTP server", "default": "smtp.example.com"},
+  {"key": "smtp_user", "label": "User"},
+  {"key": "smtp_password", "label": "Password", "secret": true,
+   "description": "Stored on this server only, never shown again."}
+]
+```
+
+The tool's page (Tools → the tool) then shows a *Settings* form. The values
+live in `~/myagent/config/tools/<tool_id>.json` (permissions `0600`), never in
+the tool folder, so the tool can be shared or versioned without them. Every
+run receives each non-empty value as an environment variable named after the
+key with a `TOOL_` prefix: `smtp_host` arrives as `TOOL_SMTP_HOST`. A missing
+variable means "not configured", and the tool should say so in its error.
+
+Keys are lowercase letters, digits and `_`. A `secret` field is masked when
+read back (`GET /api/tools/{id}/config`), and sending the mask back keeps the
+stored value. The values are dropped when the tool is deleted. The model never
+sees any of this: only `name`, `description` and `parameters` reach it.
 
 ## Tool groups (categories)
 
@@ -201,6 +228,13 @@ file is mtime-cached and hot-reloaded like `tool.json`.
   - `MYAGENT_LIBRARY` — the offline library folder
   - `MYAGENT_CACHE` — derived data, safe to delete (the PDF text layers live
     in `$MYAGENT_CACHE/pdftext`)
+  - `MYAGENT_STATE_DIR` — a folder of **this tool's own**
+    (`~/myagent/state/<tool_id>`), created on demand and kept between runs.
+    It is where a recurring tool remembers what it already did: the ids it has
+    seen, a cursor, the last fetch time. Not the workspace, which holds the
+    user's files, and not `MYAGENT_CACHE`, which may be wiped.
+  - `TOOL_<KEY>` — the tool's settings, one per key declared in `config`
+    (see above).
   - `MYAGENT_AGENT_DIR` — the **calling agent's** working folder, when it has
     one (the *Working folder* field on the agent form). Unlike every variable
     above it varies from one call to the next, and it is absent for most
@@ -214,7 +248,9 @@ file is mtime-cached and hot-reloaded like `tool.json`.
 
     A tool that honours it must fail loudly when the folder is missing, never
     fall back: an agent pointed at an unmounted drive has to say so, not
-    quietly answer from somewhere else.
+    quietly answer from somewhere else. The server checks it too: the agent
+    list marks the folder as missing (`folder_missing`), and a scheduled run
+    of that agent fails before the model starts, to be retried.
   - `MYAGENT_INDEX_OCR` — `1` when the calling agent asked for scanned PDFs and
     images to be OCR'd while indexing.
   - `MYAGENT_EMBED_URL` / `MYAGENT_EMBED_MODEL` — an OpenAI-compatible
@@ -319,6 +355,59 @@ chmod +x run
 ```
 
 Enable it in an agent's tool list and it's immediately callable — no restart.
+
+## Tools for a recurring source
+
+For a source an agent reads on a schedule (job ads, a feed, an API), a tool
+that calls that source directly beats `web_search` + `browse_web`: it is
+lighter (no headless browser), returns the same fields every time, and does
+the repetitive part deterministically. A model asked to run twelve searches
+may decide that two are redundant and skip them; a tool given the list runs
+all twelve. Leave the model the part that needs judgment: ranking, summarizing.
+
+Three things such a tool must get right:
+
+- **Remember what it has seen**, in `MYAGENT_STATE_DIR`, so "new" means new
+  since the last run and not since the start of the conversation.
+- **Back off on HTTP 429**, honouring `Retry-After`. A scheduled run has no one
+  watching; failing fast on a rate limit loses the day's run.
+- **Follow pagination** up to a fixed cap, so one run cannot hammer the source.
+
+A minimal skeleton (`run`, Python, standard library only):
+
+```python
+#!/usr/bin/env python3
+import json, os, sys, time, urllib.error, urllib.parse, urllib.request
+from pathlib import Path
+
+args = json.load(sys.stdin)
+state = Path(os.environ.get("MYAGENT_STATE_DIR", ".")) / "seen.json"
+seen = set(json.loads(state.read_text())) if state.exists() else set()
+base = os.environ.get("TOOL_API_URL", "https://api.example.com/items")
+
+def fetch(url, tries=4):
+    for attempt in range(tries):
+        try:
+            with urllib.request.urlopen(url, timeout=20) as r:
+                return json.load(r)
+        except urllib.error.HTTPError as e:
+            if e.code != 429 or attempt == tries - 1:
+                raise
+            time.sleep(int(e.headers.get("Retry-After") or 2 ** attempt * 5))
+
+new, page = [], 1
+while page <= 5:  # hard cap: at most 5 pages per run
+    data = fetch(f"{base}?{urllib.parse.urlencode({'q': args['query'], 'page': page})}")
+    items = data.get("items", [])
+    new += [i for i in items if i["id"] not in seen]
+    if not data.get("next"):
+        break
+    page += 1
+
+seen.update(i["id"] for i in new)
+state.write_text(json.dumps(sorted(seen)))
+print(json.dumps(new, ensure_ascii=False) if new else "No new items.")
+```
 
 ## Letting the AI write the tool
 

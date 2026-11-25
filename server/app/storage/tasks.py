@@ -98,7 +98,7 @@ class TaskStore:
         return data
 
     def advance(self, task_id: str, result: str, reply: str = "", *,
-                reschedule: bool = True) -> None:
+                reschedule: bool = True, wake_tasks: int = 1) -> None:
         """Record the outcome of a run and schedule the next occurrence.
 
         A recurring task moves to its next cron time; a one-shot has none left,
@@ -109,13 +109,17 @@ class TaskStore:
         so the task stays due and is retried: that is the failure path. It still
         writes the outcome, because otherwise a task that has been failing for
         an hour keeps showing the green result of its last success and the
-        Tasks page looks healthy while nothing is getting done."""
+        Tasks page looks healthy while nothing is getting done.
+
+        ``wake_tasks`` is how many tasks this run served: their outcome and
+        reply are one and the same (see Task.last_wake_tasks)."""
         data = self.store.get(task_id)
         if data is None:
             return                       # deleted mid-wake: nothing to update
         data["last_run"] = now_iso()
         data["last_result"] = result
         data["last_reply"] = reply or ""
+        data["last_wake_tasks"] = wake_tasks
         if not reschedule:
             self.store.save(task_id, data)
             return

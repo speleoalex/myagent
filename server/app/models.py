@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 from datetime import datetime
@@ -238,6 +239,10 @@ class Task(BaseModel):
     last_run: str = ""
     last_result: str = ""           # acted | undelivered | noop | error | timeout | stopped
     last_reply: str = ""            # short summary of what the agent did
+    # How many tasks the last run served. Tasks due together share ONE wake and
+    # one reply, so on its own row a reply about the morning greeting reads as
+    # the outcome of the weather task (observed on the Orin). > 1 says so.
+    last_wake_tasks: int = 0
     source: str = "user"            # user | agent | api
     created_at: str = ""
 
@@ -348,11 +353,28 @@ class FolderConfig(BaseModel):
         v = (v or "").strip()
         # Expanded once, here, so every reader sees the same absolute path.
         # Existence is NOT checked: an external disk may be unmounted at save
-        # time. A missing folder must fail loudly at SEARCH time instead —
+        # time. It is REPORTED instead (``missing``: the agent list, the start
+        # of a wake), and a missing folder fails loudly at SEARCH time —
         # local_search already errors on a missing root, and it must never
         # fall back to the shared library, or an agent pointed at a detached
         # drive would quietly answer from Wikipedia.
         return os.path.expanduser(v) if v else ""
+
+    async def missing(self, timeout: float = 2.0) -> bool:
+        """True when the folder is set and cannot be reached right now.
+
+        In a thread with a deadline because the folder is often a network
+        mount (sshfs on the Orin): a stat on a dead mount can block for minutes,
+        and the two callers — the agent list and the start of a wake — must not
+        hang with it. Too slow to answer counts as missing. The thread itself is
+        left to finish on its own; nothing waits for it."""
+        if not self.path:
+            return False
+        try:
+            return not await asyncio.wait_for(
+                asyncio.to_thread(os.path.isdir, self.path), timeout)
+        except asyncio.TimeoutError:
+            return True
 
 
 class Agent(BaseModel):

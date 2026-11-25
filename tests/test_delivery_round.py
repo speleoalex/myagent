@@ -153,6 +153,8 @@ def case_unattended_delivers():
     check(done is not None and done["reply"].startswith("Report inviato"),
           "the model's own closing line is the reply")
     check(prov.script == [], "no round was skipped")
+    check(ex.budget_hit == "max_tool_calls",
+          "the turn records that the budget cut it short (the run log shows it)")
 
 
 def case_offer_is_made_once():
@@ -223,6 +225,14 @@ def case_attended_document_round():
     done = asyncio.run(_run(ex))
     check(ran == ["shell_exec"] and len(prov.rounds) == 3 and done["reply"] == "risposta",
           f"the plain answer ends the turn, no extra LLM call: {len(prov.rounds)} rounds")
+
+    print("within budget: nothing is recorded as cut short")
+    ex, prov, ran = _executor([
+        [_call("shell_exec", '{"command": "a"}')],
+        [_text("fatto")],
+    ], unattended=True, max_tool_calls=3)
+    asyncio.run(_run(ex))
+    check(ex.budget_hit == "", f"no limit hit: {ex.budget_hit!r}")
 
 
 def case_without_notify_user_unchanged():

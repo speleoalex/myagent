@@ -1,9 +1,10 @@
+import asyncio
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel
 
-from app import config
+from app import agent_package, config
 from app.ids import is_valid_id
 from app.models import Agent
 from app.engine.agent_router import AUTO as RESERVED_AGENT_ID
@@ -26,6 +27,21 @@ def _public(data: dict) -> dict:
         return Agent(**data).model_dump()
     except Exception:
         return data
+
+
+async def _with_status(data: dict) -> dict:
+    """``_public`` plus ``folder_missing``: whether the agent's working folder
+    is unreachable right now. Read-only state, never stored (the PUT body
+    ignores it): a folder on a disk that is down for a minute is not a
+    configuration error, but it must not stay invisible until a tool fails —
+    observed on the Orin, an agent pointed at an unmounted NAS for days."""
+    out = _public(data)
+    try:
+        agent = Agent(**data)
+    except Exception:
+        return out
+    out["folder_missing"] = bool(agent.folder) and await agent.folder.missing()
+    return out
 
 
 def _native_agents_dir() -> Path:
@@ -70,7 +86,8 @@ async def list_agents(request: Request, selectable: bool = False):
     agents = _store(request).list_all()
     if selectable:
         agents = [a for a in agents if a.get("enabled", True)]
-    return [_public(a) for a in agents]
+    # Concurrently: each check may wait out its timeout on a dead mount.
+    return list(await asyncio.gather(*(_with_status(a) for a in agents)))
 
 
 # --- Native agent catalog ------------------------------------------------
@@ -144,9 +161,42 @@ async def import_native_agent(agent_id: str, req: AgentImportRequest, request: R
     return agent.model_dump()
 
 
+@router.post("/import")
+async def import_agent(request: Request, overwrite: bool = False):
+    """Install an agent package (app/agent_package.py) sent as the raw request
+    body. A raw body, not a multipart form, so no extra dependency is needed.
+    409 lists what already exists; ``overwrite=true`` replaces it."""
+    blob = await request.body()
+    if len(blob) > agent_package.MAX_PACKAGE_BYTES:
+        raise HTTPException(413, "the package is too large")
+    state = request.app.state
+    try:
+        return agent_package.import_agent(blob, state.stores, state.tasks,
+                                          state.tool_registry, overwrite=overwrite)
+    except agent_package.Conflict as e:
+        # Structured, so a client can name the items in its own language.
+        raise HTTPException(409, {"message": str(e), "conflicts": e.items})
+    except agent_package.PackageError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.get("/{agent_id}/export")
+async def export_agent(agent_id: str, request: Request):
+    """The agent as one .tar.gz: definition, tasks, user tools, tool settings
+    without secrets. See app/agent_package.py for what is left out and why."""
+    state = request.app.state
+    try:
+        blob = agent_package.export_agent(agent_id, state.stores, state.tasks,
+                                          state.tool_registry)
+    except KeyError:
+        raise HTTPException(404, f"Agent not found: {agent_id}")
+    return Response(blob, media_type="application/gzip", headers={
+        "Content-Disposition": f'attachment; filename="myagent-{agent_id}.tar.gz"'})
+
+
 @router.get("/{agent_id}")
 async def get_agent(agent_id: str, request: Request):
-    return _public(get_or_404(_store(request), agent_id, "Agent"))
+    return await _with_status(get_or_404(_store(request), agent_id, "Agent"))
 
 
 def _check_timezone(agent: Agent) -> None:

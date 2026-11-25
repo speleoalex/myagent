@@ -85,12 +85,23 @@ const TasksPage = {
     },
 
     resultBadge(task) {
+        // Running now beats the last outcome: that one is about to be replaced.
+        if (task.running_since) {
+            return `<span class="badge text-bg-primary" title="${App.escAttr(this.when(task.running_since))}">
+                <span class="spinner-border spinner-border-sm" aria-hidden="true"></span>
+                ${i18n('tasks.running')}</span>`;
+        }
         if (!task.last_result) return '';
         const cls = { acted: 'success', undelivered: 'warning', noop: 'secondary',
                       error: 'danger', timeout: 'danger',
                       stopped: 'warning' }[task.last_result] || 'secondary';
-        const title = `${this.when(task.last_run)}${task.last_reply ? ' — ' + task.last_reply : ''}`;
-        return `<span class="badge text-bg-${cls}" title="${App.escAttr(title)}">${App.esc(task.last_result)}</span>`;
+        // One wake serves every task due at that moment, with one reply: say
+        // so, or the reply reads as this task's own (it may be about another).
+        const shared = task.last_wake_tasks > 1
+            ? ` (${i18n('tasks.sharedReply', { n: task.last_wake_tasks })})` : '';
+        const title = `${this.when(task.last_run)}${shared}${task.last_reply ? ' — ' + task.last_reply : ''}`;
+        return `<span class="badge text-bg-${cls}" title="${App.escAttr(title)}">${App.esc(task.last_result)}` +
+               `${shared ? ` <i class="bi bi-people" aria-label="${App.escAttr(shared.trim())}"></i>` : ''}</span>`;
     },
 
     // ------------------------------------------------------------------- list
@@ -157,6 +168,17 @@ const TasksPage = {
         App.container.querySelectorAll('[data-run]').forEach(b => {
             b.onclick = () => this.runNow(b.dataset.run);
         });
+        this.pollWhileRunning(tasks.some(t => t.running_since));
+    },
+
+    /** Re-render the list until no task is running, so a run started here (or
+     *  by the scheduler) is seen to finish. Only while the list is on screen. */
+    pollWhileRunning(running) {
+        clearTimeout(this._poll);
+        if (!running) return;
+        this._poll = setTimeout(() => {
+            if (location.hash === '#/tasks') this.renderList();
+        }, 4000);
     },
 
     async remove(id, after) {
@@ -173,8 +195,42 @@ const TasksPage = {
             const res = await App.api('POST', `/tasks/${id}/run`);
             App.toast(res.live ? i18n('tasks.runQueued') : i18n('tasks.runButNotLive'),
                       res.live ? 'success' : 'warning');
-            this.renderList();
+            // The scheduler picks the task up within a scan: render once it
+            // has, so the row turns to "running" instead of looking ignored.
+            if (res.live) this.pollWhileRunning(true);
+            else this.renderList();
         } catch (e) { App.toast(e.message, 'danger'); }
+    },
+
+    /** The task's past runs, newest first (GET /tasks/{id}/runs). The last
+     *  outcome alone cannot say whether a recurring task is reliable. */
+    async renderRuns(task) {
+        const box = document.getElementById('task-runs');
+        if (!box) return;
+        let runs = [];
+        try { runs = await App.api('GET', `/tasks/${encodeURIComponent(task.id)}/runs`); }
+        catch (e) { box.textContent = e.message; return; }
+        if (!runs.length) { box.textContent = i18n('tasks.runsEmpty'); return; }
+        const dur = (s) => s >= 60 ? `${Math.floor(s / 60)} min ${s % 60} s` : `${s} s`;
+        const row = (r) => {
+            const notes = [];
+            if (r.budget_hit) notes.push(`<span class="text-warning-emphasis"><i class="bi bi-exclamation-triangle"></i> ${i18n('tasks.budgetHit', { limit: r.budget_hit })}</span>`);
+            if ((r.task_ids || []).length > 1) notes.push(`<i class="bi bi-people"></i> ${i18n('tasks.sharedReply', { n: r.task_ids.length })}`);
+            if (r.manual) notes.push(i18n('tasks.runManual'));
+            const text = r.error || r.reply || '';
+            return `<tr>
+                <td class="text-nowrap">${App.esc(this.when(r.started))}</td>
+                <td>${this.resultBadge({ last_result: r.result, last_run: r.started, last_reply: text })}</td>
+                <td class="text-nowrap">${App.esc(dur(r.duration_s || 0))}</td>
+                <td>${r.tool_calls || 0}</td>
+                <td>${notes.join('<br>')}${notes.length && text ? '<br>' : ''}${App.esc(text)}</td>
+            </tr>`;
+        };
+        box.classList.remove('text-secondary');
+        box.innerHTML = `<div class="table-responsive"><table class="table table-sm small align-middle">
+            <thead><tr><th>${i18n('tasks.runsStarted')}</th><th>${i18n('tasks.colLast')}</th>
+                <th>${i18n('tasks.runsDuration')}</th><th>${i18n('tasks.runsTools')}</th><th></th></tr></thead>
+            <tbody>${runs.map(row).join('')}</tbody></table></div>`;
     },
 
     // ------------------------------------------------------------------- form
@@ -282,7 +338,9 @@ const TasksPage = {
                     ${isEdit ? `<button type="button" class="btn btn-outline-danger ms-auto" id="btn-del">${i18n('common.delete')}</button>` : ''}
                 </div>
             </form>
+            ${isEdit ? `<h5 class="mt-4">${i18n('tasks.runsTitle')}</h5><div id="task-runs" class="small text-secondary">…</div>` : ''}
         </div></div>`;
+        if (isEdit) this.renderRuns(task);
 
         const showPanes = () => {
             const kind = document.getElementById('f-mode').value;

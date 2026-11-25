@@ -534,7 +534,10 @@ stays idle whether it is live or not.
   every scan (toggling ``live`` from the UI takes effect within seconds, no
   restart; ``live: false`` is the kill switch) and spawns one wake per agent
   with work due. Tasks due at the same moment share ONE wake, so a slow
-  local-model turn can never build a backlog. Rescheduling happens only after a
+  local-model turn can never build a backlog; they share its outcome and reply
+  as well, and ``Task.last_wake_tasks`` records how many did, so the Tasks
+  page can say the reply is common. A wake of an agent whose working folder is
+  unreachable fails before the model starts (``FolderConfig.missing``). Rescheduling happens only after a
   successful wake (``TaskStore.advance``): run-once-on-success, with a failed
   run left due and retried. Per-agent runtime state (last wake, error streak,
   ``retry_after``, wake history) persists in
@@ -599,10 +602,20 @@ Endpoints: `GET /api/autonomy/status`, `POST /api/autonomy/{id}/wake` (manual
 trigger, also the main testing lever), `POST /api/autonomy/{id}/stop`,
 `POST /api/autonomy/{id}/resume`. Tasks are a resource of their own:
 `GET|POST /api/tasks`, `GET|PUT|DELETE /api/tasks/{id}`,
-`POST /api/tasks/{id}/run` (make it due now) and `GET /api/tasks/preview?cron=`
-(the next occurrences, so the form never has to reimplement cron in JS).
-`DELETE /api/agents/{id}` removes the agent's autonomy state and its tasks
+`POST /api/tasks/{id}/run` (make it due now), `GET /api/tasks/{id}/runs` (the
+runs that served it, from the agent's run log ``<autonomy>/<id>/runs.json``,
+last ``RUN_LOG_MAX`` = 50 wakes) and `GET /api/tasks/preview?cron=` (the next
+occurrences, so the form never has to reimplement cron in JS). Task reads carry
+``running_since`` while a wake runs them; it is never stored.
+`DELETE /api/agents/{id}` removes the agent's autonomy state, run log and tasks
 (long-term memory is deliberately kept).
+
+An agent travels as one file: `GET /api/agents/{id}/export` returns a .tar.gz
+with the agent, its tasks (definitions only), the user-layer tools it uses and
+their settings without secrets; `POST /api/agents/import` (raw body,
+``?overwrite=true`` to replace) installs it with ``live`` off and reports what is
+still missing there (model, MCP tools, secrets). Layout and safety rules:
+`server/app/agent_package.py`.
 
 `notify_user` both sends and appends the sent text to the target chat's own
 conversation — subject as its first line, the names of the files that arrived at

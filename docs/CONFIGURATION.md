@@ -13,7 +13,7 @@ touches your data:
 ```text
 ~/myagent/
 ├── bin/         # the CODE of a per-user or service-account install — replaced by every install.sh run, nothing of yours in here
-├── config/      # agents, models (API keys, 0600), MCP servers, settings — small & precious: back this up
+├── config/      # agents, models (API keys, 0600), MCP servers, settings, tools/ (tool settings, 0600) — small & precious: back this up
 ├── connectors/  # channel bindings (bot tokens and device keys, 0600), grants, address book
 ├── plugins/     # installed plugins — code, replaceable (see PLUGINS.md)
 ├── tools/       # your tools: the ones you (or the AI) create, plus your edits to the built-in ones
@@ -21,7 +21,8 @@ touches your data:
 ├── workspace/   # working directory for agents' file operations (+ _attachments/ scratch, _resources/ files shown in chat)
 ├── sessions/    # chat state: current, history, connector channels
 ├── memory/      # per-agent long-term memory (only for agents that enable it)
-├── autonomy/    # live agents' state and event queues (only for started agents)
+├── autonomy/    # live agents' state and run log (only for started agents)
+├── state/       # what each tool remembers between runs (MYAGENT_STATE_DIR), one folder per tool
 ├── cache/       # derived data, safe to delete (pdftext/: PDF text layers; index/: semantic indexes)
 └── logs/        # debug.log (only while the debug trace is on in Settings)
 ```
@@ -35,6 +36,13 @@ tar czf myagent-backup.tgz -C ~ myagent/config myagent/connectors
 
 The library is deliberately left out: it is large, and it is re-downloadable
 with [`library/fetch.py`](../library/README.md).
+
+To move or keep **one agent** rather than the whole install, use *Agents → ⋯ →
+Export (file)*: a `.tar.gz` with the agent, its scheduled tasks, the tools you
+wrote or edited for it and their settings. Passwords are never included.
+*Agents → Import* installs it on another instance, switched off, and lists what
+is still missing there: a model with that name, MCP servers, passwords to fill
+in on the tool pages.
 
 
 ## Image generation (optional)
@@ -197,7 +205,8 @@ own, and its own variable wins over the root:
 | `MYAGENT_WORKSPACE` | `$MYAGENT_HOME/workspace` | agents' file-operation root; when set it pins it, otherwise Settings → *Server* → *Working folder* can move it |
 | `MYAGENT_SESSIONS` | `$MYAGENT_HOME/sessions` | chat sessions |
 | `MYAGENT_MEMORY` | `$MYAGENT_HOME/memory` | per-agent long-term memory |
-| `MYAGENT_AUTONOMY` | `$MYAGENT_HOME/autonomy` | live agents' state and event queues |
+| `MYAGENT_AUTONOMY` | `$MYAGENT_HOME/autonomy` | live agents' state and run log |
+| `MYAGENT_STATE` | `$MYAGENT_HOME/state` | what tools remember between runs; each tool gets its subfolder as `MYAGENT_STATE_DIR` |
 | `MYAGENT_LIBRARY` | `$MYAGENT_HOME/library` | offline knowledge folder (library tools) |
 | `MYAGENT_CACHE` | `$MYAGENT_HOME/cache` | derived data — currently the PDF text layers the library search reads; deleting it only costs one re-extraction |
 | `MYAGENT_PLUGINS` | `$MYAGENT_HOME/plugins` | installed plugins |

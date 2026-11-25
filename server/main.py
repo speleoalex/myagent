@@ -196,7 +196,7 @@ ensure_tools_dir()
 log.info("Tools: user dir %s over bundled catalog %s", TOOLS_DIR, DEFAULT_TOOLS_DIR)
 tool_registry = ToolRegistry(TOOLS_DIR, workdir=config.workspace_dir, app_dir=APP_DIR,
                              bundled_dir=DEFAULT_TOOLS_DIR,
-                             tool_env=config.tool_env())
+                             tool_env=config.tool_env(), state_dir=config.STATE_DIR)
 tool_registry.register_internal("call_agent", call_agent_handler)
 # The other half of delegation: what a sub-agent reported in a PAST turn is
 # nowhere in conversation[] (a `tool` message never survives the scaffolding

@@ -337,6 +337,8 @@ class AgentExecutor:
         # mid-run it says the job is done. Set alongside `unattended`, by the
         # same caller and for the same reason.
         self.due_task_ids: set[str] = set()
+        # Set by run_stream: which limit cut the last turn short, "" if none.
+        self.budget_hit: str = ""
         # Tools whose schemas must be in the payload from the FIRST iteration,
         # even under Agent.lazy_tools: the caller's prompt names them, and a
         # prompt that says "use notify_user" while notify_user is not in the
@@ -1994,6 +1996,11 @@ class AgentExecutor:
         delivery_round = False
         delivery_offered = False
         delivery_calls = 0
+        # Which limit cut this turn short, "" when none did. Public: the
+        # scheduler records it with the run, because a wake that ran out of
+        # budget looks finished — it answered — while part of the task was
+        # never done (observed: a daily report cut at call 21 of 22).
+        self.budget_hit = ""
 
         while iterations < self.agent.max_iterations:
             iterations += 1
@@ -2233,6 +2240,7 @@ class AgentExecutor:
                                         f"({delivery_calls}/{_DELIVERY_CALLS_MAX})")
                         free.append(tc)
                 if len(free) < len(tool_calls):
+                    self.budget_hit = "max_tool_calls"
                     # The agent holds the delivery tool of this kind of turn
                     # (notify_user unattended, where nobody would read a forced
                     # answer; write_pdf attended, where the answer cannot be the
@@ -2484,6 +2492,8 @@ class AgentExecutor:
             final_text = f"ERROR: LLM call failed: {stream_error}"
         elif not final_text and iterations >= self.agent.max_iterations:
             final_text = prompts.NO_FINAL_RESPONSE
+        if iterations >= self.agent.max_iterations and not self.budget_hit:
+            self.budget_hit = "max_iterations"
 
         # Whole window back to the caller: system, EVERY history entry (the
         # foreign ones too — they were only kept out of the prompt), then what

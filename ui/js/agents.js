@@ -1,3 +1,7 @@
+// Below this many tool calls per turn a live agent gets a warning: the chat
+// default (5) cuts a scheduled job short. One wake of cerca-lavoro used 45.
+const LIVE_MIN_TOOL_CALLS = 10;
+
 const AgentsPage = {
     async render(params) {
         // #/agents/new/<sourceId> opens the form pre-filled from that agent —
@@ -33,7 +37,13 @@ const AgentsPage = {
         App.container.innerHTML = `
             <div class="d-flex flex-wrap gap-2 justify-content-between align-items-center mb-3">
                 <h3 class="mb-0"><i class="bi bi-cpu"></i> ${i18n('agents.title')}</h3>
-                <a href="#/agents/new" class="btn btn-primary"><i class="bi bi-plus-lg"></i> ${i18n('agents.new')}</a>
+                <div class="d-flex gap-2">
+                    <label class="btn btn-outline-secondary mb-0" title="${App.escAttr(i18n('agents.importHint'))}">
+                        <i class="bi bi-box-arrow-in-down"></i> ${i18n('agents.importPackage')}
+                        <input type="file" id="agent-import" accept=".gz,.tgz,application/gzip" hidden>
+                    </label>
+                    <a href="#/agents/new" class="btn btn-primary"><i class="bi bi-plus-lg"></i> ${i18n('agents.new')}</a>
+                </div>
             </div>
             <div class="row g-3">
                 ${cards.length === 0 ? `<div class="col-12 text-secondary">${i18n('agents.empty')}</div>` : ''}
@@ -51,6 +61,14 @@ const AgentsPage = {
         App.container.querySelectorAll('[data-clone]').forEach(btn => {
             btn.onclick = () => { location.hash = `#/agents/new/${btn.dataset.clone}`; };
         });
+        App.container.querySelectorAll('[data-export]').forEach(btn => {
+            btn.onclick = () => this.exportPackage(btn.dataset.export);
+        });
+        document.getElementById('agent-import').onchange = (e) => {
+            const file = e.target.files[0];
+            e.target.value = '';  // the same file can be picked again after a fix
+            if (file) this.importPackage(file);
+        };
         // Start/stop = flip the persisted `live` flag: the scheduler notices
         // within one scan, and a started agent survives server restarts.
         App.container.querySelectorAll('[data-live-toggle]').forEach(btn => {
@@ -66,6 +84,57 @@ const AgentsPage = {
                 }
             };
         });
+    },
+
+    /** Download the agent as one file (GET /agents/{id}/export). Through fetch,
+     *  not a plain link: the request must carry the API key header. */
+    async exportPackage(agentId) {
+        try {
+            const res = await fetch(App.apiUrl(`/agents/${encodeURIComponent(agentId)}/export`),
+                                    { headers: App.authHeaders() });
+            if (!res.ok) throw new Error(App.errorText(await res.text()) || `HTTP ${res.status}`);
+            const url = URL.createObjectURL(await res.blob());
+            const a = Object.assign(document.createElement('a'),
+                                    { href: url, download: `myagent-${agentId}.tar.gz` });
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
+        } catch (err) { App.toast(err.message, 'danger'); }
+    },
+
+    /** Install a package (POST /agents/import, raw body). A conflict is asked
+     *  about, never overwritten silently; what the package could not bring
+     *  (model, MCP tools, passwords) is listed, because the agent will not
+     *  work until it is there. */
+    async importPackage(file, overwrite = false) {
+        const send = () => fetch(App.apiUrl('/agents/import' + (overwrite ? '?overwrite=true' : '')), {
+            method: 'POST', body: file,
+            headers: { 'Content-Type': 'application/gzip', ...App.authHeaders() },
+        });
+        try {
+            const res = await send();
+            const text = await res.text();
+            if (res.status === 409 && !overwrite) {
+                let what = text;
+                try { what = JSON.parse(text).detail.conflicts.join(', '); } catch (e) { /* raw */ }
+                if (confirm(i18n('agents.importConflict', { what }))) {
+                    return this.importPackage(file, true);
+                }
+                return;
+            }
+            if (!res.ok) throw new Error(App.errorText(text) || `HTTP ${res.status}`);
+            const r = JSON.parse(text);
+            const todo = [];
+            if (r.missing_model) todo.push(i18n('agents.importNoModel', { model: r.missing_model }));
+            if (r.external_tools.length) todo.push(i18n('agents.importMcp', { tools: r.external_tools.join(', ') }));
+            for (const [tool, keys] of Object.entries(r.missing_settings)) {
+                todo.push(i18n('agents.importSecrets', { tool, keys: keys.join(', ') }));
+            }
+            App.toast(i18n('agents.imported', { id: r.agent_id }));
+            if (todo.length) alert(i18n('agents.importTodo') + '\n\n• ' + todo.join('\n• '));
+            location.hash = `#/agents/${encodeURIComponent(r.agent_id)}`;
+        } catch (err) { App.toast(err.message, 'danger'); }
     },
 
     /** Translated label of an autonomy state (the API's raw enum values were
@@ -147,6 +216,8 @@ const AgentsPage = {
                             <span class="badge bg-info">${App.esc(toolCount === 1
                                 ? i18n('agents.toolsBadgeOne') : i18n('agents.toolsBadge', { count: toolCount }))}</span>
                             ${nat && nat.modified ? `<span class="badge bg-warning text-dark">${i18n('agents.statusModified')}</span>` : ''}
+                            ${a.folder_missing ? `<span class="badge bg-danger" title="${App.escAttr(a.folder.path)}">
+                                <i class="bi bi-folder-x"></i> ${i18n('agents.folderMissingBadge')}</span>` : ''}
                         </div>
                     </div>
                     <div class="card-footer d-flex gap-2 align-items-center">
@@ -165,6 +236,8 @@ const AgentsPage = {
                                     <i class="bi bi-diagram-3"></i> ${i18n('agents.preview')}</button></li>
                                 <li><button type="button" class="dropdown-item" data-clone="${id}">
                                     <i class="bi bi-copy"></i> ${i18n('agents.clone')}</button></li>
+                                <li><button type="button" class="dropdown-item" data-export="${id}">
+                                    <i class="bi bi-box-arrow-up"></i> ${i18n('agents.exportPackage')}</button></li>
                                 <li><hr class="dropdown-divider"></li>
                                 <li><button type="button" class="dropdown-item" data-live-toggle="${id}">
                                     <i class="bi ${a.live ? 'bi-stop-fill text-danger' : 'bi-play-fill text-success'}"></i>
@@ -1080,6 +1153,12 @@ const AgentsPage = {
                                         </button>
                                     </div>
                                     <div class="form-text">${i18n('agents.folderHint')}</div>
+                                    <!-- The SAVED folder, checked by the server (folder_missing):
+                                         shown until the path is edited, since a new path has not
+                                         been checked yet. -->
+                                    <div id="folder-missing-warn" class="form-text text-danger-emphasis ${agent.folder_missing ? '' : 'd-none'}">
+                                        <i class="bi bi-exclamation-triangle"></i> ${i18n('agents.folderMissing')}
+                                    </div>
                                 </div>
                                 <div class="mb-3">
                                     <label class="form-label" for="f-model">${i18n('agents.model')}</label>
@@ -1212,6 +1291,9 @@ const AgentsPage = {
                                 ${this.relocatedBox(relocated.autonomy, isRelocatedOn, `
                                         <div id="live-warn" class="form-text text-warning-emphasis d-none">
                                             <i class="bi bi-exclamation-triangle"></i> ${i18n('agents.liveNoNotify')}
+                                        </div>
+                                        <div id="live-budget-warn" class="form-text text-warning-emphasis d-none">
+                                            <i class="bi bi-exclamation-triangle"></i> ${i18n('agents.liveSmallBudget', { n: LIVE_MIN_TOOL_CALLS })}
                                         </div>
                                         <hr class="my-2">
                                         <!-- Not a tool grant (no .tool-check): a permission over the two
@@ -1408,6 +1490,11 @@ const AgentsPage = {
             const notify = document.getElementById('tool-notify_user');
             const liveWarn = document.getElementById('live-warn');
             if (liveWarn) liveWarn.classList.toggle('d-none', !(d.live && notify && !notify.checked));
+            // The chat-sized default stops a scheduled job halfway, and nobody is
+            // there to say "go on" (cerca-lavoro needed 45 calls a run).
+            const budgetWarn = document.getElementById('live-budget-warn');
+            if (budgetWarn) budgetWarn.classList.toggle('d-none',
+                !(d.live && d.max_tool_calls < LIVE_MIN_TOOL_CALLS));
 
             // notify_user granted but nobody it could possibly reach. BOTH halves
             // are needed: with an address book a blank default is legitimate — the
@@ -1563,7 +1650,11 @@ const AgentsPage = {
         document.getElementById('agent-form').addEventListener('change', refreshState);
         // The only text field driving an indicator. `change` alone would leave the
         // General dot stale until the field loses focus.
-        document.getElementById('f-folder').addEventListener('input', refreshState);
+        document.getElementById('f-folder').addEventListener('input', (e) => {
+            document.getElementById('folder-missing-warn').classList.toggle(
+                'd-none', !agent.folder_missing || e.target.value.trim() !== folderPath);
+            refreshState();
+        });
         App.wireFolderPicker('btn-folder-browse', 'f-folder');
 
         // Remember the tab so reopening the SAME agent lands where you left off,

@@ -19,10 +19,19 @@ def _tasks(request: Request):
     return request.app.state.tasks
 
 
+def _with_state(request: Request, task: dict) -> dict:
+    """A task plus ``running_since``: when the wake running it started, "" when
+    idle. Read from the scheduler, never stored. ``POST /run`` answers at once,
+    so without this a caller can only poll the task file to see a run happen."""
+    since = request.app.state.autonomy.running_since(task.get("agent_id", ""),
+                                                     task.get("id", ""))
+    return {**task, "running_since": since}
+
+
 @router.get("")
 async def list_tasks(request: Request, agent_id: str = ""):
     """Every task, soonest first; optionally only one agent's."""
-    return _tasks(request).list_all(agent_id)
+    return [_with_state(request, t) for t in _tasks(request).list_all(agent_id)]
 
 
 # Fixed routes BEFORE /{task_id}, or "preview" is captured as an id.
@@ -41,7 +50,16 @@ async def preview_cron(cron: str, n: int = 3):
 
 @router.get("/{task_id}")
 async def get_task(task_id: str, request: Request):
-    return get_or_404(_tasks(request).store, task_id, "Task")
+    return _with_state(request, get_or_404(_tasks(request).store, task_id, "Task"))
+
+
+@router.get("/{task_id}/runs")
+async def task_runs(task_id: str, request: Request):
+    """The past runs of this task, newest first: start, duration, outcome,
+    tool calls, the limit that cut it short. A wake serves every task due at
+    once, so a run listed here may have served others too (``task_ids``)."""
+    task = get_or_404(_tasks(request).store, task_id, "Task")
+    return request.app.state.autonomy.runs(task["agent_id"], task_id)
 
 
 @router.post("", status_code=201)
@@ -62,8 +80,9 @@ async def update_task(task_id: str, task: Task, request: Request):
     # on disk so a stale form cannot erase the last run's outcome.
     stored = store.get(task_id) or {}
     data = task.model_dump()
-    for key in ("last_run", "last_result", "last_reply", "created_at"):
-        data[key] = stored.get(key, "")
+    for key in ("last_run", "last_result", "last_reply", "last_wake_tasks",
+                "created_at"):
+        data[key] = stored.get(key, Task.model_fields[key].default)
     return store.save(Task(**data))
 
 

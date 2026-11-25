@@ -201,6 +201,17 @@ LIBRARY_DIR = _runtime_dir("MYAGENT_LIBRARY", "library")
 # search extracts. Losing it costs one re-extraction, never information.
 CACHE_DIR = _runtime_dir("MYAGENT_CACHE", "cache")
 
+# What a tool must remember from one run to the next (ids already seen, a
+# cursor), one subfolder per tool, handed to it as MYAGENT_STATE_DIR. Not the
+# workspace, which holds the user's files, and not the cache: deleting this
+# makes a recurring tool report everything as new again.
+STATE_DIR = _runtime_dir("MYAGENT_STATE", "state")
+
+# Values of the settings a tool declares in the "config" block of its
+# tool.json, one 0600 file per tool (they may be credentials). Under CONFIG_DIR
+# because they are configuration, backed up with the rest of it.
+TOOL_CONFIG_DIR = CONFIG_DIR / "tools"
+
 
 def tool_env() -> dict[str, str]:
     """Resolved runtime paths exported to every tool subprocess.

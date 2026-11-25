@@ -52,7 +52,10 @@ agent needs more.
 - **`notify_user`** — it reaches you through the
   [connectors plugin](../connectors/README.md): a Telegram message, an email,
   or a sentence spoken by a voice satellite. Recipients are contacts addressed
-  by **name**, and the agent's autonomy settings hold the default one. Besides
+  by **name**, and the agent's autonomy settings hold the default one. When
+  several bots could carry the message, the agent's own bots come first, then
+  the one the person last talked to; the agent form shows, per contact, which
+  bot that is and which agent will answer a reply. Besides
   the text it takes an optional **subject** and **attachments** (files from the
   workspace, such as a report the agent just wrote): on email they become the
   Subject header and real attachments, on Telegram the first line and one
@@ -82,7 +85,15 @@ optional:
 
 A failed wake does **not** advance the schedule — the task stays due and is
 retried — but the failure is still recorded, so the Tasks page shows red
-instead of the last success.
+instead of the last success. A wake whose every `notify_user` call was refused
+is marked `undelivered` (yellow) rather than `acted`: the work was done, so it
+is not retried, but nobody received it. A task's page lists its last runs —
+start, duration, tool calls, outcome — and flags a run cut short by
+`max_tool_calls` or `max_iterations`, since such a run looks finished but may
+have skipped part of the job. A live agent with fewer than 10 tool calls per
+turn gets a warning on its form: the chat default (5) is often too few for a
+scheduled job. If the agent's working folder is unreachable (an unmounted
+disk), the wake fails before the model starts and is retried like any error.
 
 **A failing agent is never abandoned.** Each failure waits longer than the last
 (1 minute, then 2, 4, 8, … capped at 30) and it keeps trying indefinitely.

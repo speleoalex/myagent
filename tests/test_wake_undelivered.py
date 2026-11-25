@@ -102,6 +102,21 @@ check(t["next_at"] != "2026-11-25T07:00:00", "the task moved on (no retry of don
 check(st["last_result"] == "undelivered", "agent state records it too")
 check(st.get("consecutive_errors", 0) == 0 and "retry_after" not in st,
       "not an error: no streak, no backoff")
+check(t["last_wake_tasks"] == 1, "a wake with one task says so (no shared-reply mark)")
+
+tasks.store.save("task-greet", dict(
+    id="task-greet", agent_id="master", cron="0 7 * * *",
+    prompt="Buongiorno", next_at="2026-11-25T07:00:00", enabled=True))
+tasks.store.save("task-weather", dict(
+    id="task-weather", agent_id="master", cron="0 7 * * *",
+    prompt="Meteo di oggi", next_at="2026-11-25T07:00:00", enabled=True))
+service._finish_wake(agent, cfg, [tasks.get("task-greet"), tasks.get("task-weather")],
+                     {"reply": "Buongiorno inviato", "tool_calls": 3, "error": None,
+                      "delivery_error": ""},
+                     timed_out=False, stopped=False, manual=False)
+check(tasks.get("task-weather")["last_wake_tasks"] == 2
+      and tasks.get("task-greet")["last_wake_tasks"] == 2,
+      "two tasks in one wake: both rows say their reply is shared by 2")
 
 t = run({"reply": "Meteo inviato", "tool_calls": 2})
 check(t["last_result"] == "acted", "delivered -> acted")
