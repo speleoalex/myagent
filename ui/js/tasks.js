@@ -193,8 +193,10 @@ const TasksPage = {
     async runNow(id) {
         try {
             const res = await App.api('POST', `/tasks/${id}/run`);
-            App.toast(res.live ? i18n('tasks.runQueued') : i18n('tasks.runButNotLive'),
-                      res.live ? 'success' : 'warning');
+            // `started` is absent on an older server, which only ever queued.
+            const key = !res.live ? 'tasks.runButNotLive'
+                : res.started === false ? 'tasks.runAfterCurrent' : 'tasks.runQueued';
+            App.toast(i18n(key), key === 'tasks.runQueued' ? 'success' : 'warning');
             // The scheduler picks the task up within a scan: render once it
             // has, so the row turns to "running" instead of looking ignored.
             if (res.live) this.pollWhileRunning(true);

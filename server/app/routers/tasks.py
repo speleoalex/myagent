@@ -100,14 +100,22 @@ async def run_task(task_id: str, request: Request):
 
     It also lifts the agent's error backoff: after a failure streak the next
     retry can be half an hour away, and a "run now" that silently waits for it
-    is the button lying. Pressing it is the user saying the cause is fixed."""
+    is the button lying. Pressing it is the user saying the cause is fixed.
+
+    For the same reason the wake is started HERE and not left to the scheduler,
+    which honours max_wakes_per_hour: on the Orin four wakes killed by service
+    restarts used up the hour, and the button answered "queued" for a task
+    that then sat there (2026-11-25). ``started`` is False when a wake is
+    already running: the task stays due and follows it."""
     data = _tasks(request).run_now(task_id)
     if data is None:
         raise HTTPException(404, f"Task not found: {task_id}")
-    await request.app.state.autonomy.resume(data["agent_id"])
+    autonomy = request.app.state.autonomy
+    await autonomy.resume(data["agent_id"])
     agent = request.app.state.stores.agents.get(data["agent_id"]) or {}
-    return {"ok": True, "next_at": data["next_at"],
-            "live": bool(agent.get("enabled", True) and agent.get("live"))}
+    live = bool(agent.get("enabled", True) and agent.get("live"))
+    started = live and await autonomy.wake_now(data["agent_id"])
+    return {"ok": True, "next_at": data["next_at"], "live": live, "started": started}
 
 
 def _require_agent(request: Request, agent_id: str) -> None:

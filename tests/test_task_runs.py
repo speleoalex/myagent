@@ -122,6 +122,25 @@ check("running_since" not in tasks.get("task-search"), "it is never stored")
 service._running.pop("cv")
 check(client.get("/api/tasks/task-search").json()["running_since"] == "", "cleared when done")
 
+print("run now")
+# The button starts the wake itself: left to the scheduler it waited behind
+# max_wakes_per_hour while answering "queued" (Orin, 2026-11-25).
+woken: list[str] = []
+
+
+async def fake_wake_now(agent_id: str) -> bool:
+    woken.append(agent_id)
+    return True
+
+service.wake_now = fake_wake_now
+res = client.post("/api/tasks/task-search/run").json()
+check(woken == ["cv"] and res["started"] is True and res["live"] is True,
+      "a live agent is woken at once, whatever the rate limit says")
+agents.save("cv", Agent(id="cv", name="Cerca lavoro", model_id="m", live=False).model_dump())
+res = client.post("/api/tasks/task-search/run").json()
+check(woken == ["cv"] and res["started"] is False and res["live"] is False,
+      "an agent that is not live is not woken: the task only becomes due")
+
 print("drop")
 service.drop_agent("cv")
 check(service.runs("cv") == [], "deleting the agent drops its run log")
