@@ -105,6 +105,60 @@ const App = {
         const themeMeta = document.querySelector('meta[name="theme-color"]');
         if (themeMeta) themeMeta.content = color || '#212529';
         this._applyFavicon(label, color);
+        this._applyAccent(color);
+    },
+
+    /** The instance color as the accent of the whole UI, not just the navbar:
+     * Bootstrap 5.3 writes its blue as literals into buttons, checks and focus
+     * rings, so style.css re-points those at the --accent-* variables set
+     * here, under :root[data-accent]. Links get a variant darkened (light
+     * theme) or lightened (dark theme) to 4.5:1, because a color picked for a
+     * navbar is not necessarily readable as text on the page background. */
+    _applyAccent(color) {
+        const root = document.documentElement;
+        const names = ['--accent', '--accent-rgb', '--accent-hover', '--accent-contrast',
+            '--accent-link-light', '--accent-link-light-rgb', '--accent-link-dark', '--accent-link-dark-rgb'];
+        if (!color) {
+            delete root.dataset.accent;
+            names.forEach(n => root.style.removeProperty(n));
+            return;
+        }
+        const rgb = this._rgb(color);
+        const css = (c) => `rgb(${c.join(',')})`;
+        const linkLight = this._readableOn(rgb, [255, 255, 255]);
+        const linkDark = this._readableOn(rgb, [33, 37, 41]);   // Bootstrap's dark body
+        const values = [color, rgb.join(','), css(this._mix(rgb, [0, 0, 0], 0.15)),
+            this._contrastText(color), css(linkLight), linkLight.join(','), css(linkDark), linkDark.join(',')];
+        names.forEach((n, i) => root.style.setProperty(n, values[i]));
+        root.dataset.accent = '';
+    },
+
+    _rgb(hex) {
+        const n = parseInt(hex.slice(1), 16);
+        return [n >> 16, (n >> 8) & 255, n & 255];
+    },
+
+    _mix(rgb, target, t) {
+        return rgb.map((c, i) => Math.round(c + (target[i] - c) * t));
+    },
+
+    /** WCAG relative luminance of an [r, g, b] color. */
+    _luminance(rgb) {
+        const lum = (c) => { c /= 255; return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; };
+        return 0.2126 * lum(rgb[0]) + 0.7152 * lum(rgb[1]) + 0.0722 * lum(rgb[2]);
+    },
+
+    /** `rgb` moved toward black or white, whichever is away from `bg`, just
+     * far enough to read as text on it (contrast 4.5:1). */
+    _readableOn(rgb, bg) {
+        const lb = this._luminance(bg);
+        const target = lb > 0.5 ? [0, 0, 0] : [255, 255, 255];
+        for (let t = 0; t <= 1; t += 0.05) {
+            const c = this._mix(rgb, target, t);
+            const lc = this._luminance(c);
+            if ((Math.max(lc, lb) + 0.05) / (Math.min(lc, lb) + 0.05) >= 4.5) return c;
+        }
+        return target;
     },
 
     /** With several MyAgent tabs open the favicon is all that shows of each:
@@ -127,10 +181,7 @@ const App = {
 
     /** Black or white, whichever reads on this background (WCAG luminance). */
     _contrastText(hex) {
-        const n = parseInt(hex.slice(1), 16);
-        const lum = (c) => { c /= 255; return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; };
-        const L = 0.2126 * lum(n >> 16) + 0.7152 * lum((n >> 8) & 255) + 0.0722 * lum(n & 255);
-        return L > 0.4 ? '#000' : '#fff';
+        return this._luminance(this._rgb(hex)) > 0.4 ? '#000' : '#fff';
     },
 
     /** Publish the navbar's REAL height as --nav-h, so the CSS that sizes the

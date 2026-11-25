@@ -1380,3 +1380,75 @@ body {
 .msg-content .md-img {
     cursor: zoom-in;
 }
+
+/* The instance color (Settings -> Server) as the accent, set by
+   App._applyAccent. Bootstrap 5.3 bakes its blue into each component's own
+   variables, so re-pointing --bs-primary alone would leave buttons blue. */
+:root[data-accent] {
+    --bs-primary: var(--accent);
+    --bs-primary-rgb: var(--accent-rgb);
+    --bs-focus-ring-color: rgba(var(--accent-rgb), 0.25);
+    --accent-link: var(--accent-link-light);
+    --accent-link-rgb: var(--accent-link-light-rgb);
+}
+/* Three attributes so it beats Bootstrap's own [data-bs-theme=dark] block. */
+:root[data-accent][data-bs-theme="dark"] {
+    --accent-link: var(--accent-link-dark);
+    --accent-link-rgb: var(--accent-link-dark-rgb);
+}
+:root[data-accent][data-bs-theme] {
+    --bs-link-color: var(--accent-link);
+    --bs-link-color-rgb: var(--accent-link-rgb);
+    --bs-link-hover-color: var(--accent-link);
+    --bs-link-hover-color-rgb: var(--accent-link-rgb);
+}
+[data-accent] .btn-primary {
+    --bs-btn-color: var(--accent-contrast);
+    --bs-btn-bg: var(--accent);
+    --bs-btn-border-color: var(--accent);
+    --bs-btn-hover-color: var(--accent-contrast);
+    --bs-btn-hover-bg: var(--accent-hover);
+    --bs-btn-hover-border-color: var(--accent-hover);
+    --bs-btn-focus-shadow-rgb: var(--accent-rgb);
+    --bs-btn-active-color: var(--accent-contrast);
+    --bs-btn-active-bg: var(--accent-hover);
+    --bs-btn-active-border-color: var(--accent-hover);
+    --bs-btn-disabled-color: var(--accent-contrast);
+    --bs-btn-disabled-bg: var(--accent);
+    --bs-btn-disabled-border-color: var(--accent);
+}
+[data-accent] .btn-outline-primary {
+    --bs-btn-color: var(--accent-link);
+    --bs-btn-border-color: var(--accent);
+    --bs-btn-hover-color: var(--accent-contrast);
+    --bs-btn-hover-bg: var(--accent);
+    --bs-btn-hover-border-color: var(--accent);
+    --bs-btn-focus-shadow-rgb: var(--accent-rgb);
+    --bs-btn-active-color: var(--accent-contrast);
+    --bs-btn-active-bg: var(--accent);
+    --bs-btn-active-border-color: var(--accent);
+    --bs-btn-disabled-color: var(--accent-link);
+    --bs-btn-disabled-border-color: var(--accent);
+}
+[data-accent] .dropdown-menu {
+    --bs-dropdown-link-active-color: var(--accent-contrast);
+    --bs-dropdown-link-active-bg: var(--accent);
+}
+[data-accent] .list-group {
+    --bs-list-group-active-color: var(--accent-contrast);
+    --bs-list-group-active-bg: var(--accent);
+    --bs-list-group-active-border-color: var(--accent);
+}
+[data-accent] .text-bg-primary {
+    color: var(--accent-contrast) !important;
+}
+[data-accent] .form-check-input:checked {
+    background-color: var(--accent);
+    border-color: var(--accent);
+}
+[data-accent] .form-control:focus,
+[data-accent] .form-select:focus,
+[data-accent] .form-check-input:focus {
+    border-color: rgba(var(--accent-rgb), 0.6);
+    box-shadow: 0 0 0 0.25rem rgba(var(--accent-rgb), 0.25);
+}
