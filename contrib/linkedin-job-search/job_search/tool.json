@@ -1,0 +1,45 @@
+{
+  "name": "Job Search",
+  "description": "Search job postings on LinkedIn (public listings, no login). action=daily runs EVERY search listed in a criteria file in one call and returns only the postings first seen today, without duplicates, plus the outcome of each search: use it for a scheduled run. action=search runs one search (one JSON line per posting, new = first seen today). action=detail returns the full description and the criteria of one posting.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "action": {
+        "type": "string",
+        "enum": ["daily", "search", "detail"],
+        "description": "daily = every search of the criteria file; search = one search; detail = full text of one posting"
+      },
+      "criteria_file": {
+        "type": "string",
+        "description": "daily: absolute path of the criteria file (its '## Ricerche ...' section lists the searches)"
+      },
+      "keywords": {
+        "type": "string",
+        "description": "search: job title or skills, e.g. \"responsabile sviluppo software\" or \"AI engineer\""
+      },
+      "location": {
+        "type": "string",
+        "description": "search: city or country, e.g. \"Genova\" or \"Italia\" (default Italia)"
+      },
+      "remote": {
+        "type": "boolean",
+        "description": "search: only fully remote postings"
+      },
+      "days": {
+        "type": "integer",
+        "description": "search: posted in the last N days, 1-30 (default 1). daily takes it from the criteria file"
+      },
+      "max_results": {
+        "type": "integer",
+        "description": "search/daily: maximum postings per search, 1-75 (default 25 for search, 20 for daily)"
+      },
+      "job_id": {
+        "type": "string",
+        "description": "detail: the numeric id returned by search or daily"
+      }
+    },
+    "required": ["action"]
+  },
+  "timeout": 300,
+  "max_output": 20000
+}

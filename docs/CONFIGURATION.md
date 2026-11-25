@@ -235,7 +235,7 @@ runtime state (read by `install.sh`; default `$MYAGENT_HOME/bin`, or
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `MYAGENT_OLLAMA_DEFAULT_CTX` | `4096` | assumed context window of an Ollama model when not probed |
+| `MYAGENT_OLLAMA_DEFAULT_CTX` | `4096` | assumed context window of a local Ollama model when not probed (a cloud model uses its declared maximum) |
 | `MYAGENT_MAX_OUTPUT_CEILING` | `32768` | cap on the `max_tokens` derived from a probed model; an explicit `max_tokens` in the model options bypasses it |
 | `MYAGENT_CHANNEL_ROTATE_BYTES` | `2 MiB` | size at which a channel session is archived and restarted |
 | `MYAGENT_MCP_SHUTDOWN_TIMEOUT` | `10` | seconds shutdown waits for MCP servers to close |

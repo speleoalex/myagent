@@ -186,6 +186,9 @@ asks for it rather than requiring configuration
   the payload). Without one, MyAgent assumes what Ollama serves by default
   (4096, or `/api/ps`; override the assumption with
   `MYAGENT_OLLAMA_DEFAULT_CTX`) instead of silently multiplying VRAM use.
+  A *cloud* model (tag `cloud` or `*-cloud`) is the exception: it runs on
+  ollama.com, uses no local VRAM and never appears in `/api/ps`, so its
+  trained maximum is its window.
 - **openai (remote)** — a `/v1/models` entry's `context_length` /
   `max_model_len` when the gateway declares one (OpenRouter, vLLM, LiteLLM).
   Precedence: explicit → probed → 32768 safety net. The value only bounds

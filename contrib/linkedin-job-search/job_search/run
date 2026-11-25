@@ -1,0 +1,317 @@
+#!/usr/bin/env python3
+"""LinkedIn public job search (guest API, no login), standard library only.
+
+LinkedIn serves the same cards to its logged-out search page through
+/jobs-guest/; Indeed answers 403 to scripts and InfoJobs Italia has closed,
+so this is the one large board reachable without an account.
+
+"new" means first seen TODAY, not "never returned before today's call": a
+daily run that fails halfway and is retried still gets the same postings
+flagged as new, while yesterday's postings stop showing up as news.
+
+action=daily runs EVERY search listed in a criteria file in one call. Asked to
+run twelve searches one by one, the model ran ten — it judged two redundant —
+and wrote "no search failed" in its report (2026-11-25). The list is now
+executed here, deterministically, and the model is left the part that needs
+judgment: reading and ranking the postings.
+"""
+import datetime
+import html
+import json
+import os
+import re
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+SEARCH_URL = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
+DETAIL_URL = "https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/{}"
+JOB_URL = "https://www.linkedin.com/jobs/view/{}"
+USER_AGENT = ("Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/130.0 Safari/537.36")
+TIMEOUT = 20
+MAX_RESULTS_CAP = 75
+DESCRIPTION_CAP = 6000
+SEEN_RETENTION_DAYS = 120
+# LinkedIn answers 429 to bursts; it clears within seconds. None = give up.
+RETRY_WAITS = (5, 15, 30, None)
+# Pause between two searches of a daily run: twelve back to back is a burst.
+PAUSE_BETWEEN_SEARCHES = 3
+# The text "Italia" alone is matched loosely (a remote search returned US
+# postings); the country geoId pins it.
+COUNTRY_GEO_IDS = {"italia": "103350119", "italy": "103350119"}
+
+
+def fail(message):
+    sys.stderr.write(message + "\n")
+    sys.exit(1)
+
+
+def fetch(url):
+    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT,
+                                                   "Accept-Language": "it-IT,it;q=0.9,en;q=0.8"})
+    for wait in RETRY_WAITS:
+        try:
+            with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
+                return response.read().decode("utf-8", "replace")
+        except urllib.error.HTTPError as error:
+            if error.code != 429 or wait is None:
+                raise
+            time.sleep(wait)
+
+
+def text_of(fragment):
+    fragment = re.sub(r"<br\s*/?>|</(p|li|div|h\d)>", "\n", fragment, flags=re.I)
+    fragment = re.sub(r"<li[^>]*>", "- ", fragment, flags=re.I)
+    fragment = html.unescape(re.sub(r"<[^>]+>", " ", fragment))
+    lines = (re.sub(r"[ \t ]+", " ", line).strip() for line in fragment.splitlines())
+    return "\n".join(line for line in lines if line)
+
+
+def first(pattern, source):
+    match = re.search(pattern, source, re.S)
+    return text_of(match.group(1)) if match else ""
+
+
+# ------------------------------------------------------------------ seen ids
+def seen_store_paths():
+    """(where the store lives, where an older version kept it).
+
+    MYAGENT_STATE_DIR is the tool's own folder, kept between runs (MyAgent
+    after 2026-11-25). Before that the store sat in the workspace, among the
+    user's files; it is still read from there once, so no posting already
+    seen comes back as new after the upgrade."""
+    workspace = os.environ.get("MYAGENT_WORKSPACE") or os.getcwd()
+    legacy = os.path.join(workspace, "job_search", "seen.json")
+    state = os.environ.get("MYAGENT_STATE_DIR")
+    return (os.path.join(state, "seen.json") if state else legacy), legacy
+
+
+def load_seen():
+    path, legacy = seen_store_paths()
+    for candidate in (path, legacy):
+        try:
+            with open(candidate, encoding="utf-8") as handle:
+                return json.load(handle)
+        except (OSError, ValueError):
+            continue
+    return {}
+
+
+def save_seen(seen):
+    path, _ = seen_store_paths()
+    cutoff = (datetime.date.today() - datetime.timedelta(days=SEEN_RETENTION_DAYS)).isoformat()
+    seen = {job_id: day for job_id, day in seen.items() if day >= cutoff}
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    temporary = path + ".tmp"
+    with open(temporary, "w", encoding="utf-8") as handle:
+        json.dump(seen, handle)
+    os.replace(temporary, path)
+
+
+def mark_new(jobs, seen):
+    today = datetime.date.today().isoformat()
+    for job in jobs:
+        job["new"] = seen.setdefault(job["id"], today) == today
+
+
+# ------------------------------------------------------------------- search
+def parse_cards(page):
+    jobs = []
+    for card in page.split("<li>")[1:]:
+        job_id = re.search(r"urn:li:jobPosting:(\d+)", card)
+        if not job_id:
+            continue
+        jobs.append({
+            "id": job_id.group(1),
+            "title": first(r'base-search-card__title">(.*?)</h3>', card),
+            "company": first(r'base-search-card__subtitle">(.*?)</h4>', card),
+            "location": first(r'job-search-card__location">(.*?)</span>', card),
+            "posted": (re.search(r'datetime="([\d-]+)"', card) or [None, ""])[1],
+            "url": JOB_URL.format(job_id.group(1)),
+        })
+    return jobs
+
+
+def run_search(keywords, location, remote, days, max_results):
+    """One LinkedIn search, every page up to max_results. Raises on HTTP errors."""
+    query = {"keywords": keywords, "location": location, "f_TPR": f"r{days * 86400}"}
+    geo_id = COUNTRY_GEO_IDS.get(location.strip().lower())
+    if geo_id:
+        query["geoId"] = geo_id
+    if remote:
+        query["f_WT"] = "2"
+    jobs, start = [], 0
+    while len(jobs) < max_results:
+        page = fetch(SEARCH_URL + "?" + urllib.parse.urlencode({**query, "start": start}))
+        cards = parse_cards(page)
+        if not cards:
+            break
+        known = {job["id"] for job in jobs}
+        jobs.extend(job for job in cards if job["id"] not in known)
+        start += len(cards)
+        time.sleep(2)
+    return jobs[:max_results]
+
+
+def clamp(value, low, high, default):
+    try:
+        return min(max(int(value), low), high)
+    except (TypeError, ValueError):
+        return default
+
+
+def search(args):
+    keywords = str(args.get("keywords") or "").strip()
+    if not keywords:
+        fail("keywords is required for action=search")
+    days = clamp(args.get("days"), 1, 30, 1)
+    max_results = clamp(args.get("max_results"), 1, MAX_RESULTS_CAP, 25)
+    location = str(args.get("location") or "Italia")
+    jobs = run_search(keywords, location, bool(args.get("remote")), days, max_results)
+    seen = load_seen()
+    mark_new(jobs, seen)
+    save_seen(seen)
+    new_count = sum(job["new"] for job in jobs)
+    print(f"{len(jobs)} results ({new_count} new) for {keywords!r} in {location}"
+          f"{' remote' if args.get('remote') else ''}, last {days} day(s)")
+    for job in jobs:
+        print(json.dumps(job, ensure_ascii=False))
+
+
+# -------------------------------------------------------------------- daily
+_SECTION = re.compile(r"^##\s+.*(ricerche|searches)", re.I)
+_LOCATION = re.compile(r'`location`\s*=\s*"([^"]+)"')
+_REMOTE = re.compile(r"`remote`\s*=\s*true", re.I)
+_DAYS = re.compile(r"`days`\s*=\s*(\d+)")
+
+
+def parse_criteria(text):
+    """The searches of the criteria file: ``(days, [(keywords, location, remote)])``.
+
+    Reads the first "## ..." section whose title names the searches
+    ("Ricerche da fare ogni giorno"). Inside it, a line carrying
+    `location` = "X" (and optionally `remote` = true) opens a group, and every
+    "- ..." bullet under it is one search. `days` = N anywhere in the section
+    sets the window. The format is the one a person writes in that file, so
+    the file stays the single place to change what is searched."""
+    lines = text.splitlines()
+    start = next((i for i, line in enumerate(lines) if _SECTION.match(line)), None)
+    if start is None:
+        return 1, []
+    days, location, remote, searches = 1, "Italia", False, []
+    for line in lines[start + 1:]:
+        if line.startswith("## "):
+            break
+        found = _DAYS.search(line)
+        if found:
+            days = int(found.group(1))
+        stripped = line.strip()
+        if stripped.startswith("- "):
+            keywords = stripped[2:].strip().strip("`")
+            if keywords:
+                searches.append((keywords, location, remote))
+            continue
+        found = _LOCATION.search(line)
+        if found:
+            location, remote = found.group(1), bool(_REMOTE.search(line))
+    return clamp(days, 1, 30, 1), searches
+
+
+def daily(args):
+    path = str(args.get("criteria_file") or "").strip()
+    if not path:
+        fail("criteria_file (the path of the criteria file) is required for action=daily")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            days, searches = parse_criteria(handle.read())
+    except OSError as error:
+        fail(f"cannot read the criteria file: {error}")
+    if not searches:
+        fail("no searches found in the criteria file: it needs a '## Ricerche ...' section "
+             "with a `location` = \"...\" line and one '- keywords' bullet per search")
+    max_results = clamp(args.get("max_results"), 1, MAX_RESULTS_CAP, 20)
+
+    seen = load_seen()
+    report, failed, new_jobs = [], 0, {}
+    for index, (keywords, location, remote) in enumerate(searches):
+        if index:
+            time.sleep(PAUSE_BETWEEN_SEARCHES)
+        label = f"{keywords} @ {location}{' remote' if remote else ''}"
+        try:
+            jobs = run_search(keywords, location, remote, days, max_results)
+        except urllib.error.HTTPError as error:
+            failed += 1
+            report.append(f"FAILED  {label}: LinkedIn HTTP {error.code}")
+            continue
+        except (urllib.error.URLError, TimeoutError) as error:
+            failed += 1
+            report.append(f"FAILED  {label}: {error}")
+            continue
+        mark_new(jobs, seen)
+        fresh = [job for job in jobs if job["new"]]
+        report.append(f"ok      {label}: {len(jobs)} results, {len(fresh)} new")
+        for job in fresh:
+            # One posting found by several searches is listed once.
+            entry = new_jobs.setdefault(job["id"], {**job, "found_by": []})
+            entry["found_by"].append(f"{keywords} @ {location}")
+    save_seen(seen)
+
+    if failed == len(searches):
+        fail("every search failed:\n" + "\n".join(report))
+    print(f"{len(searches) - failed}/{len(searches)} searches done, last {days} day(s), "
+          f"{len(new_jobs)} new postings (duplicates across searches removed).")
+    print("\n".join(report))
+    print(f"\nNew postings: id | title | company | location | posted | found by. "
+          f"Link: {JOB_URL.format('<id>')}")
+    for job in new_jobs.values():
+        print(" | ".join([job["id"], job["title"], job["company"], job["location"],
+                          job["posted"], "; ".join(job["found_by"])]))
+
+
+# ------------------------------------------------------------------- detail
+def detail(args):
+    job_id = re.sub(r"\D", "", str(args.get("job_id") or ""))
+    if not job_id:
+        fail("job_id (the numeric LinkedIn id) is required for action=detail")
+    page = fetch(DETAIL_URL.format(job_id))
+    description = page.split("description__text--rich", 1)[-1].split(">", 1)[-1]
+    description = description.split("description__job-criteria-list", 1)[0]
+    description = re.sub(r"<[^>]*$", "", description)  # the split cuts the next tag in half
+    description = re.sub(r"\b(Show more|Show less|Mostra di più|Mostra meno)\b", "", text_of(description))
+    criteria = re.findall(r'job-criteria-subheader">(.*?)</h3>.*?job-criteria-text[^>]*>(.*?)</span>', page, re.S)
+    result = {
+        "id": job_id,
+        "url": JOB_URL.format(job_id),
+        "title": first(r'top-card-layout__title[^>]*>(.*?)</h2>', page),
+        "company": first(r'topcard__org-name-link[^>]*>(.*?)</a>', page),
+        "location": first(r'topcard__flavor topcard__flavor--bullet">(.*?)</span>', page),
+        "posted": first(r'posted-time-ago__text[^>]*>(.*?)</span>', page),
+        "applicants": first(r'num-applicants__caption[^>]*>(.*?)</(?:span|figcaption)>', page),
+        "criteria": {text_of(name): text_of(value) for name, value in criteria},
+        "description": description[:DESCRIPTION_CAP],
+    }
+    print(json.dumps(result, ensure_ascii=False, indent=1))
+
+
+def main():
+    try:
+        args = json.load(sys.stdin)
+    except ValueError:
+        fail("arguments must be a JSON object")
+    action = args.get("action") or "search"
+    handlers = {"search": search, "daily": daily, "detail": detail}
+    if action not in handlers:
+        fail("action must be 'daily', 'search' or 'detail'")
+    try:
+        handlers[action](args)
+    except urllib.error.HTTPError as error:
+        fail(f"LinkedIn answered HTTP {error.code}; retry later or with fewer queries")
+    except (urllib.error.URLError, TimeoutError) as error:
+        fail(f"LinkedIn unreachable: {error}")
+
+
+if __name__ == "__main__":
+    main()

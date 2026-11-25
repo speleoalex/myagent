@@ -202,6 +202,14 @@ async def _probe_now(c: dict, client: httpx.AsyncClient | None) -> dict:
     return out
 
 
+def is_ollama_cloud(model: str | None) -> bool:
+    """An Ollama model served by ollama.com rather than this machine. /api/show
+    does not say so; the name does, by convention: the tag is ``cloud``
+    (``deepseek-v4.1-flash:cloud``) or ends in ``-cloud`` (``gpt-oss:120b-cloud``)."""
+    tag = (model or "").rpartition(":")[2].lower() if ":" in (model or "") else ""
+    return tag == "cloud" or tag.endswith("-cloud")
+
+
 def _ollama_trained_ctx(model_info: dict) -> int | None:
     """Pull "<arch>.context_length" out of /api/show's model_info blob."""
     arch = model_info.get("general.architecture")
@@ -417,6 +425,13 @@ def resolve(cfg, info: dict) -> dict:
                         "model_max" if maximum and explicit > maximum else "explicit")
         if served:
             return _out(served, "served")
+        # A CLOUD model runs on ollama.com: nothing is allocated here, so the
+        # VRAM reason above does not apply, and /api/ps never lists it, so
+        # "served" is never known. Without this it fell to the 4096 default — a
+        # 1M-token model budgeted at 4k (seen on the Orin, 2026-11-25, once its
+        # explicit value was cleared).
+        if maximum and is_ollama_cloud(c.get("model")):
+            return _out(maximum, "model_max")
         return _out(min(OLLAMA_DEFAULT_CTX, maximum) if maximum else OLLAMA_DEFAULT_CTX,
                     "default")
 
