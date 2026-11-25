@@ -447,6 +447,22 @@ class Agent(BaseModel):
     # visibility filter, so a mistake costs a round trip, never a capability.
     lazy_tools: bool = False
 
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_autonomy_wildcard(cls, data):
+        """Back-compat: notify_user moved from the ``autonomy`` group to its own
+        ``messaging`` group (2026-11-25), since an agent in chat sends messages
+        too. An ``autonomy/*`` grant written before that held it, and still does.
+        Lifted on read, like ModelConfig.migrate_num_ctx: the file is rewritten
+        only when the agent is next saved."""
+        if not isinstance(data, dict):
+            return data
+        tools = data.get("tools")
+        if (isinstance(tools, list) and "autonomy/*" in tools
+                and not {"notify_user", "messaging/*"} & set(tools)):
+            data = {**data, "tools": [*tools, "notify_user"]}
+        return data
+
     @field_validator("id")
     @classmethod
     def validate_id(cls, v: str) -> str:

@@ -1,0 +1,4 @@
+{
+  "name": "Messaging",
+  "description": "send a message to someone in the address book, a person on Telegram or email or a voice device, with an optional subject and attachments."
+}

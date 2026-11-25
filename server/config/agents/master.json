@@ -8,6 +8,7 @@
     "memory/*",
     "call_agent",
     "autonomy/*",
+    "notify_user",
     "recall_delegation"
   ],
   "max_iterations": 50,

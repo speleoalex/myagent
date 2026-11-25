@@ -295,7 +295,9 @@ names a transport:
 
 - `labels` / `hints` rename the token field and its help (a "shared key", an
   "App Password"); `handle` says what a person's identifier looks like, and gives
-  the address book one field per installed channel.
+  the address book a field for that channel (no `handle`, no field). `"source": "bindings"` makes
+  that field a list of the channel's own bindings, for a channel where the
+  binding itself is the address (the satellite: one device, one binding).
 - `icon` is the Bootstrap-icon class on the channel's card in the form
   (`bi-telegram`); `guide` is the step-by-step setup shown under that card while
   a binding is being created — `{"title": key, "steps": [keys], "links":

@@ -387,6 +387,11 @@ const AgentsPage = {
     RELOCATED_TOOLS: [
         { category: 'autonomy', expand: 'autonomy/*', pane: 'autonomy',
           label: 'agents.autoTools', hint: 'agents.autoToolsHint' },
+        // notify_user alone, out of autonomy since 2026-11-25: a chat agent
+        // sends messages too ("say hi to the living room"), and filing it under
+        // Autonomy made it look like a live-only capability.
+        { category: 'messaging', expand: 'messaging/*', pane: 'tools',
+          label: 'agents.messagingTools', hint: 'agents.messagingToolsHint' },
         // Self-modification. Relocated for the usual reason (writing an agent
         // and writing a tool are two capabilities, and most agents should hold
         // neither) and, unlike every other group, it must NEVER be granted as
@@ -910,7 +915,7 @@ const AgentsPage = {
 
         // Ids the agent references that no longer exist in any source. Built from
         // the UNFILTERED tool list and the full category set on purpose: a hidden
-        // grant (`memory/*`, the memory tool ids, `call_agent`, `autonomy/*`)
+        // grant (`memory/*`, the memory tool ids, `call_agent`, `autonomy/*`, `messaging/*`)
         // still EXISTS, it is merely not offered here. Listing one as "no longer
         // available" would render it as a checked+disabled row that readForm()
         // then re-emits ALONGSIDE the derived grant — two grants for one tool,
@@ -1218,6 +1223,30 @@ const AgentsPage = {
                                     <div class="form-text"><i class="bi bi-magic"></i> ${i18n('agents.toolsManagedElsewhere')}</div>
                                 </div>
                                 ${this.relocatedBox(relocated.self_management, isRelocatedOn)}
+                                <!-- notify_user's default recipient lives with the tool, not
+                                     under Autonomy: a chat turn that names nobody uses it too. -->
+                                ${this.relocatedBox(relocated.messaging, isRelocatedOn, `
+                                        <div class="mt-2">
+                                            <label class="form-label small mb-1" for="f-auto-to">${i18n('agents.autoTo')}</label>
+                                            <!-- Stays free text on purpose. The suggestions are the
+                                                 address book, and a group chat is not in it: its id
+                                                 is negative and no contact can hold it. So the names
+                                                 are offered, not imposed - an id must stay typeable. -->
+                                            <input type="text" class="form-control form-control-sm" id="f-auto-to"
+                                                   list="notify-to-options" autocomplete="off"
+                                                   value="${App.escAttr(auto.notify_to || '')}">
+                                            <datalist id="notify-to-options">
+                                                ${contacts.map(c => `<option value="${App.escAttr(c.name || c.id)}"></option>`).join('')}
+                                            </datalist>
+                                        </div>
+                                        <div class="form-text">${i18n('agents.autoNotifyHint')}
+                                            <a href="#/connectors">${i18n('agents.autoBindingManage')}</a></div>
+                                        ${connectorsAvailable ? '' : `
+                                        <div class="form-text text-warning-emphasis">${i18n('agents.connectorsUnavailable')}</div>`}
+                                        ${this.reachTable(reach, agentId)}
+                                        <div id="notify-target-warn" class="form-text text-warning-emphasis d-none">
+                                            <i class="bi bi-exclamation-triangle"></i> ${i18n('agents.liveNoTarget')}
+                                        </div>`)}
                                 <div class="mb-3">
                                     <label class="form-label">${i18n('agents.delegation')}</label>
                                     <div class="border rounded p-2">
@@ -1315,27 +1344,7 @@ const AgentsPage = {
                                 <div class="row g-3">
                                     ${this.autoGrid(auto, specs)}
                                 </div>
-                                <div class="mt-3">
-                                    <label class="form-label small mb-1" for="f-auto-to">${i18n('agents.autoTo')}</label>
-                                    <!-- Stays free text on purpose. The suggestions are the
-                                         address book, and a group chat is not in it: its id
-                                         is negative and no contact can hold it. So the names
-                                         are offered, not imposed - an id must stay typeable. -->
-                                    <input type="text" class="form-control form-control-sm" id="f-auto-to"
-                                           list="notify-to-options" autocomplete="off"
-                                           value="${App.escAttr(auto.notify_to || '')}">
-                                    <datalist id="notify-to-options">
-                                        ${contacts.map(c => `<option value="${App.escAttr(c.name || c.id)}"></option>`).join('')}
-                                    </datalist>
-                                </div>
-                                <div class="form-text">${i18n('agents.autoNotifyHint')}
-                                    <a href="#/connectors">${i18n('agents.autoBindingManage')}</a></div>
-                                ${connectorsAvailable ? '' : `
-                                <div class="form-text text-warning-emphasis">${i18n('agents.connectorsUnavailable')}</div>`}
-                                ${this.reachTable(reach, agentId)}
-                                <div id="notify-target-warn" class="form-text text-warning-emphasis d-none">
-                                    <i class="bi bi-exclamation-triangle"></i> ${i18n('agents.liveNoTarget')}
-                                </div>`)}
+                                `)}
                             ${pane('advanced', `
                                 <!-- The id is derived from the name (App.autoId) and fixed once
                                      saved: a technical detail, so it lives here and not first

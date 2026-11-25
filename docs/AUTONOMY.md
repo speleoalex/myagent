@@ -52,7 +52,8 @@ agent needs more.
 - **`notify_user`** — it reaches you through the
   [connectors plugin](../connectors/README.md): a Telegram message, an email,
   or a sentence spoken by a voice satellite. Recipients are contacts addressed
-  by **name**, and the agent's autonomy settings hold the default one. When
+  by **name**, and the default one is set beside the tool (Tools tab). The
+tool is not tied to autonomy: an agent in chat can send a message too. When
   several bots could carry the message, the agent's own bots come first, then
   the one the person last talked to; the agent form shows, per contact, which
   bot that is and which agent will answer a reply. Besides

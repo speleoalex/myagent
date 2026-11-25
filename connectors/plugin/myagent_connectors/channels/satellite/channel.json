@@ -16,7 +16,7 @@
   },
   "handle": {
     "label": "connectors.satellite.handleLabel",
-    "example": "cucina"
+    "source": "bindings"
   },
   "device": {
     "config": true,

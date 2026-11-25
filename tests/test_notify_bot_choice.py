@@ -17,6 +17,7 @@ manager / session clock (no transport, no model):
   * with nothing to tell them apart the error names `channel`, never binding_id;
   * `channel` takes a kind of channel OR one bot, by id or name, and a bot named
     there beats the preference;
+  * a kind of channel the person is not on names the ones they are on;
   * the agent form's preview (reach_preview) says the same thing a send does.
 
 Run:  server/.venv/bin/python tests/test_notify_bot_choice.py
@@ -131,6 +132,20 @@ check(resolve("Alessandro", "master-it", "myagent-notebook-bot")[0] == "master-i
 _, error, _ = resolve("Alessandro", "whatsapp")
 check("unknown channel 'whatsapp'" in error and "master-it" in error
       and "Telegram" in error, "an unknown channel lists kinds AND bots")
+
+contacts.save("sala", Contact(id="sala", name="Sala",
+                              handles={"satellite": "sala"}).model_dump())
+sent, error, _ = resolve("Sala", "Telegram")
+check(not sent and "Sala has no Telegram handle, but can be reached on: Satellite" in error,
+      "the wrong kind of channel says where the person IS reachable")
+check(resolve("Sala", "Satellite")[0] == "sala", "…and following it gets through")
+contacts.delete("sala")
+contacts.save("mailonly", Contact(id="mailonly", name="Solo Mail",
+                                  handles={"mail": "solo@example.com"}).model_dump())
+_, error, _ = resolve("Solo Mail", "Telegram")
+check("Add one in the address book" in error and "reached on" not in error,
+      "no bot reaches them anywhere: the advice is still to add a handle")
+contacts.delete("mailonly")
 
 
 print("a bot is the voice of its agent")

@@ -301,10 +301,17 @@ class Connectors:
         candidates = self._bots_reaching(contact, channel_type)
         if not candidates:
             if channel_type:
-                # Deliberately distinct from "not found": the fix is to add a
-                # handle, not to try another name.
-                return [], (f"{who} has no {self._channel_label(channel_type)} "
-                            f"handle. Add one in the address book, or pass "
+                # Deliberately distinct from "not found". Say where the person
+                # CAN be reached: told only where they can't, a model tries the
+                # other channels one by one (Orin, 2026-11-25: "greet the living
+                # room" took Telegram, Email and a broadcast before the satellite).
+                missing = f"{who} has no {self._channel_label(channel_type)} handle"
+                elsewhere = sorted({self._channel_label(b.type)
+                                    for b in self._bots_reaching(contact)})
+                if elsewhere:
+                    return [], (f"{missing}, but can be reached on: "
+                                f"{', '.join(elsewhere)}. Pass that as channel"), ""
+                return [], (f"{missing}. Add one in the address book, or pass "
                             f"chat_id explicitly"), ""
             if not contact.handles:
                 return [], (f"{who} has no messaging handle in the address book. "

@@ -115,8 +115,8 @@ payload = sent(ex)
 for t in WAKE_PROMPT_TOOLS:
     check(t in payload, f"{t} is in the first payload, not behind a guess")
 
-check("autonomy" in ex._lazy_active,
-      "the category holding notify_user is switched on before iteration 1")
+check({"autonomy", "messaging"} <= ex._lazy_active,
+      "the categories holding manage_tasks and notify_user are on before iteration 1")
 check("generate_image" not in payload and "web_research" not in payload,
       "images and web are still only catalogue entries")
 check("activate_tools" in payload,
@@ -124,7 +124,7 @@ check("activate_tools" in payload,
 
 gate = ex._lazy_gate_def()
 offered = gate["parameters"]["properties"]["category"]["enum"]
-check("autonomy" not in offered,
+check("autonomy" not in offered and "messaging" not in offered,
       "what is already on is not offered again")
 check("images" in offered and "web" in offered,
       f"the rest of the catalogue is intact (offered: {sorted(offered)})")

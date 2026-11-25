@@ -95,10 +95,12 @@ grants `call_agent` alone gets `recall_delegation` anyway, so it holds whoever
 wrote the file. The autonomy tools stay individually selectable, because
 `autonomy_control` is genuinely useful with `live` off.
 
-Two groups are moved out of the tool list into a box of their own, where each
+Three groups are moved out of the tool list into a box of their own, where each
 member gets a sentence saying what granting it really means: **autonomy**
-(*Autonomy* tab) and **self management** — `manage_agents` and `manage_tools`,
-under the tool list. The second box is the one to read twice: an agent that can
+(*Autonomy* tab), **messaging** — `notify_user` with its default recipient,
+under the tool list, since an agent in chat sends messages too — and **self
+management** — `manage_agents` and `manage_tools`, under the tool list. The
+last box is the one to read twice: an agent that can
 write agents can give itself any permission, and an agent that can write tools
 can run new code on the machine. Both are granted one tool at a time, never as
 a whole category, so a tool added to the group later cannot widen an agent that

@@ -1212,11 +1212,12 @@ const ConnectorsPage = {
     async renderContactForm(contactId) {
         const isEdit = !!contactId;
         let c = { id: '', name: '', handles: {}, notes: '' };
-        const [loaded, types] = await Promise.all([
+        const [loaded, types, bindings] = await Promise.all([
             isEdit ? App.api('GET', `/connectors/contacts/${encodeURIComponent(contactId)}`)
                         .catch(err => ({ _error: err.message }))
                    : null,
             this._fetchTypes().catch(() => ({ types: [] })),
+            App.api('GET', '/connectors/bindings').catch(() => []),
         ]);
         if (loaded && loaded._error) {
             App.toast(loaded._error, 'danger');
@@ -1224,9 +1225,11 @@ const ConnectorsPage = {
             return;
         }
         if (loaded) c = loaded;
-        // One field per installed channel: the same person has a Telegram id AND
-        // a phone number, and each channel labels its own identifier.
+        this._contactHandles = { ...(c.handles || {}) };
+        // One field per installed channel that declares a per-person handle in
+        // its manifest: installing a channel is what adds its field here.
         this._types = types.types || [];
+        const handleTypes = this._types.filter(t => t.handle);
         App.container.innerHTML = `
         <div class="row"><div class="col-lg-8 mx-auto">
             <h3 class="mb-3">${isEdit ? i18n('connectors.contactEditTitle') : i18n('connectors.contactNewTitle')}</h3>
@@ -1244,14 +1247,12 @@ const ConnectorsPage = {
                     </div>
                 </div>
                 <div class="row g-3 mb-3">
-                    ${(this._types.length ? this._types : [{ type: 'telegram', label: 'Telegram' }]).map(t => `
+                    ${handleTypes.length ? '' : `<div class="col-12 form-text">${i18n('connectors.contactNoChannels')}</div>`}
+                    ${handleTypes.map(t => `
                     <div class="col-12 col-md-6">
                         <label class="form-label" for="c-h-${App.escAttr(t.type)}">
                             ${App.esc(i18n(t.handle?.label || t.label || t.type))}</label>
-                        <input type="text" class="form-control" id="c-h-${App.escAttr(t.type)}"
-                               data-handle="${App.escAttr(t.type)}"
-                               placeholder="${App.escAttr(t.handle?.example || '')}"
-                               value="${App.escAttr((c.handles || {})[t.type] || '')}">
+                        ${this._handleField(t, (c.handles || {})[t.type] || '', bindings)}
                     </div>`).join('')}
                 </div>
                 <div class="mb-3">
@@ -1275,14 +1276,44 @@ const ConnectorsPage = {
         if (del) del.onclick = () => this._deleteContact(contactId);
     },
 
+    /** One contact handle input. A channel whose handle IS one of its own
+     * bindings (`handle.source: "bindings"`, the satellite: a device has no
+     * per-person id, the binding is the address) gets a closed list of those
+     * bindings, since free text there only invites ids that match nothing. */
+    _handleField(type, value, bindings) {
+        const attrs = `id="c-h-${App.escAttr(type.type)}" data-handle="${App.escAttr(type.type)}"`;
+        if (type.handle?.source !== 'bindings') {
+            return `<input type="text" class="form-control" ${attrs}
+                           placeholder="${App.escAttr(type.handle?.example || '')}"
+                           value="${App.escAttr(value)}">`;
+        }
+        const own = bindings.filter(b => b.type === type.type);
+        const option = b => `<option value="${App.escAttr(b.id)}" ${b.id === value ? 'selected' : ''}>
+            ${App.esc(b.name || b.id)}</option>`;
+        // A handle whose binding was deleted stays visible and selected: saving
+        // the form must not drop it silently.
+        const missing = value && !own.some(b => b.id === value)
+            ? `<option value="${App.escAttr(value)}" selected>${App.esc(value)} — ${i18n('agents.bindingMissing')}</option>`
+            : '';
+        return `<select class="form-select" ${attrs}>
+                    <option value="">${i18n('connectors.handleNone')}</option>
+                    ${own.map(option).join('')}${missing}
+                </select>
+                ${own.length ? '' : `<div class="form-text">${App.esc(i18n('connectors.handleNoBindings', { channel: type.label || type.type }))}
+                    <a href="#/connectors/new">${i18n('connectors.new')}</a></div>`}`;
+    },
+
     async _saveContact(event, isEdit, contactId) {
         event.preventDefault();
         const val = id => document.getElementById(id).value.trim();
         if (!val('c-name')) return App.toast(i18n('connectors.contactNameRequired'), 'danger');
-        const handles = {};
+        // Start from the stored handles: a channel that failed to load has no
+        // field in the form, and saving must not erase its identifier.
+        const handles = { ...this._contactHandles };
         document.querySelectorAll('[data-handle]').forEach(el => {
             const v = el.value.trim();
             if (v) handles[el.dataset.handle] = v;
+            else delete handles[el.dataset.handle];
         });
         // A contact nobody can be reached at is not useful — and would show up as
         // a dead chip in every bot form.

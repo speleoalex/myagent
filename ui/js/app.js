@@ -643,13 +643,12 @@ const App = {
     async renderHome() {
         // Each call caught on its own: the page degrades panel by panel (an
         // older server without /tasks must not blank the whole page).
-        const [agents, tasks, ready, inst] = await Promise.all([
+        const [agents, tasks, ready] = await Promise.all([
             // The agents a user can talk to: the same list the chat offers.
             this.api('GET', '/agents?selectable=true').catch(() => []),
             this.api('GET', '/tasks').catch(() => []),
             // Whether a message would actually get an answer.
             this.api('GET', '/system/ready').catch(() => null),
-            this.instancePromise || Promise.resolve(this.instance),
         ]);
 
         // Runtime state worth a line, and only when there is some: what runs
@@ -681,9 +680,6 @@ const App = {
         this.container.innerHTML = `
             <div class="home-wrap mx-auto mt-3">
                 <div class="text-center">
-                    <h1 class="text-break"><i class="bi bi-robot" ${inst && inst.color ? `style="color:${this.escAttr(inst.color)}"` : ''}></i>
-                        ${this.esc((inst && inst.label) || 'MyAgent')}</h1>
-                    <p class="lead text-secondary mb-3">${inst && inst.label ? 'MyAgent · ' : ''}${i18n('home.subtitle')}</p>
                     ${this.readinessBanner(ready)}
                     <form id="home-ask" class="home-ask mx-auto mt-3">
                         <div class="input-group input-group-lg">
