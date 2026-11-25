@@ -344,14 +344,21 @@ async def chat_capabilities(request: Request, agent_id: str = "",
     return out
 
 
+def _live_session_id(request: Request, session_id: str) -> str:
+    """The session a live query is about: the one named, else the current web
+    chat. Naming one is how the UI watches a run it did not start — an
+    autonomous wake runs under its own session id, through the same manager."""
+    if session_id:
+        return _valid_session_id(session_id)
+    return request.app.state.sessions.get_current()["id"]
+
+
 @router.get("/stream/attach")
-async def chat_attach(request: Request):
-    """Re-attach to the live generation of the current chat (replay + tail).
-    Used when the user returns to a chat whose response is still streaming."""
-    session_store = request.app.state.sessions
+async def chat_attach(request: Request, session_id: str = ""):
+    """Attach to a live generation (replay + tail): the current chat's when the
+    user returns to it mid-answer, or the one of ``session_id``, read-only."""
     live = request.app.state.live
-    session = session_store.get_current()
-    run = live.get(session["id"])
+    run = live.get(_live_session_id(request, session_id))
     if run is None:
         async def idle():
             yield {"type": "idle"}
@@ -370,12 +377,11 @@ async def chat_stop(request: Request):
 
 
 @router.get("/live")
-async def chat_live(request: Request):
-    """Whether a generation is currently running for the current chat."""
-    session_store = request.app.state.sessions
-    live = request.app.state.live
-    session = session_store.get_current()
-    return {"active": live.is_active(session["id"])}
+async def chat_live(request: Request, session_id: str = ""):
+    """Whether a generation is running for the current chat, or for
+    ``session_id``."""
+    return {"active": request.app.state.live.is_active(
+        _live_session_id(request, session_id))}
 
 
 def _valid_session_id(session_id: str) -> str:

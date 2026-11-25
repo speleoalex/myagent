@@ -289,6 +289,7 @@ const App = {
         // would otherwise keep fetching (and writing into a DOM that is gone).
         clearInterval(this.pageInterval);
         this.pageInterval = null;
+        ChatPage._stopWatch();
 
         // A Bootstrap modal (e.g. the chat history window) may still be open.
         // SPA re-renders replace #app without Bootstrap's own cleanup, which

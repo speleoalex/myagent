@@ -321,7 +321,55 @@ const ChatPage = {
         history[replace ? 'replaceState' : 'pushState'](null, '', want);
     },
 
+    /** Stop following a live session's run (see _watchLive). */
+    _stopWatch() {
+        this._watchToken = null;
+        if (this._watchAbort) {
+            try { this._watchAbort.abort(); } catch (e) { /* ignore */ }
+            this._watchAbort = null;
+        }
+    },
+
+    /** Follow, read-only, the runs of a session something else drives (an
+     * autonomous agent's wakes): while one is running its tool calls and text
+     * stream in as in a normal chat. The session file is only written when the
+     * run ends, so without this the page shows the previous run until reloaded.
+     * Between runs it polls, so a wake that starts while the page is open shows
+     * up by itself. */
+    async _watchLive(id) {
+        const token = this._watchToken = {};
+        const mine = () => this._watchToken === token && this._archivedId === id
+            && document.getElementById('chat-messages');
+        const query = `session_id=${encodeURIComponent(id)}`;
+        while (mine()) {
+            let active = false;
+            try { active = (await App.api('GET', `/chat/live?${query}`)).active; } catch (e) { /* retry */ }
+            if (!mine()) return;
+            if (!active) {
+                await new Promise(r => setTimeout(r, 4000));
+                continue;
+            }
+            const ui = this._newAssistantBubble();
+            try {
+                this._watchAbort = new AbortController();
+                const resp = await fetch(App.apiUrl(`/chat/stream/attach?${query}`), {
+                    signal: this._watchAbort.signal, headers: App.authHeaders(),
+                });
+                if (!resp.ok) throw new Error('attach failed');
+                await this._consumeStream(resp, ui);
+            } catch (e) {
+                if (ui.thinking && ui.thinking.parentNode) ui.thinking.remove();
+            }
+            if (!mine()) return;
+            // The run is on disk now, with the request that started it.
+            try {
+                this.renderSessionMessages(await App.api('GET', '/sessions/' + id));
+            } catch (e) { /* keep the streamed bubble */ }
+        }
+    },
+
     async loadCurrent({ syncUrl = true } = {}) {
+        this._stopWatch();
         if (syncUrl) this._syncUrl(null);
         this.viewingArchived = false;
         this._archivedId = null;
@@ -372,6 +420,7 @@ const ChatPage = {
         // A link to a chat that is gone lands on the current one, and says so
         // in the address bar instead of keeping a URL that shows something else.
         if (!session) { this._syncUrl(null, true); return; }
+        this._stopWatch();
         this._syncUrl(id);
         this.viewingArchived = true;
         this._archivedId = id;
@@ -394,6 +443,7 @@ const ChatPage = {
         document.getElementById('btn-del').style.display = '';
         this.setInputEnabled(false);
         this.renderSessionMessages(session);
+        if (live) this._watchLive(id);
     },
 
     async newChat() {
