@@ -626,8 +626,10 @@ the end — so an unsolicited message is part of the history the agent replays
 next turn (otherwise "repeat that" repeats the turn before it). The session key is
 asked of the connector (`session_id_for`): it derives from the binding's
 `session_prefix`, so nothing else can compute it. A wake receives no chat history
-at all by default (`AutonomousConfig.history_messages: 0`); continuity comes from
-long-term memory instead.
+by default; continuity comes from long-term memory instead. A task can ask for
+its own previous runs (`Task.history_runs`): `autonomy.task_history` finds them
+by the `task_ids` each wake writes on its user entry and quotes request and
+reply only, within a quarter of the context.
 
 When several bots could send a notification, `Connectors._prefer` picks one:
 first the bots bound to the calling agent, then the one whose conversation with

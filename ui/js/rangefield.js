@@ -125,7 +125,7 @@ const RangeField = {
                            aria-describedby="${id}-desc" ${on ? '' : 'disabled'}>
                 </div>
                 <div class="rf-ends">
-                    <span>${spec.minLabel || spec.fmt(steps ? steps[0] : rMin, ctx)}</span>
+                    <span>${spec.fmt(steps ? steps[0] : rMin, ctx)}</span>
                     <span>${spec.maxLabel || spec.fmt(steps ? steps[steps.length - 1] : rMax, ctx)}</span>
                 </div>
                 <div class="form-text rf-desc" id="${id}-desc"></div>
@@ -225,7 +225,7 @@ const RangeField = {
         if (out) {
             out.textContent = live ? spec.fmt(v, ctx)
                                    : (spec.fmtOff ? spec.fmtOff(ctx) : '');
-            const plain = !live || muted || dim || v === spec.sentinel;
+            const plain = !live || muted || dim;
             out.className = 'badge rf-value ' + (plain
                 ? 'bg-secondary-subtle text-secondary-emphasis'
                 : 'bg-primary-subtle text-primary-emphasis');
@@ -240,8 +240,7 @@ const RangeField = {
     /** The field's value, or null for a nullable field left on "inherit".
      *
      *  The ONLY readback path. Note Number.isFinite instead of `|| dflt`: 0 is a
-     *  legitimate value here (history_messages = 0 is "no history", temperature 0 is
-     *  greedy decoding), and `parseFloat('0') || 0.7` is exactly the bug this
+     *  legitimate value here (temperature 0 is greedy decoding), and `parseFloat('0') || 0.7` is exactly the bug this
      *  replaces. */
     read(id) {
         const el = document.getElementById(id);

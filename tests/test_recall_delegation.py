@@ -102,7 +102,6 @@ def test_history_extraction_and_stable_ids():
     assert after[0]["reply"] == got[0]["reply"]
 
     # A trimmed window keeps the ORIGINAL ids, or they would stop resolving.
-    assert [d["id"] for d in delegation_history(s, limit=2)] == ["d2", "d3"]
 
     # Only the display log is read: nothing is expected in conversation[].
     assert s["conversation"] == []
@@ -259,10 +258,8 @@ def test_call_sites():
     a running compaction. A forgotten kwarg fails nowhere at runtime: the
     findings section would just be empty forever.
 
-    The autonomy path is the exception, and deliberately so: a wake quotes the
-    previous wakes only as far as AutonomousConfig.history_messages allows (see
-    test_wake_findings_follow_the_history_window), so it holds the call in a
-    local instead of inlining it. It still has to pass the kwarg.
+    The autonomy path is the exception, and deliberately so: a wake gets no
+    findings at all (see test_wake_quotes_no_findings).
     """
     for rel, runs in (("server/app/routers/chat.py", 2),
                       ("server/app/engine/channel_turn.py", 1)):
@@ -271,7 +268,6 @@ def test_call_sites():
         assert len(re.findall(r"cancel_compaction\(", src)) == runs, rel
 
     auto = (_ROOT / "server/app/engine/autonomy.py").read_text()
-    assert re.search(r"delegations=\w+", auto), auto[-2000:]
     assert len(re.findall(r"cancel_compaction\(", auto)) == 1
 
     # A sub-agent starts empty: between agents only message/reply travel.
@@ -281,38 +277,26 @@ def test_call_sites():
     print("ok: all four turn paths pass the history and cancel compaction")
 
 
-def test_wake_findings_follow_the_history_window():
-    """On an autonomous wake the two blocks obey AutonomousConfig.history_messages.
+def test_wake_quotes_no_findings():
+    """An autonomous wake gets neither findings block.
 
-    They restore exactly what is_scaffolding_message strips out of the message
-    window, so they have to share its bound. Built from the whole session file
-    instead, they let the previous wakes back in through a side door: a recurring
-    task is self-similar, so the newest entries are always the SAME task's last
-    run, and "## Agent findings" then offers yesterday's answer under a note that
-    says to answer from it rather than admit no information. Observed
-    2026-08-29..09-04 on a daily weather task: a forecast for a date four days
-    stale, re-sent to two people every morning.
+    A recurring task is self-similar, so the newest entries are always the SAME
+    task's last run, and "## Agent findings" then offered yesterday's answer
+    under a note that says to answer from it rather than admit no information.
+    Observed 2026-08-29..09-04 on a daily weather task: a forecast for a date
+    four days stale, re-sent to two people every morning. What a task may see
+    of its past is its own runs, request and reply (Task.history_runs).
+
+    The interactive paths keep both: there the history is the chat the user
+    can see, and dropping it is the bug this whole file is about.
     """
-    s = _session_with(3)
-
-    # The trap the call site has to work around: limit=0 is FALSY, so asking for
-    # "no history" through the limit argument returns ALL of it.
-    assert len(delegation_history(s, 0)) == 3
-    assert len(delegation_history(s, 2)) == 2
-
     auto = (_ROOT / "server/app/engine/autonomy.py").read_text()
-    assert "delegation_history(session, hist) if hist > 0 else []" in auto, auto
-    assert "tool_history(session, hist) if hist > 0 else []" in auto, auto
-    assert "hist = cfg.history_messages" in auto, auto
-
-    # The interactive paths are NOT windowed: there the history is the chat the
-    # user can see, and dropping it is the bug this whole file is about.
+    assert "delegation_history" not in auto and "tool_history" not in auto
+    assert "delegations=" not in auto and "tool_results=" not in auto
     for rel in ("server/app/routers/chat.py", "server/app/engine/channel_turn.py"):
         src = (_ROOT / rel).read_text()
         assert "delegation_history(session)" in src, rel
-        assert "history_messages" not in src, rel
-    print("ok: a wake quotes previous wakes only within history_messages")
-
+    print("ok: a wake quotes no findings from previous wakes")
 
 if __name__ == "__main__":
     test_history_extraction_and_stable_ids()
@@ -322,5 +306,5 @@ if __name__ == "__main__":
     asyncio.run(test_recall_tool())
     asyncio.run(test_cancellation())
     test_call_sites()
-    test_wake_findings_follow_the_history_window()
+    test_wake_quotes_no_findings()
     print("all tests passed")

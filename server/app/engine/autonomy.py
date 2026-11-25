@@ -54,9 +54,8 @@ from app.engine import prompts
 from app.engine.executor import NOTIFY_USER, AgentExecutor
 from app.engine.memory_compactor import cancel_compaction, schedule_compaction
 from app.models import Agent, AutonomousConfig, ChatMessage
-from app.storage.sessions import (delegation_history, memory_context, now_iso,
-                                  read_json, record_turn, steps_from,
-                                  tool_history, write_json)
+from app.storage.sessions import (memory_context, now_iso, read_json,
+                                  record_turn, steps_from, write_json)
 
 log = logging.getLogger(__name__)
 
@@ -177,6 +176,67 @@ def _when(task: dict) -> str:
 # and repeat the question. Kept beside the prompt that names them — a name added
 # there and not here silently goes back to being a guess.
 WAKE_PROMPT_TOOLS = ("notify_user", "manage_tasks", "call_agent")
+
+#: Share of the context window the previous runs may fill, whatever the tasks
+#: ask for: the rest belongs to this run's own tool results.
+TASK_HISTORY_SHARE = 0.25
+
+
+def task_history(session: dict, tasks: list[dict], budget_tokens: int,
+                 estimate) -> list[ChatMessage]:
+    """The previous runs the due tasks asked to see (Task.history_runs), as
+    request/reply pairs, oldest first.
+
+    Only each task's OWN runs: every wake marks its user entry with the ids it
+    served, so a morning greeting never shows up in a job search. A run from
+    before that marking is matched by the task's text, which the wake prompt
+    quotes. Interrupted runs don't count: their reply is a fragment. Newest
+    first into ``budget_tokens``; the newest is cut rather than dropped, so a
+    task that asked for history always gets some.
+    """
+    wanted = {t["id"]: t for t in tasks if t.get("history_runs", 0) > 0}
+    if not wanted:
+        return []
+    runs, current = [], None
+    for m in session.get("messages", []):
+        if m.get("role") == "user":
+            current = None
+            if m.get("autonomous"):
+                ids = m.get("task_ids")
+                text = m.get("text") or ""
+                served = [t for tid, t in wanted.items()
+                          if (tid in ids if ids is not None else t["prompt"] in text)]
+                if served:
+                    current = {"ts": m.get("ts", ""), "tasks": served, "reply": ""}
+                    runs.append(current)
+        elif m.get("role") == "assistant" and current is not None:
+            current["reply"] = m.get("text") or ""
+    runs = [r for r in runs if r["reply"].strip() and prompts.INTERRUPTED not in r["reply"]]
+
+    # Per task, its last N; a run serving two tasks is taken once.
+    keep = set()
+    for tid, task in wanted.items():
+        own = [i for i, r in enumerate(runs) if any(t["id"] == tid for t in r["tasks"])]
+        keep.update(own[-task["history_runs"]:])
+
+    out: list[ChatMessage] = []
+    used = 0
+    for i in sorted(keep, reverse=True):
+        r = runs[i]
+        request = (f"[Earlier run, {r['ts']}] "
+                   + " / ".join(t["prompt"] for t in r["tasks"]))
+        reply = r["reply"]
+        cost = estimate(request) + estimate(reply)
+        if used + cost > budget_tokens:
+            if out:
+                break
+            room = max(0, budget_tokens - estimate(request))
+            reply = reply[:room * 3] + " … [cut]"   # ~3 chars per token, generous
+            cost = budget_tokens
+        out[:0] = [ChatMessage(role="user", content=request),
+                   ChatMessage(role="assistant", content=reply)]
+        used += cost
+    return out
 
 
 def build_wake_prompt(agent: Agent, tasks: list[dict],
@@ -441,7 +501,8 @@ class AutonomyService:
                                       if t in granted}
             prompt = build_wake_prompt(
                 agent, wake_tasks, granted, next_task=upcoming)
-            drive = self._make_autonomous_drive(agent, executor, sid, prompt, result)
+            drive = self._make_autonomous_drive(agent, executor, sid, prompt,
+                                                result, wake_tasks)
             run = self.live.start(sid, drive)
             try:
                 await asyncio.wait_for(asyncio.shield(run.task), cfg.wake_timeout_s)
@@ -619,14 +680,14 @@ class AutonomyService:
         asyncio.create_task(deliver())
 
     def _make_autonomous_drive(self, agent: Agent, executor, sid: str,
-                               prompt: str, result: dict):
+                               prompt: str, result: dict, wake_tasks: list[dict]):
         """Mirror of routers.chat._make_drive on the named-session store,
         plus the NOOP contract. The session is loaded INSIDE named.lock(sid)
         (layer 3), so a user turn in the same session can't interleave.
         Recording goes through the same storage helpers as channel chats, so
         the autonomous session stays byte-compatible with them."""
-        # None means "all defaults", as everywhere else in this module.
-        cfg = agent.autonomous or AutonomousConfig()
+        # Marks the run, so task_history can tell whose past it is.
+        task_ids = sorted(t["id"] for t in wake_tasks)
 
         async def drive(run):
             async with self.named.lock(sid):
@@ -636,35 +697,16 @@ class AutonomyService:
                 session["agent_id"] = agent.id
                 if not session.get("title"):
                     session["title"] = f"{agent.name} (live)"
-                # Only the tail: see AutonomousConfig.history_messages for why a
-                # wake must NOT get the interactive-sized window. The full
-                # conversation stays on disk (audit trail) and, with memory on,
-                # keeps being archived into the digest that is injected below.
-                stored = session.get("conversation", [])
-                if cfg.history_messages > 0:
-                    stored = stored[-cfg.history_messages:]
-                else:
-                    stored = []
-                prior = [ChatMessage(**m) for m in stored]
-                # The findings / tool-results blocks restore exactly what
-                # is_scaffolding_message strips out of `stored` above, so they
-                # follow the SAME window — they used to be built from the whole
-                # session file, which let the previous wakes back in through a
-                # side door and reopened the feedback loop history_messages
-                # exists to close (see AutonomousConfig.history_messages).
-                # A recurring task is self-similar, so the newest entries are
-                # always the SAME task's last run: "## Agent findings" offered
-                # yesterday's answer under a note that says to answer from it
-                # rather than say you have no information, and the model did
-                # (observed 2026-08-29..09-04: a weather forecast re-sent for a
-                # date four days stale). At the default 0 they are not injected
-                # at all: with no history quoted there is no scaffolding to
-                # restore. Nothing is lost WITHIN the wake — both blocks only
-                # ever hold PREVIOUS turns (see AgentExecutor.delegations), and
-                # this turn's own tool results ride the message list.
-                hist = cfg.history_messages
-                prior_delegations = delegation_history(session, hist) if hist > 0 else []
-                prior_tools = tool_history(session, hist) if hist > 0 else []
+                # No conversation and no findings blocks: a recurring task is
+                # self-similar, and its own past fed back verbatim made models
+                # repeat stale answers (a forecast four days old, re-sent every
+                # morning). What a task asks to see is its own previous runs,
+                # request and reply only (Task.history_runs).
+                provider = executor.provider
+                fit = (await provider.context_state([], None))["fit"]
+                prior = task_history(
+                    session, wake_tasks, int(fit * TASK_HISTORY_SHARE),
+                    lambda text: int(provider._estimate_tokens(text) * provider.token_ratio()))
                 tool_events: list[dict] = []
                 reply_text = ""
                 reasoning_text = ""
@@ -672,9 +714,7 @@ class AutonomyService:
                 try:
                     cancel_compaction(sid)  # do not race this wake for the model
                     async for event in executor.run_stream(
-                            prompt, prior, None, memory_context(session),
-                            delegations=prior_delegations,
-                            tool_results=prior_tools):
+                            prompt, prior, None, memory_context(session)):
                         et = event.get("type")
                         if et == "tool_result":
                             tool_events.append(event.get("data", {}))
@@ -698,7 +738,7 @@ class AutonomyService:
                                 session["messages"].append({
                                     "role": "user", "text": prompt,
                                     "autonomous": True, "agent_id": agent.id,
-                                    "ts": now_iso(),
+                                    "task_ids": task_ids, "ts": now_iso(),
                                 })
                                 steps = steps_from(data.get("trace"), tool_events)
                                 conv = data.get("conversation")
@@ -717,7 +757,7 @@ class AutonomyService:
                     if not recorded:
                         session["messages"].append({
                             "role": "user", "text": prompt, "autonomous": True,
-                            "agent_id": agent.id, "ts": now_iso(),
+                            "agent_id": agent.id, "task_ids": task_ids, "ts": now_iso(),
                         })
                         partial = (f"{reply_text}\n\n{prompts.INTERRUPTED}" if reply_text
                                    else prompts.INTERRUPTED)

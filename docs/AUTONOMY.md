@@ -38,12 +38,19 @@ with a robot icon in the chat history. It reads the task and decides what to do
 — including nothing: a wake that ends with `NOOP` and no tool call leaves no
 trace.
 
-A wake deliberately gets **no chat history**. A recurring task's history is
+By default a wake gets **no chat history**. A recurring task's history is
 dozens of near-identical copies of itself, and a small local model reading its
-own last output will happily reproduce it — we watched an agent report the same
+own last output will happily reproduce it: we watched an agent report the same
 stale failure for three wakes after the problem was fixed. Continuity comes
 from long-term memory instead; add `memory_search` to the task text if the
 agent needs more.
+
+A task that must build on its last run ("report only what is new since
+yesterday") can ask for it: **Remember previous runs** in the task form
+(`history_runs`, 0 to 10). The agent then rereads that many of the task's own
+previous runs, each as the request and the final reply, never the tool calls
+and never another task's runs. They may fill at most a quarter of the model's
+context; what doesn't fit is dropped oldest first.
 
 ## Useful pieces to give a live agent
 

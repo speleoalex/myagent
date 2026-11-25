@@ -24,10 +24,11 @@ broke with a real 8B model, not because it seemed prudent:
   still deciding.
 - **The context window is probed from the backend**, not typed in and hoped
   for. llama.cpp reports its per-slot window; Ollama reports what it loaded.
-- **An autonomous wake gets no chat history.** A recurring task's history is
-  dozens of near-identical copies of itself, and a small model reading its own
-  last output will reproduce it — one agent reported the same stale failure for
-  three wakes after the problem was fixed.
+- **An autonomous wake gets no chat history by default.** A recurring task's
+  history is dozens of near-identical copies of itself, and a small model reading
+  its own last output will reproduce it: one agent reported the same stale
+  failure for three wakes after the problem was fixed. A task that needs its past
+  asks for a number of its own runs, request and reply only.
 - **Reasoning is a separate channel.** A thinking model's chain-of-thought
   never reaches the conversation, the next prompt, or a voice device's speaker.
 

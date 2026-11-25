@@ -5,7 +5,7 @@ import os
 import re
 from datetime import datetime
 
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 # Entity-id charset: single definition in app.ids (see its docstring).
 from app.ids import check_id as _check_id
@@ -217,6 +217,11 @@ class McpServer(BaseModel):
         return self
 
 
+#: Upper bound of Task.history_runs: enough for a week of a daily task, and
+#: the share of the context it may take caps it further anyway.
+TASK_HISTORY_MAX = 10
+
+
 class Task(BaseModel):
     """One scheduled job: an agent, what it must do, and when.
 
@@ -243,6 +248,13 @@ class Task(BaseModel):
     # one reply, so on its own row a reply about the morning greeting reads as
     # the outcome of the weather task (observed on the Orin). > 1 says so.
     last_wake_tasks: int = 0
+    # How many of THIS task's previous runs the agent sees when it runs again,
+    # each as the request and the final reply, never the tool calls. 0 (the
+    # default) = none: a recurring task's past is mostly copies of itself, and
+    # a model reading its last output tends to repeat it. Raise it for a task
+    # that builds on the last run ("report only what is new since yesterday").
+    # Older runs are dropped first when they don't fit (autonomy.task_history).
+    history_runs: int = Field(default=0, ge=0, le=TASK_HISTORY_MAX)
     source: str = "user"            # user | agent | api
     created_at: str = ""
 
@@ -289,25 +301,6 @@ class AutonomousConfig(BaseModel):
     # can hold it), or several of either separated by commas. A fallback only:
     # notify_user's own ``to`` and ``chat_id`` both win over it.
     notify_to: str = ""
-    # How many messages of the PREVIOUS wakes a wake may see. Default 0: none.
-    #
-    # Nothing like the interactive window (200 with memory on). A recurring task
-    # is self-similar, so its own history is dozens of near-identical copies of
-    # the same wake prompt and the same reply — not continuity but a feedback
-    # loop: the model reads its last output and reproduces it, which is how an
-    # already-fixed misconfiguration keeps being reported as broken (observed,
-    # for three wakes running, after the fix landed). Continuity that actually
-    # matters belongs to long-term memory, whose memory.md is injected, and an agent
-    # that needs more can be told to call memory_search in its instructions.
-    #
-    # The full conversation is still written to the session file either way: this
-    # governs only what goes back INTO the prompt — and it governs ALL of it,
-    # the "## Agent findings" and "## What your tools returned earlier" blocks
-    # included. Those two are built from the session file rather than from the
-    # message window, so until 2026-09-04 they ignored this knob and fed the
-    # previous wakes back in regardless; that is the loop described above,
-    # reached through a side door. Raise it if you have a reason.
-    history_messages: int = 0
 
     @model_validator(mode="before")
     @classmethod

@@ -428,7 +428,6 @@ const AgentsPage = {
         { key: 'max_wakes_per_hour',     el: 'f-auto-maxwakes',     type: 'int',  dflt: 12,   group: 'grid' },
         { key: 'max_consecutive_errors', el: 'f-auto-maxerrors',    type: 'int',  dflt: 5,    group: 'grid' },
         { key: 'wake_timeout_s',         el: 'f-auto-timeout',      type: 'int',  dflt: 600,  group: 'grid' },
-        { key: 'history_messages',       el: 'f-auto-history',      type: 'int',  dflt: 0,    group: 'grid' },
         { key: 'notify_to',              el: 'f-auto-to',           type: 'text', dflt: '',   group: 'notify' },
     ],
 
@@ -554,27 +553,6 @@ const AgentsPage = {
                     : v === 1 ? i18n(K + 'maxerrors.b.one')
                     : v <= 5 ? i18n(K + 'maxerrors.b.mid', { n: F.int(v) })
                     : i18n(K + 'maxerrors.b.high', { n: F.int(v) }),
-            },
-            'f-auto-history': {
-                // 0 is a real, useful setting here (rely on memory alone), not a
-                // footgun — so unlike max-errors the scale starts at it.
-                id: 'f-auto-history', int: true, dflt: A['f-auto-history'], min: 0, max: 40, sentinel: 0,
-                steps: [0, 2, 4, 8, 16, 40],
-                label: i18n('agents.autoHistory'),
-                help: i18n(K + 'history.help'),
-                deps: ['f-memory'],
-                minLabel: i18n(K + 'history.endOff'),
-                fmt: (v) => (v === 0 ? i18n(K + 'history.endOff') : i18n('field.msgs', { n: F.int(v) })),
-                describe: (v, c) => {
-                    if (v === 0) {
-                        return c.memoryOn
-                            ? i18n(K + 'history.b.offMemory')
-                            : { text: i18n(K + 'history.b.offNoMemory'), warn: true };
-                    }
-                    return v <= 4 ? i18n(K + 'history.b.low', { n: F.int(v) })
-                        : v <= 16 ? i18n(K + 'history.b.mid', { n: F.int(v) })
-                        : { text: i18n(K + 'history.b.high', { n: F.int(v) }), warn: true };
-                },
             },
             'f-auto-timeout': {
                 id: 'f-auto-timeout', int: true, dflt: A['f-auto-timeout'], min: 30, max: 3600,

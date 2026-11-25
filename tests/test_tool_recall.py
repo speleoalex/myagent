@@ -26,9 +26,8 @@ tool results verbatim on the SYSTEM prompt. Cases:
   5. nothing reaches `conversation[]`: it rides on the system suffix, so
      is_scaffolding_message and the rewind endpoint are untouched;
   6. no tool history -> no section at all, i.e. today's prompt exactly;
-  7. all four turn paths actually pass it (a dropped kwarg is silent), and the
-     autonomous one passes a WINDOWED copy (see NON_FACT_TOOLS below and
-     AutonomousConfig.history_messages);
+  7. the interactive turn paths actually pass it (a dropped kwarg is silent),
+     and the autonomous one does not (see Task.history_runs);
   8. NON_FACT_TOOLS are excluded: a result that expires or that is a receipt for
      something DONE is not a fact to answer from later.
 """
@@ -100,8 +99,6 @@ check("ids are t<N> numbered from the oldest",
 check("call_agent is excluded — delegation_history owns it",
       all(h["tool"] != "call_agent" for h in hist))
 check("a failed call is kept", any("ERROR" in h["result"] for h in hist))
-check("the limit keeps the NEWEST, with their original ids",
-      [h["id"] for h in tool_history(session, limit=2)] == ["t2", "t3"])
 
 # 8. A result that expires, or that reports what the agent DID, is dropped —
 #    quoted as a standing fact the stale date was worse than absent: the agent
@@ -174,13 +171,10 @@ for f in ("server/app/routers/chat.py", "server/app/engine/channel_turn.py"):
     src = (ROOT / f).read_text(encoding="utf-8")
     check(f"{Path(f).name} passes tool_results",
           "tool_results=tool_history(session)" in src)
-# The autonomous path passes it too, but WINDOWED: an unbounded copy fed the
-# previous wakes back into the prompt regardless of history_messages. Pinned in
-# test_recall_delegation.test_wake_findings_follow_the_history_window.
+# The autonomous path does NOT: a copy fed the previous wakes back into the
+# prompt. Pinned in test_recall_delegation.test_wake_quotes_no_findings.
 src = (ROOT / "server/app/engine/autonomy.py").read_text(encoding="utf-8")
-check("autonomy.py passes tool_results, windowed by history_messages",
-      "tool_results=prior_tools" in src
-      and "tool_history(session, hist) if hist > 0 else []" in src)
+check("autonomy.py passes no tool_results", "tool_results=" not in src)
 src = (ROOT / "server/app/tools/internal.py").read_text(encoding="utf-8")
 check("a sub-agent is NOT given the parent's tool history",
       "tool_results=" not in src)

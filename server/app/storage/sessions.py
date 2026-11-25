@@ -170,16 +170,13 @@ NON_FACT_TOOLS = frozenset({
 })
 
 
-def delegation_history(session: dict, limit: int | None = None) -> list[dict]:
+def delegation_history(session: dict) -> list[dict]:
     """The sub-agent replies recorded in this session, oldest first.
 
     Ids are ``d<N>`` numbered from the OLDEST: they must stay stable as the
     chat appends new delegations, because the model quotes them back to us
     (recall_delegation). Numbering from the newest would renumber every entry
     at every turn.
-
-    ``limit`` keeps the newest N entries — with their original ids, so a
-    trimmed window still resolves.
     """
     out: list[dict] = []
     for m in session.get("messages") or []:
@@ -196,12 +193,10 @@ def delegation_history(session: dict, limit: int | None = None) -> list[dict]:
             "reply": m.get("result") or sub.get("reply") or m.get("result_preview") or "",
             "ts": m.get("ts") or "",
         })
-    if limit and len(out) > limit:
-        return out[-limit:]
     return out
 
 
-def tool_history(session: dict, limit: int | None = None) -> list[dict]:
+def tool_history(session: dict) -> list[dict]:
     """What THIS agent's own tools returned earlier in the chat, oldest first.
 
     The twin of :func:`delegation_history`, and it exists for the same bug seen
@@ -239,8 +234,6 @@ def tool_history(session: dict, limit: int | None = None) -> list[dict]:
             "result": m.get("result") or m.get("result_preview") or "",
             "ts": m.get("ts") or "",
         })
-    if limit and len(out) > limit:
-        return out[-limit:]
     return out
 
 

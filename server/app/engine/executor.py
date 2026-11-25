@@ -1942,7 +1942,9 @@ class AgentExecutor:
         if conversation:
             history = self._clean_conversation(
                 conversation,
-                max_messages=200 if self.agent.memory_enabled else 10,
+                # A wake's history is already bounded by autonomy.task_history
+                # (runs the task asked for, within a share of the context).
+                max_messages=200 if self.agent.memory_enabled or self.unattended else 10,
             )
         own_history, foreign_context = self._split_history(history)
 

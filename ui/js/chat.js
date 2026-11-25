@@ -166,9 +166,11 @@ const ChatPage = {
 
         this.bindEvents();
         await this.refreshHistory();
-        await this.loadCurrent();
+        // Not on a deep link: there the address already names the session,
+        // and writing #/chat first would leave an extra entry to go back to.
+        await this.loadCurrent({ syncUrl: !openSession });
         // A session that no longer exists (deleted, or resumed and reloaded)
-        // fails silently inside viewArchived, leaving the current chat shown.
+        // falls back to the current chat, and viewArchived corrects the URL.
         if (openSession) await this.viewArchived(openSession);
 
         // The home page's question box: a new topic, so a new chat, and auto
@@ -306,7 +308,21 @@ const ChatPage = {
         });
     },
 
-    async loadCurrent() {
+    /** Keep the address bar on what is shown, so a chat can be linked and
+     * back/forward move between chats: #/chat/session/<id> for a stored chat,
+     * #/chat for the current one. pushState rather than location.hash: the
+     * view is already drawn, and a hashchange would render the page again.
+     * An agent pick (#/chat/<agent>) shows the current chat too, so it stays. */
+    _syncUrl(sessionId, replace = false) {
+        const onSession = location.hash.startsWith('#/chat/session/');
+        if (!sessionId && !onSession) return;
+        const want = sessionId ? `#/chat/session/${encodeURIComponent(sessionId)}` : '#/chat';
+        if (location.hash === want) return;
+        history[replace ? 'replaceState' : 'pushState'](null, '', want);
+    },
+
+    async loadCurrent({ syncUrl = true } = {}) {
+        if (syncUrl) this._syncUrl(null);
         this.viewingArchived = false;
         this._archivedId = null;
         this.renderSideHistory();  // drop the highlight of the archived chat
@@ -353,7 +369,10 @@ const ChatPage = {
     async viewArchived(id) {
         let session = null;
         try { session = await App.api('GET', '/sessions/' + id); } catch (e) { /* ignore */ }
-        if (!session) return;
+        // A link to a chat that is gone lands on the current one, and says so
+        // in the address bar instead of keeping a URL that shows something else.
+        if (!session) { this._syncUrl(null, true); return; }
+        this._syncUrl(id);
         this.viewingArchived = true;
         this._archivedId = id;
         this.renderSideHistory();  // highlight it in the xl column

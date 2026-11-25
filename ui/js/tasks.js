@@ -238,7 +238,7 @@ const TasksPage = {
     async renderForm(taskId, presetAgent = '') {
         const isEdit = !!taskId;
         let task = { id: '', agent_id: presetAgent, prompt: '', cron: '', at: '',
-                     enabled: true, source: 'user' };
+                     enabled: true, history_runs: 0, source: 'user' };
         let agents = [];
         try {
             agents = await App.api('GET', '/agents');
@@ -327,6 +327,16 @@ const TasksPage = {
                     <div class="mt-3 small" id="preview"></div>
                 </div></div>
 
+                <div class="mb-3">
+                    <label class="form-label" for="f-history">${i18n('tasks.fieldHistory')}</label>
+                    <div class="input-group" style="max-width:16rem">
+                        <input type="number" class="form-control" id="f-history" min="0" max="10" step="1"
+                               value="${App.escAttr(String(task.history_runs || 0))}">
+                        <span class="input-group-text">${i18n('tasks.historyUnit')}</span>
+                    </div>
+                    <div class="form-text">${i18n('tasks.historyHelp')}</div>
+                </div>
+
                 <div class="form-check form-switch mb-3">
                     <input class="form-check-input" type="checkbox" id="f-enabled" ${task.enabled ? 'checked' : ''}>
                     <label class="form-check-label" for="f-enabled">${i18n('tasks.fieldEnabled')}</label>
@@ -380,6 +390,7 @@ const TasksPage = {
                 agent_id: document.getElementById('f-agent').value,
                 prompt: document.getElementById('f-prompt').value.trim(),
                 enabled: document.getElementById('f-enabled').checked,
+                history_runs: Math.max(0, parseInt(document.getElementById('f-history').value, 10) || 0),
                 source: task.source || 'user',
                 ...schedule,
             };
