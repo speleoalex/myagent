@@ -442,13 +442,15 @@ def notify_targets(state) -> dict:
         return {}
 
 
-def _resolve_by_name(state, to: str, channel: str, binding_id: str = ""):
+def _resolve_by_name(state, to: str, channel: str, binding_id: str = "",
+                     agent_id: str = ""):
     """Ask the connectors plugin to turn a person's name into recipients.
 
     Returns ``(binding_id, recipients, note, error)``. The plugin owns the address
     book and the channel labels, so the resolution lives there; this only bridges
-    it to the tool's arguments. ``binding_id`` is passed IN as well: with two bots
-    the plugin cannot pick one on its own, and its own error says to name one.
+    it to the tool's arguments. ``binding_id`` (a bot the caller asked for, if
+    any) and ``agent_id`` (the caller) are passed IN as well: with several bots
+    they are what the plugin picks one by.
     """
     services = getattr(state, "connectors", None) if state is not None else None
     if services is None:
@@ -457,14 +459,14 @@ def _resolve_by_name(state, to: str, channel: str, binding_id: str = ""):
     resolver = getattr(services, "resolve_recipients", None)
     if resolver is None:
         return "", [], "", ("ERROR: this connectors plugin cannot look recipients up "
-                            "by name; pass binding_id and chat_id.")
+                            "by name. Update the plugin.")
     try:
-        result = resolver(to, channel, binding_id)
+        result = resolver(to, channel, binding_id, agent_id)
     except TypeError:
-        # A plugin predating binding_id and the note: core and plugin are
-        # installed separately, so degrade rather than crash. A TypeError raised
-        # inside the resolver still surfaces — the retry raises it again.
-        result = resolver(to, channel)
+        # A plugin predating agent_id: core and plugin are installed separately,
+        # so degrade rather than crash. A TypeError raised inside the resolver
+        # still surfaces — the retry raises it again.
+        result = resolver(to, channel, binding_id)
     found, error, *rest = result
     note = rest[0] if rest else ""
     if error or not found:
@@ -472,7 +474,8 @@ def _resolve_by_name(state, to: str, channel: str, binding_id: str = ""):
     return found[0].binding_id, list(found), note, ""
 
 
-def _resolve_configured(state, raw, channel: str, binding_id: str):
+def _resolve_configured(state, raw, channel: str, binding_id: str,
+                        agent_id: str = ""):
     """The agent's configured recipients, through the same resolver as ``to``.
 
     Returns ``(binding_id, targets, note, error)``. Each entry is resolved on its
@@ -486,7 +489,7 @@ def _resolve_configured(state, raw, channel: str, binding_id: str):
     targets, unknown, notes, first_error = [], [], [], ""
     for one in _split_recipients(raw):
         found_binding, found, note, error = _resolve_by_name(
-            state, one, channel, binding_id)
+            state, one, channel, binding_id, agent_id)
         if error:
             first_error = first_error or error
             unknown.append(one)
@@ -846,8 +849,10 @@ async def notify_user_handler(
                     "file in 'attachments' — its name in the workspace, or the "
                     "http(s) address of the file (a PDF link, an image) — or "
                     "rewrite the text without promising an attachment.")
-    cfg = getattr(getattr(executor, "agent", None), "autonomous", None)
-    binding_id = _or_configured(binding_id, cfg and cfg.notify_binding_id)
+    agent = getattr(executor, "agent", None)
+    cfg = getattr(agent, "autonomous", None)
+    agent_id = getattr(agent, "id", "") or ""
+    binding_id = _or_configured(binding_id, "")
     to = _or_configured(to, "")
     channel = _or_configured(channel, "")
 
@@ -855,27 +860,34 @@ async def notify_user_handler(
     ids = _split_chat_ids(chat_id)
     if to:
         binding_id, found, note, error = _resolve_by_name(
-            _state, to, channel, binding_id)
+            _state, to, channel, binding_id, agent_id)
         if error:
             return error
         targets = [(r.chat_id, r.display) for r in found]
     elif ids:
         # The model already knows the id, so its own id is all the display there
-        # is — there is no name to report.
+        # is — there is no name to report. The bot is still the plugin's pick.
+        if not binding_id:
+            binding_id, _, _, error = _resolve_by_name(
+                _state, ids[0], channel, "", agent_id)
+            if error:
+                return error
         targets = [(one, one) for one in ids]
     else:
         binding_id, targets, note, error = _resolve_configured(
-            _state, cfg and cfg.notify_to, channel, binding_id)
+            _state, cfg and cfg.notify_to, channel, binding_id, agent_id)
         if error:
             return error
     # The same person can be reached twice — two contacts sharing a handle, or a
     # broadcast overlapping an explicit id. One send per chat, always.
     targets = list({one: (one, display) for one, display in targets}.values())
     if not binding_id or not targets:
+        # Only what the model can do is said to the model: 'to' and 'channel'
+        # are its whole schema. The rest is the operator's, and reads as such in
+        # the Tasks page (see autonomy._delivery_error).
         return ("ERROR: no notification target. Pass 'to' with a contact name "
-                "(optionally 'channel'), or binding_id and chat_id, or set "
-                "notify_binding_id / notify_to in the agent's autonomous "
-                "configuration.")
+                "(optionally 'channel'). The agent has no default recipient "
+                "configured.")
 
     connector, error = _connector_for(_state, binding_id)
     if connector is None:
@@ -1027,10 +1039,13 @@ async def _log_to_channel(sid: str, text: str, executor, named) -> bool:
         async with named.lock(sid):
             session = await asyncio.to_thread(named.get, sid, agent_id)
             # Marked so the UI (and a human reading the log) can tell an
-            # unprompted push from a reply to something the user asked.
+            # unprompted push from a reply to something the user asked — and
+            # signed: any agent may write through any bot, but the one who
+            # ANSWERS here is the bot's own, and it must not take a guest's
+            # message for something it said (agent_router.mark_guest_notifications).
             session.setdefault("messages", []).append(
                 {"role": "assistant", "text": text, "ts": now_iso(),
-                 "notification": True})
+                 "notification": True, "agent_id": agent_id})
             session.setdefault("conversation", []).append(
                 {"role": "assistant", "content": text})
             # save_rotating, not save: a notification-only channel never gets a

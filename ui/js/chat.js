@@ -411,7 +411,7 @@ const ChatPage = {
         // For the Auto-mode "via <agent>" label: user messages persist the
         // resolved agent_id of the turn they opened (record_user_turn).
         let lastAgentId = null;
-        const flushAssistant = (text, ts, reasoning, context) => {
+        const flushAssistant = (text, ts, reasoning, context, guestId) => {
             const msgDiv = this.createMessageDiv('assistant');
             msgDiv._md = text || '';  // raw markdown, for the copy / source view
             this.setReasoning(msgDiv, reasoning || '', false);
@@ -438,7 +438,11 @@ const ChatPage = {
             msgDiv.appendChild(this._timeEl(ts));
             // Known cosmetic limit: a chat where Auto was toggled midway labels
             // every turn — each label still names the agent that really answered.
-            if (session.agent_auto && lastAgentId) {
+            // A notification another agent pushed through this bot: signed, or
+            // it reads as something the agent of this chat said.
+            if (guestId) {
+                this._tagAgent(msgDiv, guestId);
+            } else if (session.agent_auto && lastAgentId) {
                 this._tagAgent(msgDiv, lastAgentId);
             }
             pendingTools = [];
@@ -451,7 +455,9 @@ const ChatPage = {
             } else if (m.role === 'tool') {
                 pendingTools.push(m);
             } else if (m.role === 'assistant') {
-                flushAssistant(m.text || '', m.ts, m.reasoning, m.context);
+                const owner = lastAgentId || session.agent_id;
+                flushAssistant(m.text || '', m.ts, m.reasoning, m.context,
+                    m.notification && m.agent_id && m.agent_id !== owner ? m.agent_id : null);
             } else if (m.role === 'error' || m.role === 'notice') {
                 this.appendMessage(m.role, m.text || '', m.ts);
             }

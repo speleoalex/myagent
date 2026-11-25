@@ -15,7 +15,7 @@
       },
       "channel": {
         "type": "string",
-        "description": "Which messaging channel, only when more than one could apply."
+        "description": "Where to send it, only when more than one could apply: a kind of channel (Telegram, Email) or the name of one bot."
       },
       "subject": {
         "type": "string",

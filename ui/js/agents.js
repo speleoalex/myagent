@@ -351,7 +351,6 @@ const AgentsPage = {
         { key: 'max_consecutive_errors', el: 'f-auto-maxerrors',    type: 'int',  dflt: 5,    group: 'grid' },
         { key: 'wake_timeout_s',         el: 'f-auto-timeout',      type: 'int',  dflt: 600,  group: 'grid' },
         { key: 'history_messages',       el: 'f-auto-history',      type: 'int',  dflt: 0,    group: 'grid' },
-        { key: 'notify_binding_id',      el: 'f-auto-binding',      type: 'text', dflt: '',   group: 'notify' },
         { key: 'notify_to',              el: 'f-auto-to',           type: 'text', dflt: '',   group: 'notify' },
     ],
 
@@ -579,35 +578,35 @@ const AgentsPage = {
         return text === key ? (fallback || '') : text;
     },
 
-    /** The notify target picker.
+    /** Who this agent's notifications reach, and through which bot.
      *
-     *  Bots are configured by the connectors plugin (GET /api/connectors/bindings,
-     *  managed at #/connectors). When the list is available this is a real
-     *  <select> — the set is closed (you can only send through a configured
-     *  binding) and the NAME is what the user knows, not the id.
-     *
-     *  When it is not available — the plugin isn't installed, or simply not used
-     *  by this install — it falls back to a free-text input. A <select> would
-     *  make the field impossible to fill in that state, which is worse than typing.
-     *  Same reason a stored id missing from the list is kept as its own option
-     *  rather than silently reset (as with a deleted model). */
-    bindingField(bindings, current) {
-        if (!bindings.length) {
-            return `<input type="text" class="form-control form-control-sm" id="f-auto-binding"
-                           value="${App.escAttr(current)}">`;
-        }
-        const known = bindings.some(b => b.id === current);
+     *  Read-only, computed by the connectors plugin with the code a real send
+     *  runs (GET /api/connectors/reach): the bot is chosen by rule — the agent's
+     *  own bots first, then the one the person already talks to — and a rule
+     *  nobody can see is a rule nobody trusts. "Answered by" is there because
+     *  the reply goes to the BOT's agent, which may be another one. */
+    reachTable(rows, agentId) {
+        if (!rows.length) return '';
+        const cell = (r) => r.bot_id
+            ? `<td>${App.esc(r.bot_name)} <span class="text-secondary">(${App.esc(r.channel)})</span></td>
+               <td class="${r.answered_by && r.answered_by !== agentId ? 'text-warning-emphasis' : ''}">${App.esc(r.answered_by || '—')}</td>`
+            : `<td colspan="2" class="text-warning-emphasis">
+                   <i class="bi bi-exclamation-triangle"></i> ${App.esc(r.undecided.length
+                       ? i18n('agents.reachUndecided', { bots: r.undecided.join(', ') })
+                       : i18n('agents.reachNoBot'))}</td>`;
         return `
-            <select class="form-select form-select-sm" id="f-auto-binding">
-                <option value="" ${!current ? 'selected' : ''}>${i18n('agents.autoBindingNone')}</option>
-                ${bindings.map(b => `
-                    <option value="${App.escAttr(b.id)}" ${b.id === current ? 'selected' : ''}
-                            data-allowed="${App.escAttr((b.allowed_ids || []).join(','))}"
-                            data-type="${App.escAttr(b.type || '')}">
-                        ${App.esc(b.name || b.id)} (${App.esc(b.id)})${b.enabled === false ? ' — ' + i18n('mcp.stateDisabled') : ''}
-                    </option>`).join('')}
-                ${current && !known ? `<option value="${App.escAttr(current)}" selected>${App.esc(current)} — ${i18n('agents.bindingMissing')}</option>` : ''}
-            </select>`;
+            <div class="small text-secondary mt-3 mb-1">${i18n('agents.reachTitle')}</div>
+            <div class="table-responsive">
+                <table class="table table-sm small mb-1">
+                    <thead><tr>
+                        <th>${i18n('agents.reachContact')}</th>
+                        <th>${i18n('agents.reachBot')}</th>
+                        <th>${i18n('agents.reachAnswers')}</th>
+                    </tr></thead>
+                    <tbody>${rows.map(r => `<tr><td>${App.esc(r.contact)}</td>${cell(r)}</tr>`).join('')}</tbody>
+                </table>
+            </div>
+            <div class="form-text">${i18n('agents.reachHint')}</div>`;
     },
 
     /** The four numeric autonomy knobs, from AUTO_FIELDS. Two-up from md up: each
@@ -882,7 +881,7 @@ const AgentsPage = {
         // Eight independent GETs (three of them — the two connectors routes and
         // MCP status — can be slow): fetched together instead of paying the sum of
         // their latencies on every form open. Each degrades on its own.
-        const [models, tools, agents, autoStatus, bindingsRes, mcpStatus, agentTasks,
+        const [models, tools, agents, autoStatus, reachRes, mcpStatus, agentTasks,
                contactsRes] =
             await Promise.all([
                 App.api('GET', '/models').catch(() => []),
@@ -890,13 +889,14 @@ const AgentsPage = {
                 App.api('GET', '/agents').catch(() => []),
                 // Autonomy status, so "wake now" has something to report into.
                 App.api('GET', '/autonomy/status').catch(() => ({})),
-                // Notify targets, owned by the connectors plugin. Asked for only
+                // Who the agent reaches, owned by the connectors plugin. Asked for only
                 // when the plugin is actually loaded: without it the route does
                 // not exist, and calling it anyway would log a 404 in the console
                 // on every form open of a perfectly healthy install. The probe is
                 // cached per page load, so this costs no extra request.
                 (async () => (await App.plugin('connectors'))?.loaded
-                    ? App.api('GET', '/connectors/bindings').catch(() => null)
+                    ? App.api('GET', `/connectors/reach?agent_id=${encodeURIComponent(agentId || '')}`)
+                        .catch(() => null)
                     : null)(),
                 // Per-server state: a broken MCP server shows in the tool picker.
                 App.api('GET', '/mcp/status').catch(() => ({})),
@@ -913,8 +913,8 @@ const AgentsPage = {
             ]);
         // The plugin answers with a plain array; a failed fetch gives null, and
         // that IS the "not available" signal — no separate flag needed.
-        const bindings = Array.isArray(bindingsRes) ? bindingsRes : [];
-        const bindingsAvailable = Array.isArray(bindingsRes);
+        const reach = Array.isArray(reachRes) ? reachRes : [];
+        const connectorsAvailable = Array.isArray(reachRes);
         const contacts = Array.isArray(contactsRes) ? contactsRes : [];
         // Cache for the preview tree (opened from this form with unsaved values).
         this._allAgents = agents;
@@ -1233,30 +1233,24 @@ const AgentsPage = {
                                 <div class="row g-3">
                                     ${this.autoGrid(auto, specs)}
                                 </div>
-                                <div class="row g-2 mt-1">
-                                    <div class="col-6">
-                                        <label class="form-label small mb-1" for="f-auto-to">${i18n('agents.autoTo')}</label>
-                                        <!-- Stays free text on purpose. The suggestions are the
-                                             address book, and a group chat is not in it: its id
-                                             is negative and no contact can hold it. So the names
-                                             are offered, not imposed - an id must stay typeable. -->
-                                        <input type="text" class="form-control form-control-sm" id="f-auto-to"
-                                               list="notify-to-options" autocomplete="off"
-                                               value="${App.escAttr(auto.notify_to || '')}">
-                                        <datalist id="notify-to-options"></datalist>
-                                    </div>
-                                    <div class="col-6">
-                                        <label class="form-label small mb-1" for="f-auto-binding">${i18n('agents.autoBinding')}</label>
-                                        ${this.bindingField(bindings, auto.notify_binding_id || '')}
-                                    </div>
+                                <div class="mt-3">
+                                    <label class="form-label small mb-1" for="f-auto-to">${i18n('agents.autoTo')}</label>
+                                    <!-- Stays free text on purpose. The suggestions are the
+                                         address book, and a group chat is not in it: its id
+                                         is negative and no contact can hold it. So the names
+                                         are offered, not imposed - an id must stay typeable. -->
+                                    <input type="text" class="form-control form-control-sm" id="f-auto-to"
+                                           list="notify-to-options" autocomplete="off"
+                                           value="${App.escAttr(auto.notify_to || '')}">
+                                    <datalist id="notify-to-options">
+                                        ${contacts.map(c => `<option value="${App.escAttr(c.name || c.id)}"></option>`).join('')}
+                                    </datalist>
                                 </div>
                                 <div class="form-text">${i18n('agents.autoNotifyHint')}
                                     <a href="#/connectors">${i18n('agents.autoBindingManage')}</a></div>
-                                <!-- Filled by syncNotifyTargets(): either the recipient
-                                     suggestions or the "plugin not active" warning. It is
-                                     written with textContent, so the link above cannot
-                                     live in here. -->
-                                <div class="form-text" id="notify-hint"></div>
+                                ${connectorsAvailable ? '' : `
+                                <div class="form-text text-warning-emphasis">${i18n('agents.connectorsUnavailable')}</div>`}
+                                ${this.reachTable(reach, agentId)}
                                 <div id="notify-target-warn" class="form-text text-warning-emphasis d-none">
                                     <i class="bi bi-exclamation-triangle"></i> ${i18n('agents.liveNoTarget')}
                                 </div>`)}
@@ -1525,47 +1519,6 @@ const AgentsPage = {
                 setTimeout(tick, 2000);
             };
         }
-
-        // Recipient suggestions follow the chosen bot. Two sources, in this order:
-        // the address book — NAMES, which is what gets stored and what the server
-        // resolves — and then the bot's allowlist, for the ids that answer to
-        // nobody in particular. It stays a <datalist> and not a <select> because
-        // neither source can contain a group chat id.
-        //
-        // With no bot chosen and exactly one configured, that one is used: it is
-        // what the server does too (a single candidate needs no disambiguation),
-        // so the suggestions match what the empty field will actually do.
-        const bindingEl = document.getElementById('f-auto-binding');
-        const soleBinding = bindings.length === 1 ? bindings[0] : null;
-        const syncNotifyTargets = () => {
-            const opt = bindingEl.selectedOptions ? bindingEl.selectedOptions[0] : null;
-            const chosen = opt && opt.value;
-            const type = (chosen ? opt.dataset.type : soleBinding?.type) || '';
-            const ids = (chosen
-                ? (opt.dataset.allowed || '').split(',')
-                : (soleBinding?.allowed_ids || [])).filter(Boolean);
-            // Only contacts reachable on THIS channel: a name without a handle
-            // there resolves to "has no Telegram handle", so suggesting it would
-            // be suggesting a failure.
-            const named = type
-                ? contacts.filter(c => (c.handles || {})[type])
-                    .map(c => ({ name: c.name || c.id, id: c.handles[type] }))
-                : [];
-            const seen = new Set(named.map(c => c.id));
-            document.getElementById('notify-to-options').innerHTML = [
-                ...named.map(c => `<option value="${App.escAttr(c.name)}"></option>`),
-                ...ids.filter(id => !seen.has(id))
-                    .map(id => `<option value="${App.escAttr(id)}"></option>`),
-            ].join('');
-            const total = named.length + ids.filter(id => !seen.has(id)).length;
-            const hint = document.getElementById('notify-hint');
-            hint.className = 'form-text' + (bindingsAvailable ? '' : ' text-warning-emphasis');
-            hint.textContent = !bindingsAvailable
-                ? i18n('agents.autoBindingUnavailable')
-                : (total ? i18n('agents.autoToSuggest', { n: total }) : '');
-        };
-        bindingEl.addEventListener('change', syncNotifyTargets);
-        syncNotifyTargets();
 
         // A group's "all tools" entry (tool category or MCP server) supersedes
         // its individual tools: uncheck them as well as disabling them, since

@@ -613,6 +613,18 @@ asked of the connector (`session_id_for`): it derives from the binding's
 at all by default (`AutonomousConfig.history_messages: 0`); continuity comes from
 long-term memory instead.
 
+When several bots could send a notification, `Connectors._prefer` picks one:
+first the bots bound to the calling agent, then the one whose conversation with
+the recipient moved last. `notify_user`'s `channel` takes a kind of channel
+("Telegram") or a single bot, by id or name. Only when nothing tells the bots
+apart is the call refused, and the error lists the values `channel` accepts.
+There is no per-agent default bot.
+
+A notification is appended to the conversation of the bot it left from, signed
+with the sending agent. The reply is always answered by the bot's own agent:
+when that is a different one, `mark_guest_notifications` has the executor quote
+the message as said by another assistant, and the chat labels it "via <agent>".
+
 Inbound provenance is the reverse path: the transport hands
 `process_message` the sender's id / @username / display name, `CoreClient.chat`
 resolves them against the address book (`Connectors.sender_display`, the mirror
@@ -625,8 +637,8 @@ no English words: a small model reads the first line of the user turn as the
 user's language, and a "Message from …" prefix flipped whole replies to
 English.
 
-`GET /api/connectors/bindings` is served by the plugin and lets the agent form
-offer a real picker for `autonomous.notify_binding_id` instead of a free-text id;
+`GET /api/connectors/reach?agent_id=` is served by the plugin and lets the agent
+form show, per contact, the bot a notification would leave from and who answers;
 `GET /api/connectors/contacts` fills the suggestions for `autonomous.notify_to`,
 which stores a person's NAME — the same string `notify_user`'s `to` takes, resolved
 by the same code, so a default target is checkable and survives that person's chat

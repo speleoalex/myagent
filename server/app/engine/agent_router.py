@@ -284,6 +284,29 @@ async def resolve_auto(agent_id: str, message: str, session: dict, stores: Store
                       f"answering with '{fallback}'.")
 
 
+def mark_guest_notifications(prior: list[ChatMessage], session: dict,
+                             agent_id: str) -> None:
+    """Flag (ChatMessage.foreign) what ANOTHER agent pushed into this chat.
+
+    Any agent with notify_user may write through any bot, and the message is
+    appended to that bot's conversation with the recipient. The reply, though,
+    is answered by the bot's own agent, which would replay the guest's message
+    as an assistant turn of its own: "you wrote me about a job offer" lands on an
+    agent that never searched for one. Flagged, the executor quotes it in the
+    system prompt as said by another assistant, exactly like an Auto-routed turn.
+
+    Aligned by TEXT against messages[], where _log_to_channel signs each
+    notification with its sender: conversation[] is rewritten by every turn and
+    keeps no such field. After a rotation messages[] starts empty, so older
+    guest messages lose the flag — the same limit mark_foreign has."""
+    guests = {m.get("text") for m in session.get("messages", [])
+              if m.get("notification") and m.get("agent_id")
+              and m["agent_id"] != agent_id}
+    for m in prior:
+        if m.role == "assistant" and m.content in guests:
+            m.foreign = True
+
+
 def mark_foreign(prior: list[ChatMessage], session: dict, agent_id: str) -> None:
     """Flag (ChatMessage.foreign) the history turns another agent answered.
 

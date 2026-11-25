@@ -96,8 +96,8 @@ unnecessary. What the connectors plugin uses:
 
 A plugin can also be *read* by a core tool through its `app.state` key, which is
 how `notify_user` turns *"message Alessandro on Telegram"* into a chat id: the
-connectors plugin exposes `resolve_recipients(name, channel)` and the tool calls
-it when given a name instead of an id. Keep such a seam a plain method returning
+connectors plugin exposes `resolve_recipients(name, channel, binding_id, agent_id)`
+and the tool calls it when given a name instead of an id. Keep such a seam a plain method returning
 `(results, error)` — an error the caller can read and correct beats an exception,
 because the caller here is a language model. The same tool then calls the
 connector's `notify(chat_id, text, subject, files)` — optional, looked up with

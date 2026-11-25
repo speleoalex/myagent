@@ -164,6 +164,16 @@ class CoreClient:
         parts = out.split("\n\n", 2)
         return (parts[2] if len(parts) > 2 else out).strip()
 
+    def last_activity(self, session_id: str) -> str:
+        """When a channel session last moved (``updated_at``), "" if it does not
+        exist. Turns and notifications both count: either way that is where the
+        conversation is. Lets the recipient lookup prefer the bot a person
+        already talks to."""
+        named = getattr(self._state, "named_sessions", None)
+        if named is None or not session_id or not named.exists(session_id):
+            return ""
+        return named.get(session_id).get("updated_at") or ""
+
     async def reset_session(self, session_id: str) -> bool:
         """Clear a channel conversation, parking the old log in the web history
         (same thing DELETE /api/chat/sessions/{id} does)."""

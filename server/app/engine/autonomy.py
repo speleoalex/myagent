@@ -51,7 +51,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from app.engine import prompts
-from app.engine.executor import AgentExecutor
+from app.engine.executor import NOTIFY_USER, AgentExecutor
 from app.engine.memory_compactor import cancel_compaction, schedule_compaction
 from app.models import Agent, AutonomousConfig, ChatMessage
 from app.storage.sessions import (delegation_history, memory_context, now_iso,
@@ -132,6 +132,21 @@ def session_id_for(agent_id: str) -> str:
 def _short(text: str, limit: int = 200) -> str:
     text = " ".join((text or "").split())
     return text if len(text) <= limit else text[:limit].rstrip() + "…"
+
+
+def _delivery_error(tool_events: list[dict]) -> str:
+    """The last notify_user error, when the turn called it and NO call got through.
+
+    A wake is "acted" as soon as it calls a tool, so a task whose notification
+    was refused looked like a success: on the Orin, 2026-11, the master's daily
+    tasks lost every message for days (two bots, the recipient ambiguous) while the Tasks page showed them green, and the refusal
+    lived only in the model's own reply. One failed attempt followed by one that
+    worked is a delivery, so it takes ALL of them failing."""
+    calls = [e for e in tool_events if e.get("tool") == NOTIFY_USER]
+    previews = [(e.get("result_preview") or "").strip() for e in calls]
+    if not previews or not all(p.startswith("ERROR") for p in previews):
+        return ""
+    return previews[-1]
 
 
 def _when(task: dict) -> str:
@@ -374,7 +389,7 @@ class AutonomyService:
         st["last_wake"] = started
         st["wake_history"] = self._wakes_last_hour(st) + [started]
         self._save_state(aid, st)
-        result = {"reply": "", "tool_calls": 0, "error": None}
+        result = {"reply": "", "tool_calls": 0, "error": None, "delivery_error": ""}
         timed_out = False
         stopped = False
         wake_tasks: list[dict] = []
@@ -462,17 +477,28 @@ class AutonomyService:
             st["last_result"] = "stopped"  # user intervention: not an error
         else:
             noop = result["tool_calls"] == 0 and _NOOP_RE.match(result["reply"] or "")
+            # A refused notification is NOT a failed wake: the tasks still move
+            # on and no retry is scheduled. Retrying would redo work that did
+            # happen (a 3-minute search, a report already written), and the
+            # scheduler's own alert would travel the same refused channel. What
+            # it needs is a human fixing the target, so it is shown instead:
+            # its own outcome, and the tool's error first in last_reply — that
+            # text names the cause, the model's reply usually does not.
+            undelivered = "" if noop else result.get("delivery_error", "")
+            outcome = "noop" if noop else "undelivered" if undelivered else "acted"
             reply = ""
             if not noop:
                 tools = f" [tools: {result['tool_calls']}]" if result["tool_calls"] else ""
                 reply = _short(result["reply"]) + tools
+                if undelivered:
+                    reply = f"{NOTIFY_USER}: {_short(undelivered, 160)} | {reply}"
             # Only now do the tasks move on: same run-once-on-success contract
             # the event queue had. All tasks of one wake share one outcome.
             for t in wake_tasks:
-                self.tasks.advance(t["id"], "noop" if noop else "acted", reply)
+                self.tasks.advance(t["id"], outcome, reply)
             recovered = st.get("consecutive_errors", 0)
             st["consecutive_errors"] = 0
-            st["last_result"] = "noop" if noop else "acted"
+            st["last_result"] = outcome
             st.pop("last_error", None)
             st.pop("retry_after", None)
             # Only if the user was told it was broken. Silence after an alert
@@ -584,6 +610,7 @@ class AutonomyService:
                             reply = data.get("reply") or reply_text
                             result["reply"] = reply
                             result["tool_calls"] = len(tool_events)
+                            result["delivery_error"] = _delivery_error(tool_events)
                             noop = not tool_events and _NOOP_RE.match(reply or "")
                             if not noop:
                                 session["messages"].append({

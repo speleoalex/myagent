@@ -26,6 +26,13 @@ async def get_status(request: Request):
     return {**services(request).manager.summary(), "channels": all_channels()}
 
 
+@router.get("/reach")
+async def reach_preview(request: Request, agent_id: str = ""):
+    """Who this agent's notifications would reach, and through which bot: one
+    row per contact (see Connectors.reach_preview). Read-only, sends nothing."""
+    return services(request).reach_preview(agent_id)
+
+
 @router.post("/stop")
 async def stop_all(request: Request):
     """Stop every bot and remember it across restarts. The way out is

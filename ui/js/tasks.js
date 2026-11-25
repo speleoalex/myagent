@@ -86,8 +86,9 @@ const TasksPage = {
 
     resultBadge(task) {
         if (!task.last_result) return '';
-        const cls = { acted: 'success', noop: 'secondary', error: 'danger',
-                      timeout: 'danger', stopped: 'warning' }[task.last_result] || 'secondary';
+        const cls = { acted: 'success', undelivered: 'warning', noop: 'secondary',
+                      error: 'danger', timeout: 'danger',
+                      stopped: 'warning' }[task.last_result] || 'secondary';
         const title = `${this.when(task.last_run)}${task.last_reply ? ' — ' + task.last_reply : ''}`;
         return `<span class="badge text-bg-${cls}" title="${App.escAttr(title)}">${App.esc(task.last_result)}</span>`;
     },

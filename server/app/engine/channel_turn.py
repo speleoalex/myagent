@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 
 from app.models import ChatRequest, ChatResponse, ChatMessage
-from app.engine.agent_router import mark_foreign
+from app.engine.agent_router import mark_foreign, mark_guest_notifications
 from app.engine.memory_compactor import cancel_compaction, schedule_compaction
 from app.storage.channel_sessions import holding
 from app.storage.sessions import (delegation_history, memory_context, record_turn,
@@ -53,6 +53,7 @@ async def run_channel_turn(req: ChatRequest, named, executor) -> ChatResponse:
         if req.agent_auto:
             session["agent_auto"] = True  # the web UI's "via <agent>" labels
             mark_foreign(prior, session, req.agent_id)
+        mark_guest_notifications(prior, session, req.agent_id)
         attachments = [a.model_dump() for a in req.attachments] or None
 
         # Provenance the MODEL sees: who wrote this, on which channel. Prefixed

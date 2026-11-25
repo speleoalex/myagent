@@ -65,7 +65,7 @@ _ACTIVATE_TOOLS = "activate_tools"
 # 21 in both runs of its daily report (6 of the 22 calls were the same
 # time-tracking query cut in 2-day windows), wrote "non ho potuto inviare la
 # notifica" and the report stayed in the log.
-_NOTIFY_USER = "notify_user"
+NOTIFY_USER = "notify_user"
 _DELIVERY_CALLS_MAX = 3
 
 # The same reserved round, for an ATTENDED turn whose user asked for a document.
@@ -1018,7 +1018,7 @@ class AgentExecutor:
     def _delivery_tool(self, tool_defs: list[dict]) -> str | None:
         """The one tool the reserved round offers, if this agent holds it:
         notify_user when nobody reads the reply, write_pdf when somebody does."""
-        wanted = _NOTIFY_USER if self.unattended else _WRITE_PDF
+        wanted = NOTIFY_USER if self.unattended else _WRITE_PDF
         return wanted if any(d["id"] == wanted for d in tool_defs) else None
 
     @staticmethod
@@ -2255,7 +2255,7 @@ class AgentExecutor:
                         if full_content.strip():
                             messages.append({"role": "assistant", "content": full_content})
                         messages.append({"role": "user", "content": (
-                            prompts.DELIVERY_ROUND if delivery_tool == _NOTIFY_USER
+                            prompts.DELIVERY_ROUND if delivery_tool == NOTIFY_USER
                             else prompts.DOCUMENT_ROUND)})
                         system_content, tool_defs, openai_tools = self._prepare_turn(
                             self._delivery_defs(callable_defs, delivery_tool), attachments,

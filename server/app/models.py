@@ -236,7 +236,7 @@ class Task(BaseModel):
     # ---- runtime, owned by TaskStore/AutonomyService
     next_at: str = ""               # "" = nothing more to run (one-shot, done)
     last_run: str = ""
-    last_result: str = ""           # acted | noop | error | timeout | stopped
+    last_result: str = ""           # acted | undelivered | noop | error | timeout | stopped
     last_reply: str = ""            # short summary of what the agent did
     source: str = "user"            # user | agent | api
     created_at: str = ""
@@ -279,10 +279,6 @@ class AutonomousConfig(BaseModel):
     max_wakes_per_hour: int = 12
     max_consecutive_errors: int = 5
     wake_timeout_s: int = 600
-    # Which bot sends, when notify_user does not name one. Also the answer to
-    # the connectors plugin's "several bots could send this" — with two bots
-    # enabled, resolving a contact by name is impossible without it.
-    notify_binding_id: str = ""
     # Who hears from the agent when the CALLER named nobody — a name from the
     # address book, a raw chat id (a group's id is negative and no address book
     # can hold it), or several of either separated by commas. A fallback only:
