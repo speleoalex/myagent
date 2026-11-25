@@ -1,6 +1,6 @@
 /**
  * Theme Manager
- * Light/dark theme switching with localStorage persistence.
+ * Light/dark/auto theme switching with localStorage persistence.
  *
  * MyAgent is built on Bootstrap 5.3, whose components and the app's own CSS
  * both read the native `--bs-*` variables. So instead of a custom variable
@@ -14,26 +14,30 @@ const ThemeManager = {
     STORAGE_KEY: 'myagent-theme',
     LIGHT: 'light',
     DARK: 'dark',
+    AUTO: 'auto',
 
     init() {
-        this.applyTheme(this.getSavedTheme());
-        // Follow OS changes only while the user hasn't picked a theme manually
-        // (the explicit choice lives in the Settings screen -> setTheme).
+        this.applyTheme(this.resolve(this.getPreference()));
+        // In auto mode follow OS changes live; an explicit light/dark choice
+        // (Settings screen -> setTheme) pins the theme instead.
         if (window.matchMedia) {
-            window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', (e) => {
-                if (!localStorage.getItem(this.STORAGE_KEY)) {
-                    this.applyTheme(e.matches ? this.DARK : this.LIGHT);
-                }
+            window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+                if (this.getPreference() === this.AUTO) this.applyTheme(this.resolve(this.AUTO));
             });
         }
     },
 
-    getSavedTheme() {
-        const saved = localStorage.getItem(this.STORAGE_KEY);
-        if (saved === this.LIGHT || saved === this.DARK) return saved;
+    /** The user's choice: 'light', 'dark' or 'auto' (no stored key = auto). */
+    getPreference() {
+        let saved = null;
+        try { saved = localStorage.getItem(this.STORAGE_KEY); } catch (e) { /* storage blocked */ }
+        return (saved === this.LIGHT || saved === this.DARK) ? saved : this.AUTO;
+    },
 
-        // No explicit choice yet: follow the OS preference, defaulting to dark
-        // (MyAgent shipped dark by default).
+    /** Concrete theme for a preference. Auto follows the OS, defaulting to
+     *  dark when the OS states nothing (MyAgent shipped dark by default). */
+    resolve(preference) {
+        if (preference !== this.AUTO) return preference;
         if (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches) {
             return this.LIGHT;
         }
@@ -44,14 +48,15 @@ const ThemeManager = {
         document.documentElement.setAttribute('data-bs-theme', theme);
     },
 
-    setTheme(theme) {
-        if (theme !== this.LIGHT && theme !== this.DARK) return;
-        this.applyTheme(theme);
-        localStorage.setItem(this.STORAGE_KEY, theme);
-    },
-
-    getCurrentTheme() {
-        return document.documentElement.getAttribute('data-bs-theme') || this.DARK;
+    setTheme(preference) {
+        if (![this.LIGHT, this.DARK, this.AUTO].includes(preference)) return;
+        try {
+            // Auto is stored as the absence of a choice, so installs that never
+            // touched the setting keep following the OS.
+            if (preference === this.AUTO) localStorage.removeItem(this.STORAGE_KEY);
+            else localStorage.setItem(this.STORAGE_KEY, preference);
+        } catch (e) { /* storage blocked: still apply for this page */ }
+        this.applyTheme(this.resolve(preference));
     }
 };
 

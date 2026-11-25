@@ -97,8 +97,9 @@ const SettingsPage = {
                             <div class="col-sm-6">
                                 <label class="form-label"><i class="bi bi-circle-half"></i> ${i18n('settings.theme')}</label>
                                 <select class="form-select" id="f-theme">
-                                    <option value="light" ${ThemeManager.getCurrentTheme() === 'light' ? 'selected' : ''}>${i18n('settings.themeLight')}</option>
-                                    <option value="dark" ${ThemeManager.getCurrentTheme() === 'dark' ? 'selected' : ''}>${i18n('settings.themeDark')}</option>
+                                    <option value="auto" ${ThemeManager.getPreference() === 'auto' ? 'selected' : ''}>${i18n('settings.themeAuto')}</option>
+                                    <option value="light" ${ThemeManager.getPreference() === 'light' ? 'selected' : ''}>${i18n('settings.themeLight')}</option>
+                                    <option value="dark" ${ThemeManager.getPreference() === 'dark' ? 'selected' : ''}>${i18n('settings.themeDark')}</option>
                                 </select>
                             </div>
                         </div>

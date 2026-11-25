@@ -588,6 +588,7 @@ I18n.translations.it = {
     'settings.appearance': 'Aspetto',
     'settings.language': 'Lingua',
     'settings.theme': 'Tema',
+    'settings.themeAuto': 'Automatico (sistema)',
     'settings.themeLight': 'Chiaro',
     'settings.themeDark': 'Scuro',
     'settings.serverBase': 'Server MyAgent',
