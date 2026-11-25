@@ -753,7 +753,10 @@ class AutonomyService:
                             recorded = True
                         run.emit(event)
                 except asyncio.CancelledError:
-                    # Stop/timeout mid-generation: keep the partial turn.
+                    # Stop/timeout mid-generation: keep the partial turn, and
+                    # the count of what it did (the run log showed a wake that
+                    # ran 16 searches for ten minutes as "0 tools").
+                    result["tool_calls"] = len(tool_events)
                     if not recorded:
                         session["messages"].append({
                             "role": "user", "text": prompt, "autonomous": True,
