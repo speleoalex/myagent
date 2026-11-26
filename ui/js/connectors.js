@@ -485,11 +485,21 @@ const ConnectorsPage = {
         if (!isEdit) App.autoId('f-name', 'f-id');
         this._form = { isEdit, id: b.id };
         this._contacts = contacts;
-        document.getElementById('btn-token-eye').onclick = e => {
+        document.getElementById('btn-token-eye').onclick = async e => {
+            const btn = e.currentTarget;
             const inp = document.getElementById('f-token');
             const show = inp.type === 'password';
+            // A saved token arrives as the mask: revealing that would show
+            // asterisks, so fetch the stored value first. It then rides the
+            // next save unchanged, which the server stores as is.
+            if (show && isEdit && inp.value === '********') {
+                try {
+                    const res = await App.api('GET', `/connectors/bindings/${encodeURIComponent(b.id)}/token`);
+                    inp.value = res.token || '';
+                } catch (err) { return; }
+            }
             inp.type = show ? 'text' : 'password';
-            e.currentTarget.querySelector('i').className = show ? 'bi bi-eye-slash' : 'bi bi-eye';
+            btn.querySelector('i').className = show ? 'bi bi-eye-slash' : 'bi bi-eye';
         };
         this._renderGuide(!isEdit);
         this._renderSettings(b.settings || {}, !isEdit);

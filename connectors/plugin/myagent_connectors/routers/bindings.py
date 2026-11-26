@@ -70,6 +70,19 @@ async def get_binding(binding_id: str, request: Request):
     return d
 
 
+@router.get("/{binding_id}/token")
+async def reveal_token(binding_id: str, request: Request):
+    """The stored secret in clear, for the form's eye button only.
+
+    Every other response masks it, so a list or a page load never carries it;
+    this one is asked for explicitly by someone already past the /api key gate,
+    which is the same trust as the PUT that can overwrite it. Without it the
+    eye could only ever reveal the mask itself.
+    """
+    data = get_or_404(services(request).bindings, binding_id, "Binding")
+    return {"token": data.get("token", "")}
+
+
 @router.post("")
 async def create_binding(binding: Binding, request: Request):
     svc = services(request)
