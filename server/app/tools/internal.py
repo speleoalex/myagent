@@ -711,11 +711,17 @@ def _fetch_attachment(url: str) -> tuple[tuple[str, bytes, str] | None, str]:
     return (name, data, mime), ""
 
 
-def _resolve_notify_files(raw, executor) -> tuple[list[tuple[str, bytes, str]], list[str]]:
+def _resolve_notify_files(raw, executor) -> tuple[list[tuple[str, bytes, str]], list[str], list[str]]:
     """Turn the ``attachments`` argument into ``(name, bytes, mime)`` triples.
 
-    Returns ``(files, problems)``: what can be sent, and one sentence per path
-    that cannot, NAMED — the reader is a model that must tell the user "the
+    Returns ``(files, problems, origins)``. ``origins`` says, per file, WHICH
+    one was picked up — resolved path, size, modification time — because a bare
+    name resolves against the workspace and a same-named stale copy there is
+    sent without a murmur. Observed 2026-11-26: the model rebuilt a report in
+    its repository, copied it to a directory it took for the workspace, and
+    mailed the morning's version three times, each result reading a reassuring
+    "Attached: report.html". ``problems`` is what can NOT be sent, one sentence
+    per path, NAMED — the reader is a model that must tell the user "the
     report was not attached", and a silently shorter list would have it say the
     opposite. Relative paths resolve against the workspace (the tools' cwd, so
     the model's relative paths mean the same thing here as there); absolute
@@ -723,7 +729,7 @@ def _resolve_notify_files(raw, executor) -> tuple[list[tuple[str, bytes, str]], 
     resolve inside one of :func:`_notify_roots`. An http(s) URL is downloaded
     (:func:`_fetch_attachment`) — which blocks, so the handler calls this in a
     thread."""
-    files, problems = [], []
+    files, problems, origins = [], [], []
     roots = _notify_roots(executor)
     for one in _split_paths(raw):
         if len(files) >= MAX_NOTIFY_FILES:
@@ -743,6 +749,7 @@ def _resolve_notify_files(raw, executor) -> tuple[list[tuple[str, bytes, str]], 
                 problems.append(problem)
             else:
                 files.append(got)
+                origins.append(f"{got[0]} ({_kilobytes(len(got[1]))}, downloaded)")
             continue
         candidate = Path(one).expanduser()
         if not candidate.is_absolute():
@@ -754,9 +761,10 @@ def _resolve_notify_files(raw, executor) -> tuple[list[tuple[str, bytes, str]], 
                 problems.append(f"'{one}' not attached: outside the workspace")
                 continue
             if not target.is_file():
-                problems.append(f"'{one}' not attached: no such file")
+                problems.append(f"'{one}' not attached: no such file {target}")
                 continue
-            if target.stat().st_size > MAX_NOTIFY_FILE_BYTES:
+            stat = target.stat()
+            if stat.st_size > MAX_NOTIFY_FILE_BYTES:
                 problems.append(f"'{one}' not attached: larger than "
                                 f"{MAX_NOTIFY_FILE_BYTES // (1024 * 1024)} MB")
                 continue
@@ -766,7 +774,13 @@ def _resolve_notify_files(raw, executor) -> tuple[list[tuple[str, bytes, str]], 
             continue
         mime = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
         files.append((target.name, data, mime))
-    return files, problems
+        modified = datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M")
+        origins.append(f"{target} ({_kilobytes(len(data))}, modified {modified})")
+    return files, problems, origins
+
+
+def _kilobytes(size: int) -> str:
+    return f"{max(1, round(size / 1024))} kB"
 
 
 async def _deliver(connector, chat_id, text: str, subject: str,
@@ -838,7 +852,8 @@ async def notify_user_handler(
     # on its own, and nothing should reach the recipient before it is settled —
     # with several attachments and one bad path, the good ones are still sent
     # and the bad one is named in the result.
-    files, file_problems = await asyncio.to_thread(_resolve_notify_files, attachments, executor)
+    files, file_problems, origins = await asyncio.to_thread(
+        _resolve_notify_files, attachments, executor)
     if file_problems and not files and _split_paths(attachments):
         return "ERROR: " + "; ".join(file_problems)
     if not files:
@@ -939,7 +954,7 @@ async def notify_user_handler(
     if subject:
         out += f" Subject: {subject}."
     if files:
-        out += f" Attached: {', '.join(name for name, _, _ in files)}."
+        out += f" Attached: {'; '.join(origins)}."
     if failed:
         out += f" FAILED for: {'; '.join(failed)}."
     # Files the transport could not carry, per recipient: a voice satellite

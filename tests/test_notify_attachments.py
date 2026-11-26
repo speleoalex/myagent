@@ -151,7 +151,7 @@ def test_split_paths():
 def test_resolve():
     print("Path resolution and containment:")
     rf = internal._resolve_notify_files
-    files, problems = rf(["report.pdf", "sub/photo.jpg", "with space.txt"], executor())
+    files, problems, origins = rf(["report.pdf", "sub/photo.jpg", "with space.txt"], executor())
     names = [f[0] for f in files]
     check(names == ["report.pdf", "photo.jpg", "with space.txt"] and not problems,
           f"relative paths resolve against the workspace: {names}")
@@ -159,43 +159,46 @@ def test_resolve():
           "mime guessed from the name")
     check(files[0][1] == b"%PDF-1.4 fake", "bytes are the file's content")
 
-    files, problems = rf([str(WS / "report.pdf")], executor())
+    files, problems, origins = rf([str(WS / "report.pdf")], executor())
     check(len(files) == 1 and not problems, "absolute path inside the workspace (as file_write prints it)")
 
     home_rel = "~/" + str((WS / "report.pdf").relative_to(Path.home())) \
         if str(WS).startswith(str(Path.home())) else None
     if home_rel:
-        files, problems = rf([home_rel], executor())
+        files, problems, origins = rf([home_rel], executor())
         check(len(files) == 1 and not problems, "~ is expanded")
 
-    files, problems = rf([str(OUTSIDE / "secret.txt")], executor())
+    files, problems, origins = rf([str(OUTSIDE / "secret.txt")], executor())
     check(not files and problems and "outside the workspace" in problems[0],
           f"absolute path outside the workspace refused and named: {problems}")
-    files, problems = rf(["../outside/secret.txt"], executor())
+    files, problems, origins = rf(["../outside/secret.txt"], executor())
     check(not files and problems and "outside" in problems[0], "..-escape refused")
-    files, problems = rf(["escape"], executor())
+    files, problems, origins = rf(["escape"], executor())
     check(not files and problems and "outside" in problems[0],
           "a symlink pointing outside is refused (resolved before the check)")
 
-    files, problems = rf([str(AGENT_DIR / "notes.md")], executor(folder=AGENT_DIR))
+    files, problems, origins = rf([str(AGENT_DIR / "notes.md")], executor(folder=AGENT_DIR))
     check(len(files) == 1 and files[0][0] == "notes.md", "the agent's own folder is a second root")
-    files, problems = rf([str(AGENT_DIR / "notes.md")], executor())
+    files, problems, origins = rf([str(AGENT_DIR / "notes.md")], executor())
     check(not files and problems, "…but only for an agent that HAS a folder")
 
-    files, problems = rf(["missing.txt", "report.pdf"], executor())
-    check([f[0] for f in files] == ["report.pdf"] and "no such file" in problems[0],
-          "a missing file is named and the others still go")
-    files, problems = rf(["sub"], executor())
+    files, problems, origins = rf(["missing.txt", "report.pdf"], executor())
+    check([f[0] for f in files] == ["report.pdf"]
+          and f"no such file {WS / 'missing.txt'}" in problems[0],
+          "a missing file is named WITH where it was looked for, and the others still go")
+    check(len(origins) == 1 and origins[0].startswith(f"{WS / 'report.pdf'} ("),
+          f"one origin per file sent: {origins}")
+    files, problems, origins = rf(["sub"], executor())
     check(not files and "no such file" in problems[0], "a directory is not a file")
 
-    files, problems = rf([f"f{i}.txt" for i in range(6)], executor())
+    files, problems, origins = rf([f"f{i}.txt" for i in range(6)], executor())
     check(len(files) == 5 and len(problems) == 1 and "at most 5" in problems[0],
           "cap of 5 files, the sixth named")
 
     big = WS / "big.bin"
     with open(big, "wb") as fh:
         fh.truncate(internal.MAX_NOTIFY_FILE_BYTES + 1)
-    files, problems = rf(["big.bin"], executor())
+    files, problems, origins = rf(["big.bin"], executor())
     check(not files and "larger than 15 MB" in problems[0], "size cap enforced")
     big.unlink()
 
@@ -214,8 +217,10 @@ async def test_handler():
     check(call["subject"] == "ciao" and call["text"] == "prova due",
           "subject and text reach the connector SEPARATELY")
     check([f[0] for f in call["files"]] == ["report.pdf", "photo.jpg"], "files reach the connector")
-    check("Subject: ciao." in out and "Attached: report.pdf, photo.jpg." in out,
-          "result names subject and attachments")
+    check("Subject: ciao." in out and f"Attached: {WS / 'report.pdf'} (1 kB, modified " in out
+          and f"; {WS / 'sub' / 'photo.jpg'} (" in out,
+          "result names the subject and WHICH file went out (path, size, time): "
+          "a bare name would hide a stale same-named copy")
     check("NOT delivered" in out and "photo.jpg" in out.split("NOT delivered")[1],
           "the file the channel could not carry is reported")
     hist = named.sessions["fake:42"]
@@ -333,12 +338,12 @@ def test_url_attachments():
     base = f"http://127.0.0.1:{server.server_port}"
     rf = internal._resolve_notify_files
     try:
-        files, problems = rf([f"{base}/caves/view/1/?export_pdf=1&format=pdf"], executor())
+        files, problems, origins = rf([f"{base}/caves/view/1/?export_pdf=1&format=pdf"], executor())
         check(problems and "local or private" in problems[0] and not files,
               f"a private address is refused by default: {problems}")
 
         internal._ALLOW_PRIVATE_URLS = True
-        files, problems = rf([f"{base}/caves/view/1/?export_pdf=1&format=pdf",
+        files, problems, origins = rf([f"{base}/caves/view/1/?export_pdf=1&format=pdf",
                               f"{base}/img/rilievo.png", f"{base}/noname/7/?x=1"], executor())
         check(not problems and [f[0] for f in files]
               == ["scheda_catastale_0001.pdf", "rilievo.png", "7.pdf"],
@@ -346,19 +351,19 @@ def test_url_attachments():
         check(files[0][1] == b"%PDF-1.4 the sheet" and files[0][2] == "application/pdf"
               and files[1][2] == "image/png", "bytes and mime from the response")
 
-        files, problems = rf([f"{base}/page"], executor())
+        files, problems, origins = rf([f"{base}/page"], executor())
         check(not files and "web page" in problems[0] and "link" in problems[0],
               "an HTML page is refused, with the advice to link it")
-        files, problems = rf([f"{base}/missing.pdf"], executor())
+        files, problems, origins = rf([f"{base}/missing.pdf"], executor())
         check(not files and "HTTP 404" in problems[0], "an HTTP error is named")
-        files, problems = rf(["ftp://example.org/a.pdf"], executor())
+        files, problems, origins = rf(["ftp://example.org/a.pdf"], executor())
         check(not files and problems and "no such file" in problems[0],
               "ftp:// is not a URL attachment (and not a workspace file either)")
 
         cap = internal.MAX_NOTIFY_FILE_BYTES
         internal.MAX_NOTIFY_FILE_BYTES = 1000
         try:
-            files, problems = rf([f"{base}/big"], executor())
+            files, problems, origins = rf([f"{base}/big"], executor())
             check(not files and "larger than" in problems[0], "the size cap holds for downloads")
         finally:
             internal.MAX_NOTIFY_FILE_BYTES = cap
@@ -368,14 +373,14 @@ def test_url_attachments():
         orig = internal._url_problem
         internal._url_problem = lambda u: "a private address" if "/secret" in u else ""
         try:
-            files, problems = rf([f"{base}/to-secret"], executor())
+            files, problems, origins = rf([f"{base}/to-secret"], executor())
             check(not files and "redirected to a refused address" in problems[0],
                   f"a redirect to a refused address is refused: {problems}")
         finally:
             internal._url_problem = orig
 
         internal._ALLOW_PRIVATE_URLS = True
-        files, problems = rf(["report.pdf", f"{base}/img/rilievo.png"], executor())
+        files, problems, origins = rf(["report.pdf", f"{base}/img/rilievo.png"], executor())
         check([f[0] for f in files] == ["report.pdf", "rilievo.png"] and not problems,
               "workspace files and URLs mix in one call")
 
@@ -389,7 +394,7 @@ def test_url_attachments():
                         f'<a href="{base}/img/rilievo.png?a=1&amp;b=2">x</a>'])
         turn.saw_text = lambda needle: AgentExecutor.saw_text(turn, needle)
         built = f"{base}/caves/view/571/?export_pdf=1&format=pdf"
-        files, problems = rf([given, built], turn)
+        files, problems, origins = rf([given, built], turn)
         check([f[0] for f in files] == ["scheda_catastale_0001.pdf"]
               and len(problems) == 1 and built in problems[0]
               and "built by hand" in problems[0] and "pdf_url" in problems[0],
@@ -433,7 +438,7 @@ async def test_attachment_claim():
 def test_schema():
     print("Tool schema:")
     import json
-    d = json.loads((ROOT / "server/tools/autonomy/notify_user/tool.json").read_text())
+    d = json.loads((ROOT / "server/tools/messaging/notify_user/tool.json").read_text())
     props = d["parameters"]["properties"]
     check("subject" in props and props["subject"]["type"] == "string", "subject declared")
     check(props.get("attachments", {}).get("type") == "array"
