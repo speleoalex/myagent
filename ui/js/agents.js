@@ -442,6 +442,17 @@ const AgentsPage = {
      *  `describe(v, ctx)` is the live sentence under the slider and may return
      *  {text, warn} to flag a value that will bite. `deps` lists the other fields
      *  a sentence mentions, so both refresh together. */
+    /** "With Qwen3.5 (32k): 10.7k tokens." under a share slider. */
+    roomNote(pct, c) {
+        if (!c.room) return '';
+        return ' ' + i18n('agents.f.share.room', { ...this.roomArgs(c.room),
+            n: RangeField.fmt.tokens(Math.floor(c.room.fit * pct / 100)) });
+    },
+
+    roomArgs(room) {
+        return { model: room.model_name, window: ModelsPage.fmtTokens(room.window) };
+    },
+
     numSpecs() {
         const F = RangeField.fmt;
         const K = 'agents.f.';
@@ -516,16 +527,48 @@ const AgentsPage = {
                 steps: [1000, 2000, 3000, 4000, 6000, 8000, 12000, 16000, 24000, 32000, 48000, 64000],
                 label: i18n('agents.memoryThreshold'),
                 help: i18n(K + 'memthreshold.help'),
-                deps: ['f-memory'],
+                deps: ['f-memory', 'f-histshare'],
                 mutedWhen: (c) => !c.memoryOn,
                 fmt: (v) => F.tokens(v),
                 describe: (v, c) => {
                     if (!c.memoryOn) return { text: i18n(K + 'memthreshold.b.memoryOff'), muted: true };
+                    // Same rule as AgentExecutor.compaction_threshold.
+                    if (c.room) {
+                        const quota = Math.floor(c.room.fit * c.histShare / 100);
+                        if (quota < v) return i18n(K + 'memthreshold.b.byShare',
+                            { ...this.roomArgs(c.room), q: F.tokens(quota), v: F.tokens(v) });
+                    }
                     const half = F.tokens(Math.max(1, Math.floor(v / 2)));
                     return v <= 2000 ? i18n(K + 'memthreshold.b.low', { v: F.tokens(v), half })
                         : v <= 8000 ? i18n(K + 'memthreshold.b.mid', { v: F.tokens(v), half })
                         : v <= 24000 ? i18n(K + 'memthreshold.b.high', { v: F.tokens(v), half })
                         : { text: i18n(K + 'memthreshold.b.huge', { v: F.tokens(v), half }), warn: true };
+                },
+            },
+            // Shares of the room the model has for messages, enforced at every
+            // turn (executor: newest_turns, _build_memory_section).
+            'f-memshare': {
+                id: 'f-memshare', int: true, dflt: 15, min: 0, max: 60, step: 5,
+                label: i18n('agents.memoryShare'),
+                help: i18n(K + 'memshare.help'),
+                deps: ['f-memory', 'f-histshare'],
+                mutedWhen: (c) => !c.memoryOn,
+                fmt: (v) => F.int(v) + ' %',
+                describe: (v, c) => !c.memoryOn ? { text: i18n(K + 'memshare.b.memoryOff'), muted: true }
+                    : v === 0 ? { text: i18n(K + 'memshare.b.zero'), warn: true }
+                    : i18n(K + 'memshare.b.on', { v: F.int(v) }) + this.roomNote(v, c),
+            },
+            'f-histshare': {
+                id: 'f-histshare', int: true, dflt: 35, min: 5, max: 80, step: 5,
+                label: i18n('agents.historyShare'),
+                help: i18n(K + 'histshare.help'),
+                deps: ['f-memshare', 'f-memory'],
+                fmt: (v) => F.int(v) + ' %',
+                describe: (v, c) => {
+                    const sum = v + (c.memoryOn ? c.memShare : 0);
+                    return sum > 70
+                        ? { text: i18n(K + 'histshare.b.crowded', { sum: F.int(sum), rest: F.int(100 - sum) }), warn: true }
+                        : i18n(K + 'histshare.b.on', { v: F.int(v) }) + this.roomNote(v, c);
                 },
             },
             'f-auto-maxwakes': {
@@ -920,7 +963,7 @@ const AgentsPage = {
     async renderForm(agentId, sourceId = '') {
         // callable_agents defaults to [] (no delegation) for NEW agents only:
         // the user opts in explicitly. Existing agents keep their stored value.
-        let agent = { id: '', name: '', description: '', model_id: '', system_prompt: '', date_in_prompt: false, time_in_prompt: false, timezone: '', tools: [], lazy_tools: false, max_iterations: 10, max_tool_calls: 5, temperature: 0.7, enabled: true, callable: true, callable_agents: [], memory_enabled: false, memory_threshold: 4000, live: false, schedule_others: false, autonomous: null };
+        let agent = { id: '', name: '', description: '', model_id: '', system_prompt: '', date_in_prompt: false, time_in_prompt: false, timezone: '', tools: [], lazy_tools: false, max_iterations: 10, max_tool_calls: 5, temperature: 0.7, enabled: true, callable: true, callable_agents: [], memory_enabled: false, memory_threshold: 4000, memory_share: 15, history_share: 35, live: false, schedule_others: false, autonomous: null };
         let isEdit = false;
 
         if (agentId) {
@@ -1058,13 +1101,19 @@ const AgentsPage = {
         // Everything a slider's sentence needs from OUTSIDE its own field, in one
         // visible place. Called on EVERY refresh, so nothing goes stale — hence a
         // function, not an object.
+        // What the agent's model leaves to the messages with these tools
+        // (POST /agents/context-preview): the shares are percentages of it.
+        let ctxRoom = null;
         const rfCtx = () => ({
             temp: RangeField.read('f-temp') ?? 0.7,
             maxIter: RangeField.read('f-maxiter') ?? 10,
             maxWakes: RangeField.read('f-auto-maxwakes') ?? 12,
             maxErrors: RangeField.read('f-auto-maxerrors') ?? 5,
             memoryOn: document.getElementById('f-memory')?.checked ?? false,
+            memShare: RangeField.read('f-memshare') ?? 15,
+            histShare: RangeField.read('f-histshare') ?? 35,
             model: modelById[document.getElementById('f-model')?.value] || null,
+            room: ctxRoom,
         });
         // Render-time context: the DOM does not exist yet, so read from the agent.
         // Only the end labels use it; wireAll() repaints everything right after.
@@ -1277,6 +1326,12 @@ const AgentsPage = {
                                     <div class="col-12 col-md-6">
                                         ${RangeField.render(specs['f-memthreshold'], agent.memory_threshold ?? 4000)}
                                     </div>
+                                    <div class="col-12 col-md-6">
+                                        ${RangeField.render(specs['f-memshare'], agent.memory_share ?? 15)}
+                                    </div>
+                                    <div class="col-12 col-md-6">
+                                        ${RangeField.render(specs['f-histshare'], agent.history_share ?? 35)}
+                                    </div>
                                 </div>`)}
                             ${pane('autonomy', `
                                 <div class="form-check form-switch mb-2">
@@ -1428,6 +1483,8 @@ const AgentsPage = {
                     : [...document.querySelectorAll('.agent-check:checked')].map(c => c.value),
                 memory_enabled: state.memory_enabled,
                 memory_threshold: RangeField.read('f-memthreshold'),
+                memory_share: RangeField.read('f-memshare'),
+                history_share: RangeField.read('f-histshare'),
                 live: state.live,
                 // Permission over manage_tasks / autonomy_control, not a grant:
                 // the executor injects their agent_id parameter only when it is on.
@@ -1446,8 +1503,27 @@ const AgentsPage = {
         // readForm() is about to send: the tab badges, the derived-grant note and
         // the two "this cannot work" warnings. One source of truth means the Tools
         // badge can never disagree with the tools actually saved.
+        // Re-measured only when what it depends on changed: the model and the
+        // tool schemas. A superseded answer is dropped.
+        let roomKey = null;
+        const refreshRoom = async (d) => {
+            const key = d.model_id + '|' + [...d.tools].sort().join(',');
+            if (key === roomKey) return;
+            roomKey = key;
+            let room = null;
+            try {
+                room = await App.api('POST', '/agents/context-preview',
+                                     { model_id: d.model_id, tools: d.tools });
+            } catch (e) { /* no number is better than a wrong one */ }
+            if (key !== roomKey) return;
+            ctxRoom = room;
+            ['f-memthreshold', 'f-memshare', 'f-histshare']
+                .forEach(id => RangeField.refresh(specs[id], rfCtx()));
+        };
+
         const refreshState = () => {
             const d = readForm();
+            refreshRoom(d);
             const widening = d.memory_enabled && !hadMemTools;
 
             const note = document.getElementById('memory-note');

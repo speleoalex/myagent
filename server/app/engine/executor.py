@@ -93,6 +93,40 @@ _REPEAT_TOOL_NUDGE_AT = 3
 _MAX_MALFORMED_RETRIES = 2
 
 
+def newest_turns(messages: list[dict], budget: int, estimate) -> list[dict]:
+    """The most recent whole turns of ``messages`` that fit in ``budget``
+    tokens, oldest first. A turn starts at a user message. The newest turn
+    always enters, every message of it cut by the same factor when it alone is
+    over budget, with the cut declared: a chat whose last exchange vanished
+    would answer a follow-up blind. ``estimate(text)`` returns tokens.
+
+    The single rule for "how much history fits": the prompt build and
+    autonomy.task_history both use it."""
+    turns: list[list[dict]] = []
+    for m in messages:
+        if m.get("role") == "user" or not turns:
+            turns.append([])
+        turns[-1].append(m)
+    kept: list[dict] = []
+    used = 0
+    for turn in reversed(turns):
+        cost = sum(estimate(m.get("content") or "") for m in turn)
+        if used + cost <= budget:
+            kept[:0] = turn
+            used += cost
+            continue
+        if not kept:
+            scale = max(budget, 1) / cost
+            kept = [{**m, "content": _cut(m.get("content") or "", scale)} for m in turn]
+        break
+    return kept
+
+
+def _cut(text: str, scale: float) -> str:
+    keep = int(len(text) * scale)
+    return text if keep >= len(text) else text[:keep].rstrip() + " … [cut]"
+
+
 def _tool_call_args(tc: dict) -> dict:
     """A tool call's arguments as a dict — {} when they don't parse."""
     raw = tc["function"].get("arguments", "{}")
@@ -283,6 +317,10 @@ class AgentExecutor:
         # them to a sub-agent by index (see call_agent_handler). The tool-call
         # JSON only carries small indices — never the base64 blobs themselves.
         self._turn_attachments: list[dict] = []
+        # Tokens the messages of THIS turn may cost (context_state `fit`),
+        # measured once per turn; the memory and history shares are cut from
+        # it. 0 = not measured, no cap.
+        self._turn_fit = 0
         # What sub-agents reported in the PREVIOUS turns of this chat
         # (storage.sessions.delegation_history), handed in per run by whoever
         # owns the session — the executor stays session-agnostic, exactly like
@@ -1307,6 +1345,26 @@ class AgentExecutor:
             transcript = "[oldest turns omitted]\n" + transcript[-_FOREIGN_CONTEXT_MAX:]
         return own, transcript
 
+    def memory_room(self) -> int:
+        """Tokens the memory block may take this turn (0 = not measured)."""
+        return self._turn_fit * self.agent.memory_share // 100
+
+    def compaction_threshold(self) -> int:
+        """Above how many (ratio-corrected) tokens of conversation the memory
+        compactor archives: ``memory_threshold`` is the ceiling, the history
+        share of the room the last turn measured is the effective value. Past
+        the share the oldest turns already stay out of the prompt
+        (newest_turns), so compacting there is what brings them back as a
+        summary instead of leaving a hole."""
+        threshold = self.agent.memory_threshold
+        if self._turn_fit:
+            threshold = min(threshold, self._turn_fit * self.agent.history_share // 100)
+        return max(threshold, 1)
+
+    def _estimate_text_tokens(self, text: str) -> int:
+        """Ratio-corrected token estimate of one text."""
+        return self.provider.estimate_payload_tokens([{"content": text}])
+
     @classmethod
     def _clean_conversation(cls, conversation: list[ChatMessage], max_messages: int = 10) -> list[dict]:
         """Remove internal tool-call artifacts from conversation history.
@@ -1425,12 +1483,28 @@ class AgentExecutor:
             md = self.stores.memory.get_memory_md(self.agent.id)
         except Exception:
             md = ""
+        # memory_share of the turn's room: memory.md first (its order already
+        # puts Profile and Notes before Recent, so a cut drops Recent), then
+        # this chat's summaries, newest first. What does not fit stays
+        # reachable through memory_search.
+        budget = self.memory_room() if self._turn_fit else None
+        if md and budget is not None:
+            cost = self._estimate_text_tokens(md)
+            if cost > budget:
+                md = _cut(md, budget / cost) if budget > 0 else ""
+            budget -= self._estimate_text_tokens(md)
         if md:
             parts.append(md)
-        lines = [
-            f"- [{(c.get('ts') or '')[:10]}] {c['summary']}"
-            for c in (memory_context or []) if c.get("summary")
-        ]
+        lines = []
+        for c in reversed(memory_context or []):
+            if not c.get("summary"):
+                continue
+            line = f"- [{(c.get('ts') or '')[:10]}] {c['summary']}"
+            if budget is not None:
+                budget -= self._estimate_text_tokens(line)
+                if budget < 0:
+                    break
+            lines.insert(0, line)
         if lines:
             parts.append("### Earlier in this conversation (summarized)\n" + "\n".join(lines))
         if not parts:
@@ -1953,6 +2027,13 @@ class AgentExecutor:
                 max_messages=200 if self.agent.memory_enabled or self.unattended else 10,
             )
         own_history, foreign_context = self._split_history(history)
+        # The shares are cut from what the MESSAGES may cost, i.e. after the
+        # tool schemas and the answer's reserve (see context_state).
+        self._turn_fit = (await self.provider.context_state(
+            [], ToolRegistry.to_openai_format(tool_defs) if tool_defs else None))["fit"]
+        own_history = newest_turns(
+            own_history, self._turn_fit * self.agent.history_share // 100,
+            self._estimate_text_tokens)
 
         system_content, tool_defs, openai_tools = self._prepare_turn(
             tool_defs, attachments, memory_context, transcribed=transcribed,

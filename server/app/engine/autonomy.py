@@ -51,7 +51,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from app.engine import prompts
-from app.engine.executor import NOTIFY_USER, AgentExecutor
+from app.engine.executor import NOTIFY_USER, AgentExecutor, newest_turns
 from app.engine.memory_compactor import cancel_compaction, schedule_compaction
 from app.models import Agent, AutonomousConfig, ChatMessage
 from app.storage.sessions import (memory_context, now_iso, read_json,
@@ -219,24 +219,13 @@ def task_history(session: dict, tasks: list[dict], budget_tokens: int,
         own = [i for i, r in enumerate(runs) if any(t["id"] == tid for t in r["tasks"])]
         keep.update(own[-task["history_runs"]:])
 
-    out: list[ChatMessage] = []
-    used = 0
-    for i in sorted(keep, reverse=True):
+    pairs: list[dict] = []
+    for i in sorted(keep):
         r = runs[i]
-        request = (f"[Earlier run, {r['ts']}] "
-                   + " / ".join(t["prompt"] for t in r["tasks"]))
-        reply = r["reply"]
-        cost = estimate(request) + estimate(reply)
-        if used + cost > budget_tokens:
-            if out:
-                break
-            room = max(0, budget_tokens - estimate(request))
-            reply = reply[:room * 3] + " … [cut]"   # ~3 chars per token, generous
-            cost = budget_tokens
-        out[:0] = [ChatMessage(role="user", content=request),
-                   ChatMessage(role="assistant", content=reply)]
-        used += cost
-    return out
+        pairs += [{"role": "user", "content": f"[Earlier run, {r['ts']}] "
+                   + " / ".join(t["prompt"] for t in r["tasks"])},
+                  {"role": "assistant", "content": r["reply"]}]
+    return [ChatMessage(**m) for m in newest_turns(pairs, budget_tokens, estimate)]
 
 
 def build_wake_prompt(agent: Agent, tasks: list[dict],

@@ -290,7 +290,8 @@ class MemoryStore:
     # ----------------------------------------------------------------- writes
     def write_chunk(self, agent_id: str, *, body: str, kind: str = "conversation",
                     session_id: str = "", channel: str = "", source: str = "",
-                    keywords: list[str] | None = None, hash_: str = "") -> str:
+                    keywords: list[str] | None = None, hash_: str = "",
+                    degraded: bool = False) -> str:
         """Durably store one chunk file, return its id. Caller must hold
         lock(agent_id). Ids are local timestamps with a FULL year
         (YYYYMMDDHHMMSS) — they are read by humans in memory.md's index, where
@@ -314,8 +315,12 @@ class MemoryStore:
             f"source: {source}",
             f"hash: {hash_}",
             f"keywords: {', '.join(list(keywords or [])[:_MAX_KEYWORDS])}",
-            "---",
         ]
+        if degraded:
+            # The summary lost details the user gave (see memory_compactor
+            # _missing_details): recorded, so a later pass knows not to trust it.
+            front.append("degraded: true")
+        front.append("---")
         _write_text_atomic(self._chunk_path(agent_id, chunk_id),
                            "\n".join(front) + "\n" + (body or "").strip() + "\n")
         return chunk_id

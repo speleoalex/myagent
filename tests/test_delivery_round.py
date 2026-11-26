@@ -91,6 +91,9 @@ class FakeProvider:
     def token_ratio(self):
         return 4.0
 
+    def estimate_payload_tokens(self, messages, tools=None):
+        return sum(len(str(m.get("content") or "")) for m in messages) // 4
+
     def explain_error(self, e):
         return str(e)
 

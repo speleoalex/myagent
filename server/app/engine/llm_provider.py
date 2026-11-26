@@ -168,6 +168,11 @@ _TRUNCATION_NOTE = ("\n\n[... this tool result was cut to fit the context window
 _MIN_TRIM_CHARS = 400
 
 
+#: How the output-cap note starts: whoever must tell a cut reply from a whole
+#: one (the memory compactor discards a cut summary) matches on this.
+OUTPUT_TRUNCATED = "[Output truncated: this reply hit the max_tokens cap"
+
+
 def _output_note(cap: int) -> str:
     """Added to a reply the OUTPUT cap cut off mid-generation.
 
@@ -179,7 +184,7 @@ def _output_note(cap: int) -> str:
     event, like the refusal note: whatever was generated is still worth keeping,
     and the note lands in the turn the model reads back.
     """
-    return (f"\n\n[Output truncated: this reply hit the max_tokens cap "
+    return (f"\n\n{OUTPUT_TRUNCATED} "
             f"({cap}). Nothing above is necessarily complete. Raise "
             f"max_tokens in the model options, or produce less per call "
             f"— write a large file in several smaller pieces.]")

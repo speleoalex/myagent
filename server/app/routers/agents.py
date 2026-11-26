@@ -8,6 +8,9 @@ from app import agent_package, config
 from app.ids import is_valid_id
 from app.models import Agent
 from app.engine.agent_router import AUTO as RESERVED_AGENT_ID
+from app.engine.executor import resolve_model_for_agent
+from app.engine.llm_provider import LLMProvider
+from app.tools.registry import ToolRegistry
 from app.routers.crud import get_or_404, require_absent, require_exists
 from app.storage.sessions import read_json
 
@@ -178,6 +181,31 @@ async def import_agent(request: Request, overwrite: bool = False):
         raise HTTPException(409, {"message": str(e), "conflicts": e.items})
     except agent_package.PackageError as e:
         raise HTTPException(400, str(e))
+
+
+class ContextPreviewRequest(BaseModel):
+    model_id: str = ""
+    tools: list[str] = []
+
+
+@router.post("/context-preview")
+async def context_preview(req: ContextPreviewRequest, request: Request):
+    """How much room the model leaves to the messages (``fit``) with these
+    tools, for the form's share sentences. Measured the way a turn measures
+    it (resolve the model, schemas in OpenAI format, context_state), so the
+    numbers shown are the ones the executor enforces."""
+    stores = request.app.state.stores
+    draft = Agent(id="preview", name="preview", model_id=req.model_id, tools=req.tools)
+    cfg, _ = await resolve_model_for_agent(draft, stores)
+    defs = request.app.state.tool_registry.get_definitions_for_agent(req.tools)
+    provider = LLMProvider(cfg)
+    try:
+        state = await provider.context_state(
+            [], ToolRegistry.to_openai_format(defs) if defs else None)
+    finally:
+        await provider.close()
+    return {"model_name": cfg.name or cfg.id, "window": state["window"],
+            "fit": state["fit"]}
 
 
 @router.get("/{agent_id}/export")

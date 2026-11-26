@@ -1,7 +1,9 @@
 """Background compaction of chat sessions into per-agent long-term memory.
 
 The session's ``conversation[]`` is the medium-short memory. When its cleaned
-size exceeds ``agent.memory_threshold`` (estimated tokens), the oldest turns
+size exceeds the effective threshold (AgentExecutor.compaction_threshold:
+``agent.memory_threshold`` capped by the history share of the context), the
+oldest turns
 are summarized by the agent's own model, archived as one Markdown chunk in the
 agent's memory (:class:`MemoryStore` — summary only, the full transcript stays
 in the sessions store), indexed in memory.md, and replaced by a compact
@@ -37,7 +39,7 @@ from collections import Counter
 
 from app.engine import prompts
 from app.engine.executor import AgentExecutor
-from app.engine.llm_provider import LLMProvider
+from app.engine.llm_provider import OUTPUT_TRUNCATED, LLMProvider
 from app.engine.reasoning import strip_reasoning
 from app.models import Agent, ModelConfig
 from app.storage.memory import MemoryStore
@@ -45,8 +47,14 @@ from app.storage.sessions import now_iso
 
 log = logging.getLogger(__name__)
 
-# Size gate for LLM-produced summaries (chars).
+# Size gate for LLM-produced summaries (chars): the ceiling, and the floor the
+# memory share may push it down to (summary_chars).
 SUMMARY_MAX_CHARS = 1200
+SUMMARY_MIN_CHARS = 300
+# A summary missing more than this share of the details the user gave
+# (numbers, dates, URLs, paths, names) gets one corrective call, then is
+# accepted and marked degraded.
+_MISSING_TOLERANCE = 1 / 3
 # The newest real user turns are never archived: the model keeps them raw.
 KEEP_RECENT_TURNS = 2
 # FIFO cap of session["memory"]["context"] (older ground is covered by the
@@ -78,19 +86,23 @@ def _clean(conversation: list[dict]) -> list[dict]:
     return out
 
 
-def _estimate_tokens(cleaned: list[dict]) -> int:
-    return sum(LLMProvider._estimate_tokens(m.get("content") or "") for m in cleaned)
+def _estimate_tokens(cleaned: list[dict], ratio: float) -> int:
+    """Ratio-corrected, like the executor's history share: the two must
+    measure the same conversation the same way."""
+    return int(sum(LLMProvider._estimate_tokens(m.get("content") or "")
+                   for m in cleaned) * ratio)
 
 
-def should_compact(agent: Agent, conversation: list[dict]) -> bool:
-    """Whether this session's cleaned conversation is over the agent's
-    threshold. Cheap and sync — callable from the request path."""
+def should_compact(agent: Agent, conversation: list[dict], threshold: int,
+                   ratio: float) -> bool:
+    """Whether this session's cleaned conversation is over ``threshold``.
+    Cheap and sync — callable from the request path."""
     if not agent.memory_enabled or not conversation:
         return False
-    return _estimate_tokens(_clean(conversation)) > agent.memory_threshold
+    return _estimate_tokens(_clean(conversation), ratio) > threshold
 
 
-def _select_head(conversation: list[dict], threshold: int):
+def _select_head(conversation: list[dict], threshold: int, ratio: float):
     """The oldest slice of the raw conversation to archive.
 
     Cuts on real-user-turn boundaries only: the head ends right before the
@@ -105,7 +117,7 @@ def _select_head(conversation: list[dict], threshold: int):
     max_cut = len(turn_starts) - KEEP_RECENT_TURNS
     for k in range(1, max_cut + 1):
         remaining = _clean(conversation[turn_starts[k]:])
-        if _estimate_tokens(remaining) <= target:
+        if _estimate_tokens(remaining, ratio) <= target:
             return conversation[:turn_starts[k]], k
     # Even the deepest allowed cut doesn't reach the target: take it anyway
     # (the rest is protected by KEEP_RECENT_TURNS and _truncate_messages).
@@ -148,9 +160,161 @@ def _validate_summary(text: str | None, max_chars: int) -> str | None:
     return text
 
 
-async def summarize(model_config: ModelConfig, text: str, max_chars: int,
-                    instruction: str) -> str | None:
-    """One bare LLM call (no executor, no tools) → validated summary or None."""
+def summary_chars(memory_room: int, ratio: float) -> int:
+    """How long one archived-turn summary may be. A quarter of the memory
+    share (the summaries share it with memory.md), turned into characters at
+    ~4 per raw token: on a 4k window six 1200-char summaries alone overflowed
+    the whole share. 0 = share not measured, the ceiling."""
+    if not memory_room:
+        return SUMMARY_MAX_CHARS
+    return max(SUMMARY_MIN_CHARS, min(SUMMARY_MAX_CHARS, int(memory_room / ratio)))
+
+
+class _Truncated(Exception):
+    """The summary hit the output cap: whatever came back is not whole."""
+
+
+_RULES = ("Use at most {n} characters. Keep concrete facts, names, numbers, "
+          "dates, decisions and preferences exactly as written. Write plain "
+          "prose in the main language of the text, without preamble, headings "
+          "or lists.")
+
+
+async def _ask(provider: LLMProvider, instruction: str, text: str,
+               max_chars: int) -> str | None:
+    """One bare call (no tools, thinking off) → validated summary or None.
+    Raises _Truncated: a cut summary is discarded, never stored."""
+    out = ""
+    async for chunk in provider.chat_completion_stream(
+        messages=[{"role": "system",
+                   "content": f"{instruction} {_RULES.format(n=max_chars)}"},
+                  {"role": "user", "content": text}],
+        tools=None,
+        temperature=_SUMMARY_TEMP,
+    ):
+        delta = chunk.get("choices", [{}])[0].get("delta", {})
+        if delta.get("content"):
+            out += delta["content"]
+    if OUTPUT_TRUNCATED in out:
+        raise _Truncated()
+    return _validate_summary(out, max_chars)
+
+
+def _pieces(cleaned: list[dict], budget: int, estimate) -> list[list[dict]]:
+    """Consecutive slices of the dialogue, each within ``budget`` tokens. A
+    single message over budget is cut into parts of its own, in order."""
+    pieces: list[list[dict]] = [[]]
+    used = 0
+    for m in cleaned:
+        text = m["content"]
+        cost = estimate(text)
+        if cost > budget:
+            step = max(1, len(text) * budget // cost)
+            parts = [{"role": m["role"], "content": text[i:i + step]}
+                     for i in range(0, len(text), step)]
+        else:
+            parts = [m]
+        for part in parts:
+            cost = estimate(part["content"])
+            if pieces[-1] and used + cost > budget:
+                pieces.append([])
+                used = 0
+            pieces[-1].append(part)
+            used += cost
+    return [p for p in pieces if p]
+
+
+# Details the user gave that a summary must not lose: URLs, mail addresses,
+# paths, multi-digit numbers and dates, and capitalized words that do not
+# open a sentence (names). Model-free, like OpenClaw's "exact identifiers".
+_DETAIL_RE = re.compile(
+    r"https?://\S+|[\w.+-]+@[\w-]+\.[\w.]+|~?/[\w.-]+(?:/[\w.-]+)+"
+    r"|\d[\d.,:/-]*\d|[A-ZÀ-Ý][\w'-]{2,}")
+_THOUSANDS = re.compile(r"(?<=\d)[.,](?=\d)")
+
+
+def _details(cleaned: list[dict]) -> list[str]:
+    found: dict[str, None] = {}
+    for m in cleaned:
+        if m.get("role") != "user":
+            continue
+        text = m["content"]
+        for match in _DETAIL_RE.finditer(text):
+            word = match.group().rstrip(".,;:)!?'\"")
+            before = text[:match.start()].rstrip()
+            if word[0].isupper() and (not before or before[-1] in ".!?:\n"):
+                continue  # a capital that opens a sentence is not a name
+            found.setdefault(word, None)
+    return list(found)
+
+
+def _missing_details(details: list[str], summary: str) -> list[str]:
+    """The details not in the summary. Numbers are compared without thousand
+    separators: a model that writes 1.200 for 1200 has not lost it."""
+    flat = summary.lower()
+    plain = _THOUSANDS.sub("", flat)
+    return [d for d in details
+            if d.lower() not in flat and _THOUSANDS.sub("", d.lower()) not in plain]
+
+
+def _estimator(provider: LLMProvider):
+    return lambda text: provider.estimate_payload_tokens([{"content": text}])
+
+
+async def _rolling_summary(provider: LLMProvider, cleaned: list[dict],
+                           budget: int, max_chars: int) -> str | None:
+    """Piece by piece, in order: each call gets the summary so far and the
+    next piece, so no call is ever bigger than the model can read."""
+    estimate = _estimator(provider)
+    room = max(budget - estimate("x" * max_chars), budget // 2)
+    summary = None
+    for piece in _pieces(cleaned, room, estimate):
+        if summary is None:
+            summary = await _ask(
+                provider, "Summarize this excerpt of a past conversation "
+                "between a user and an assistant.", _transcript(piece), max_chars)
+        else:
+            summary = await _ask(
+                provider, "Update the summary of a past conversation between a "
+                "user and an assistant with the part that follows it. Return "
+                "the whole updated summary.",
+                f"Summary so far:\n{summary}\n\nWhat follows:\n{_transcript(piece)}",
+                max_chars)
+        if summary is None:
+            return None
+    return summary
+
+
+async def _restore_details(provider: LLMProvider, cleaned: list[dict], summary: str,
+                           missing: list[str], budget: int, max_chars: int) -> str | None:
+    """One corrective call: the summary, the missing details, and the user's
+    lines that hold them (so the model does not have to guess what they
+    refer to), cut to the budget."""
+    lines = "\n".join(m["content"] for m in cleaned if m["role"] == "user"
+                      and any(d in m["content"] for d in missing))
+    lines = _pieces([{"role": "user", "content": lines}], budget,
+                    _estimator(provider))[0][0]["content"]
+    try:
+        return await _ask(
+            provider, "Rewrite this summary so it also keeps these exact details "
+            "from the user's messages: " + ", ".join(missing)
+            + ". Drop less important words to make room.",
+            f"Summary:\n{summary}\n\nThe user's messages:\n{lines}", max_chars)
+    except _Truncated:
+        return None
+
+
+async def summarize(model_config: ModelConfig, cleaned: list[dict],
+                    max_chars: int) -> tuple[str | None, bool]:
+    """(summary, degraded) of a dialogue slice, or (None, False) — model
+    down, garbage, or cut twice: the compaction is retried next turn.
+
+    Sized for the model that writes it: the transcript goes in pieces of at
+    most half the room that model has (a 4k model fed the whole head saw a
+    truncated input and summarized part of it, silently). A summary cut by the
+    output cap is retried once on half-size pieces. Then a model-free check:
+    if too many of the details the user gave are missing, one corrective call;
+    whatever comes back is kept, flagged degraded when it still misses them."""
     provider = LLMProvider(model_config)
     provider.trace_label = "memory summary"
     # Same reason as the auto-router: a summary is housekeeping nobody is
@@ -158,27 +322,29 @@ async def summarize(model_config: ModelConfig, text: str, max_chars: int,
     # the agent already has — which may well be a thinking one.
     provider.reasoning = False
     try:
-        out = ""
-        async for chunk in provider.chat_completion_stream(
-            messages=[
-                {"role": "system", "content": (
-                    f"{instruction} Use at most {max_chars} characters. Keep "
-                    "concrete facts, names, numbers, dates, decisions and "
-                    "preferences. Write plain prose in the main language of the "
-                    "text, without preamble, headings or lists."
-                )},
-                {"role": "user", "content": text},
-            ],
-            tools=None,
-            temperature=_SUMMARY_TEMP,
-        ):
-            delta = chunk.get("choices", [{}])[0].get("delta", {})
-            if delta.get("content"):
-                out += delta["content"]
-        return _validate_summary(out, max_chars)
+        budget = (await provider.context_state([], None))["fit"] // 2
+        summary = None
+        for _ in range(2):
+            try:
+                summary = await _rolling_summary(provider, cleaned, budget, max_chars)
+                break
+            except _Truncated:
+                budget //= 2
+        if not summary:
+            return None, False
+        details = _details(cleaned)
+        too_many = lambda missing: len(missing) > len(details) * _MISSING_TOLERANCE
+        missing = _missing_details(details, summary)
+        if too_many(missing):
+            fixed = await _restore_details(provider, cleaned, summary, missing,
+                                           budget, max_chars)
+            if fixed:
+                summary = fixed
+                missing = _missing_details(details, summary)
+        return summary, too_many(missing)
     except Exception as e:
         log.warning("memory summarize failed: %s", e)
-        return None
+        return None, False
     finally:
         await provider.close()
 
@@ -257,12 +423,17 @@ def schedule_compaction(executor, session_id: str, *, session_store=None,
         return
     schedule_background(compact_session(
         executor.agent, executor.model_config, executor.stores.memory,
-        session_id, session_store=session_store, named=named, live=live,
+        session_id, threshold=executor.compaction_threshold(),
+        ratio=executor.provider.token_ratio(),
+        max_chars=summary_chars(executor.memory_room(), executor.provider.token_ratio()),
+        session_store=session_store, named=named, live=live,
     ), key=_compaction_key(session_id))
 
 
 async def compact_session(agent: Agent, model_config: ModelConfig,
                           memory: MemoryStore | None, session_id: str, *,
+                          threshold: int, ratio: float = 1.0,
+                          max_chars: int = SUMMARY_MAX_CHARS,
                           session_store=None, named=None, live=None) -> None:
     """Fire-and-forget entry point (wrap in asyncio.create_task).
 
@@ -276,7 +447,8 @@ async def compact_session(agent: Agent, model_config: ModelConfig,
     if memory is None or not agent.memory_enabled:
         return
     try:
-        await _compact_one(agent, model_config, memory, session_id,
+        await _compact_one(agent, model_config, memory, session_id, threshold, ratio,
+                           max_chars,
                            session_store=session_store, named=named, live=live)
     except Exception:
         log.exception("memory compaction failed for agent '%s'", agent.id)
@@ -289,15 +461,16 @@ def _load_session(session_id: str, session_store, named) -> dict | None:
 
 
 async def _compact_one(agent: Agent, model_config: ModelConfig,
-                       memory: MemoryStore, session_id: str, *,
-                       session_store, named, live) -> None:
+                       memory: MemoryStore, session_id: str, threshold: int,
+                       ratio: float, max_chars: int, *, session_store, named,
+                       live) -> None:
     session = _load_session(session_id, session_store, named)
     if not session:
         return
     conversation = session.get("conversation", [])
-    if not should_compact(agent, conversation):
+    if not should_compact(agent, conversation, threshold, ratio):
         return
-    head, archived_turns = _select_head(conversation, agent.memory_threshold)
+    head, archived_turns = _select_head(conversation, threshold, ratio)
     if not head:
         return
     head_clean = _clean(head)
@@ -312,14 +485,11 @@ async def _compact_one(agent: Agent, model_config: ModelConfig,
     if chunk_id:
         existing = memory.read_chunk(agent.id, chunk_id) or {}
         summary = existing.get("body") or "(archived conversation)"
+        degraded = False
     else:
-        summary = await summarize(
-            model_config, _transcript(head_clean), SUMMARY_MAX_CHARS,
-            "Summarize this excerpt of a past conversation between a user and "
-            "an assistant.",
-        )
+        summary, degraded = await summarize(model_config, head_clean, max_chars)
         if not summary:
-            return  # model down or garbage output: abort, retry next turn
+            return  # model down, garbage or cut output: abort, retry next turn
 
     # Phase B — file writes under the lock (milliseconds). Re-check the hash:
     # a concurrent compaction may have won the race while we were summarizing;
@@ -336,6 +506,7 @@ async def _compact_one(agent: Agent, model_config: ModelConfig,
                 source=session.get("source", ""),
                 keywords=_keywords_from(summary),
                 hash_=chunk_hash,
+                degraded=degraded,
             )
         memory.add_to_index(agent.id, chunk_id, summary)  # idempotent
 

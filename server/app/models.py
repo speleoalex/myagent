@@ -412,6 +412,13 @@ class Agent(BaseModel):
     # Compaction threshold in estimated tokens of the CLEANED conversation:
     # above it, the oldest turns are archived to long-term memory and summarized.
     memory_threshold: int = 4000
+    # Shares of the room the model has for messages (LLMProvider.context_state
+    # `fit`), in percent, enforced at every prompt build whatever the threshold
+    # says: a 4k window cannot hold 4000 tokens of history on top of a prompt.
+    # memory = memory.md + this chat's summaries (memory agents only);
+    # history = the earlier turns sent as messages (every agent).
+    memory_share: int = Field(default=15, ge=0, le=60)
+    history_share: int = Field(default=35, ge=5, le=80)
     # THE autonomy switch (default off). True = the AutonomyService runs this
     # agent's due tasks (see Task). Persisted with the agent, so a started agent
     # restarts on its own after a service/machine reboot; live=false (or
