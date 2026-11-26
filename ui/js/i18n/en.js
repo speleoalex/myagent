@@ -893,6 +893,8 @@ I18n.translations.en = {
     'connectors.mail.pollSecondsHint': 'How often the mailbox is checked. Minimum 15; many providers throttle clients that connect too often.',
     'connectors.mail.popDelete': 'Delete from server after reading',
     'connectors.mail.popDeleteHint': 'Off: mail stays on the server and MyAgent remembers what it answered. On: the classic POP behaviour — fetched mail is removed.',
+    'connectors.mail.authServer': 'Sender verification (DMARC)',
+    'connectors.mail.authServerHint': 'The name your mail provider writes at the start of the Authentication-Results header of incoming mail (open the source of a received message: e.g. "kundenserver.de" for IONOS, "mx.google.com" for Gmail). When set, a mail is accepted only if that server recorded dmarc=pass, so nobody can get in by forging the From: of an allowed address. Empty = the From: is trusted as written.',
     'connectors.mail.smtpHost': 'Server',
     'connectors.mail.smtpPort': 'Port',
     'connectors.mail.smtpSecurity': 'Security',

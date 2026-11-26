@@ -162,6 +162,16 @@ Worth knowing:
   address book stores them as the person's `mail` handle), so only the people
   you name get an answer; everybody else is ignored silently, on purpose — an
   auto-reply to strangers is how a mailbox becomes a spam relay.
+- **A From: can be forged**, and the allowlist reads the From:. Set *Sender
+  verification (DMARC)* to the name your provider writes at the start of the
+  `Authentication-Results` header of incoming mail (`kundenserver.de` for
+  IONOS, `mx.google.com` for Gmail): the bot then accepts a mail only when
+  that server recorded `dmarc=pass`. It reads the provider's verdict instead
+  of checking SPF/DKIM itself (no DNS client in the standard library), and
+  only from that server — a sender can forge the header too. A legitimate
+  sender whose domain has no working SPF/DKIM is refused as well (the log
+  line says why): fix the domain's DNS, not the check. Without it, protect a
+  mailbox whose agent has powerful tools with password mode.
 - **Loop guard.** Mails from the bot's own address, from `no-reply`/
   `mailer-daemon`-like senders, bounces, mailing lists and anything flagged
   `Auto-Submitted` are dropped, and every reply carries

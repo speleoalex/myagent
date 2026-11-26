@@ -43,6 +43,8 @@
      "hint": "connectors.mail.folderHint", "default": "INBOX", "when": {"protocol": "imap"}},
     {"key": "pop_delete", "section": "incoming", "type": "checkbox", "label": "connectors.mail.popDelete",
      "hint": "connectors.mail.popDeleteHint", "default": false, "when": {"protocol": "pop3"}},
+    {"key": "auth_server", "section": "incoming", "type": "text", "label": "connectors.mail.authServer",
+     "hint": "connectors.mail.authServerHint", "default": "", "placeholder": "mx.example.com"},
 
     {"key": "smtp_host", "section": "outgoing", "type": "text", "label": "connectors.mail.smtpHost",
      "hint": "connectors.mail.smtpHostHint", "default": "", "placeholder": "smtp.example.com"},

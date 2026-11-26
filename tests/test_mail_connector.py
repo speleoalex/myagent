@@ -23,6 +23,9 @@ Pinned properties, each of which fails silently in production:
     files attached and NOT threaded; without a subject it behaves as send()
     (a threaded reply, or buffered into the turn's single reply) — and so does
     one WITH a subject called from inside the turn answering that address;
+  * with sender verification on, a From: is believed only on dmarc=pass
+    recorded by the mailbox's OWN server — a forged Authentication-Results
+    from another server, or one buried under the real one, opens nothing;
   * a sender the allowlist refuses gets no mail at all, or a provider's
     auto-responder and our refusal answer each other forever;
   * a body the agent wrote as HTML goes out as multipart/alternative with a
@@ -216,6 +219,40 @@ def test_loop_guards():
     check(reply["Auto-Submitted"] == "auto-replied", "our replies carry Auto-Submitted: auto-replied")
     check(mail.is_automated(email.message_from_bytes(reply.as_bytes(), policy=default_policy),
                             set()) != "", "…so a peer with the same rule (us) drops them")
+
+
+def test_sender_verification():
+    print("Sender verification (DMARC):")
+    def raw(*results: str) -> bytes:
+        head = "".join(f"Authentication-Results: {r}\n" for r in results)
+        return (head + "From: Mario <mario@example.com>\nSubject: x\n\nhi\n").encode()
+    ours = "mx.myagent.test"
+    cases = [
+        ((f"{ours}; dkim=pass header.i=@example.com; spf=pass; dmarc=pass header.from=example.com",),
+         True, "dmarc=pass from our server"),
+        ((f"{ours}; dkim=pass header.i=@other.example; spf=softfail; dmarc=fail header.from=example.com",),
+         False, "dmarc=fail although DKIM passed for an unrelated domain"),
+        ((f"{ours}; spf=pass smtp.mailfrom=example.com",), False, "no DMARC result at all"),
+        ((), False, "no Authentication-Results header"),
+        (("mx.attacker.example; dmarc=pass header.from=example.com",),
+         False, "dmarc=pass written by a server that is not ours"),
+        ((f"{ours}; dmarc=fail header.from=example.com", f"{ours}; dmarc=pass header.from=example.com"),
+         False, "forged pass under the real fail: the topmost one counts"),
+        ((f"{ours} (dmarc=pass); dmarc=fail (was: dmarc=pass) header.from=example.com",),
+         False, "a pass spelled inside a comment is not a result"),
+        ((f'{ours}; spf=pass smtp.mailfrom="a; dmarc=pass"@evil.example; dmarc=fail header.from=example.com',),
+         False, "a pass smuggled in a quoted envelope address is not a result"),
+        ((f"MX.MyAgent.Test 1;\n dmarc = PASS (p=none) header.from=example.com",),
+         True, "case, version, folding and spacing do not matter"),
+    ]
+    for results, accepted, label in cases:
+        why = mail.parse_inbound(raw(*results), set(), ours).get("skip", "")
+        check((why == "") is accepted and (accepted or "not authenticated" in why),
+              f"{label}: {why or 'accepted'}")
+    check("skip" not in mail.parse_inbound(raw(), set()),
+          "verification off (no server configured): the From: is believed, as before")
+    check(mail.resolve_settings({"auth_server": " Kundenserver.DE "})["auth_server"] == "kundenserver.de",
+          "the configured server name is trimmed and lowercased")
 
 
 def test_seen_store():
@@ -810,6 +847,7 @@ async def main():
     await test_base_notify()
     test_parsing()
     test_loop_guards()
+    test_sender_verification()
     test_seen_store()
     await test_polling()
     await test_pipeline_and_reply()

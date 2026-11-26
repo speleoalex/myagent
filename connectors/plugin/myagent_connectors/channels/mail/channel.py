@@ -174,6 +174,9 @@ _RE_SUBJECT = re.compile(r"^\s*((re|r|aw|sv|antw|ref|fwd?|fw|wg|tr|i|vs)\s*:\s*)
                          re.IGNORECASE)
 
 # What makes an outgoing body markup rather than prose: see looks_like_html().
+_RE_QUOTED = re.compile(r'"(?:[^"\\]|\\.)*"')
+_RE_COMMENT = re.compile(r"\([^()]*\)")
+_RE_DMARC = re.compile(r"(?:^|;)\s*dmarc\s*=\s*([a-z]+)", re.I)
 _RE_HTML_OPEN = re.compile(
     r"<(?:!doctype\s+html|html|body|head|table|div|p|h[1-6]|ul|ol|section|"
     r"article|center|pre|blockquote|font)[\s>/]", re.IGNORECASE)
@@ -219,6 +222,7 @@ def resolve_settings(raw: dict | None) -> dict:
     s["host"] = str(s.get("host") or "")
     s["smtp_host"] = str(s.get("smtp_host") or "") or s["host"]
     s["from_addr"] = str(s.get("from_addr") or "") or s["username"]
+    s["auth_server"] = str(s.get("auth_server") or "").lower()
     return s
 
 
@@ -463,8 +467,41 @@ def extract_attachments(msg: email.message.Message) -> tuple[list[dict], list[st
     return out, notes
 
 
-def parse_inbound(raw: bytes, own_addresses: set[str]) -> dict:
+def dmarc_verdict(msg: email.message.Message, auth_server: str) -> str:
+    """The DMARC result ``auth_server`` recorded for this message ("pass",
+    "fail", "none"…), or "" when it recorded none.
+
+    The From: header is all the access control has, and anyone can type any
+    From:. Checking SPF/DKIM ourselves needs DNS, which the standard library
+    does not speak; the receiving server already did it and wrote the outcome
+    in ``Authentication-Results`` (RFC 8601). That header is only evidence
+    when OUR server wrote it — a sender can ship a message with a forged one —
+    hence the authserv-id match. Headers are prepended in transit, so the
+    first match is the one added last: a forged copy carrying the same id
+    that the server failed to strip sits below the real one and is never
+    read."""
+    for value in msg.get_all("Authentication-Results") or []:
+        # Quoted strings go first: they hold text the SENDER chose (an
+        # envelope address like "a; dmarc=pass"@evil.example is legal), which
+        # must not be read as a result.
+        value = _RE_QUOTED.sub(" ", str(value))
+        while (stripped := _RE_COMMENT.sub(" ", value)) != value:  # nested
+            value = stripped
+        server, _, results = value.partition(";")
+        # "authserv-id [version]": the id is the first word.
+        if (server.split() or [""])[0].lower() != auth_server:
+            continue
+        found = _RE_DMARC.search(results)
+        if found:
+            return found.group(1).lower()
+    return ""
+
+
+def parse_inbound(raw: bytes, own_addresses: set[str], auth_server: str = "") -> dict:
     """Everything the pipeline needs from one raw message, or ``{"skip": why}``.
+
+    ``auth_server`` set = a message is only accepted with ``dmarc=pass`` from
+    that server (see ``dmarc_verdict``).
 
     Returns: ``chat_id`` (sender address, lowercased), ``sender_name``,
     ``text`` (subject + body, quotes stripped), ``attachments``, ``notes``,
@@ -473,6 +510,11 @@ def parse_inbound(raw: bytes, own_addresses: set[str]) -> dict:
     why = is_automated(msg, own_addresses)
     if why:
         return {"skip": why}
+    if auth_server:
+        verdict = dmarc_verdict(msg, auth_server)
+        if verdict != "pass":
+            return {"skip": f"sender not authenticated: {auth_server} says "
+                            f"dmarc={verdict or '(no result)'} for {msg.get('From')}"}
     name, addr = email.utils.parseaddr(str(msg.get("From") or ""))
     addr = addr.strip().lower()
     subject = re.sub(r"\s+", " ", str(msg.get("Subject") or "")).strip()
@@ -991,7 +1033,7 @@ class MailConnector(BaseConnector):
 
     async def _handle_raw(self, key: str, raw: bytes) -> None:
         try:
-            parsed = parse_inbound(raw, self._own)
+            parsed = parse_inbound(raw, self._own, self.settings["auth_server"])
         except Exception as e:
             log.warning("[%s] unparseable message %s: %s", self.binding.id, key, e)
             return
