@@ -110,6 +110,7 @@ const ChatPage = {
                                     <option value="${App.escAttr(m.id)}">${App.esc(m.name || m.id)}</option>
                                 `).join('')}
                             </select>
+                            <div class="form-text fw-semibold" id="model-effective"></div>
                             <div class="form-text">${i18n('chat.modelTitle')}</div>` : ''}
                             <div class="form-check form-switch mb-0 mt-2" id="reasoning-wrap"
                                  style="display:none" title="${i18n('chat.reasoningTitle')}">
@@ -598,6 +599,19 @@ const ChatPage = {
         btn.classList.toggle('btn-outline-primary', !!this.modelOverride);
     },
 
+    /** Name the model that will answer under the picker: "default" alone,
+     * or an agent that pins its own model over the chat's pick, hides it.
+     * In auto mode the agent (and so possibly its model) is chosen per
+     * message, so the server's answer is only the default, and says so. */
+    _showEffectiveModel(caps) {
+        const el = document.getElementById('model-effective');
+        if (!el) return;
+        const name = caps && caps.model_name;
+        el.textContent = !name ? ''
+            : i18n(this.currentAgentId === 'auto' ? 'chat.modelEffectiveAuto' : 'chat.modelEffective',
+                   { model: name });
+    },
+
     // Show the reasoning switch only when the model that will actually answer
     // can be told not to reason. Which model that is depends on the agent's
     // own pin as much as on the chat's picker, and resolving "default" means
@@ -614,6 +628,7 @@ const ChatPage = {
                 + encodeURIComponent(this.currentAgentId || '')
                 + '&model_override=' + encodeURIComponent(this.modelOverride || ''));
         } catch (e) { /* model server down: leave it hidden */ }
+        this._showEffectiveModel(caps);
         if (!caps || !caps.reasoning) {
             wrap.style.display = 'none';
             // Stop claiming a preference for a model that has no switch: the
@@ -886,14 +901,7 @@ const ChatPage = {
         const pct = Math.min(100, Math.round((used / ctx.window) * 100));
         const k = (n) => (n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + 'k'
                                     : String(n));
-        // Shown only once it explains something: past the amber threshold or
-        // after a compression. "Context 3.4k / 33k" under every answer was a
-        // fact about the machine that a non-technical reader cannot use.
         const warn = pct >= 75;
-        if (!warn && !ctx.demoted) {
-            msgDiv.querySelector(':scope > .msg-context')?.remove();
-            return;
-        }
         let el = msgDiv.querySelector(':scope > .msg-context');
         if (!el) {
             el = document.createElement('div');

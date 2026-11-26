@@ -716,6 +716,8 @@ I18n.translations.en = {
     'chat.toolCountOne': '1 tool',
     'chat.toolCountMany': '{n} tools',
     'chat.modelDefault': 'Default model',
+    'chat.modelEffective': 'Answering: {model}',
+    'chat.modelEffectiveAuto': 'Default: {model} (the automatically chosen agent may use another)',
     'chat.modelTitle': 'Model for this chat only — agents pinned to a specific model keep it',
     'chat.agentAuto': 'Auto (pick per message)',
     'chat.viaAgent': 'via {name}',

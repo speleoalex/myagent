@@ -307,8 +307,9 @@ async def chat_capabilities(request: Request, agent_id: str = "",
                             model_override: str = "") -> dict:
     """What the chat composer may offer for this (agent, model) pair.
 
-    Only the frontend needs this, and only to decide whether to draw the
-    reasoning checkbox. It exists because the composer cannot work out the
+    Only the frontend needs this: to name the model that will answer (the
+    picker's "default" says nothing on its own) and to decide whether to draw
+    the reasoning checkbox. It exists because the composer cannot work out the
     effective model on its own: most agents sit on the "default" sentinel,
     whose resolution includes a fallback to a reachable local model, and
     reimplementing that precedence in JS would give two answers that drift.
@@ -318,7 +319,8 @@ async def chat_capabilities(request: Request, agent_id: str = "",
     follows, where it can be stated properly.
     """
     stores: Stores = request.app.state.stores
-    out = {"model_id": None, "reasoning": False, "reasoning_default": None}
+    out = {"model_id": None, "model_name": None, "reasoning": False,
+           "reasoning_default": None}
     # Auto mode picks the agent only once the message is known, so there is no
     # effective model yet; the models it routes between are the user's own, so
     # fall back to the chat's own default rather than promising nothing.
@@ -335,8 +337,11 @@ async def chat_capabilities(request: Request, agent_id: str = "",
         else:
             cfg, _ = await resolve_default(
                 stores.models, config.settings.default_model_id)
-        info = await model_probe.probe(cfg)
+        # Named before the probe: a backend that is down still answers with
+        # this model, so the UI must keep showing which one it is.
         out["model_id"] = cfg.id
+        out["model_name"] = cfg.name or cfg.id
+        info = await model_probe.probe(cfg)
         out["reasoning"] = model_probe.reasoning_support(cfg, info)["supported"]
         out["reasoning_default"] = cfg.reasoning
     except Exception as e:

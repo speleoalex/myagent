@@ -716,6 +716,8 @@ I18n.translations.it = {
     'chat.toolCountOne': '1 strumento',
     'chat.toolCountMany': '{n} strumenti',
     'chat.modelDefault': 'Modello predefinito',
+    'chat.modelEffective': 'Risponde: {model}',
+    'chat.modelEffectiveAuto': 'Predefinito: {model} (l\'agente scelto in automatico può usarne un altro)',
     'chat.modelTitle': 'Modello solo per questa chat — gli agenti con un modello fissato lo mantengono',
     'chat.agentAuto': 'Auto (sceglie l\'agente)',
     'chat.viaAgent': 'tramite {name}',
