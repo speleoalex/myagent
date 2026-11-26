@@ -1186,7 +1186,8 @@ class AgentExecutor:
         (images if supports_vision, audio if supports_audio); otherwise the file
         is left out of the content and reached via its workspace path (listed in
         the attachment manifest) using a tool. Text attachments are always folded
-        in as labeled blocks. Returns a plain string when nothing is inlined, or
+        in as labeled blocks, and every stored file is named with its path.
+        Returns a plain string when nothing is inlined, or
         a multimodal parts list otherwise."""
         if not attachments:
             return message
@@ -1217,6 +1218,11 @@ class AgentExecutor:
             elif kind == "text":
                 text_blocks.append(f"[File: {name}]\n{data}")
             # other/binary kinds (e.g. pdf): never inlined — path-only
+            # The path goes in the MESSAGE, not only in the turn's manifest:
+            # the message is what the stored conversation keeps, so a follow-up
+            # question about the file still knows where it is.
+            if att.get("path"):
+                text_blocks.append(f"[Attached file: {name}, saved at {att['path']}]")
 
         combined = message or ""
         if text_blocks:
