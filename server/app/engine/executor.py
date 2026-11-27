@@ -2224,6 +2224,19 @@ class AgentExecutor:
         # `delivery_offered` so the two rounds cannot be confused for one
         # another.
         honest_round_used = False
+        # Synthetic user turns this loop injects to steer ITSELF: the malformed
+        # retry, the dedup nudge, the reserved round's prompt and the exhaustion
+        # notice. They must reach the model in this turn and must never be
+        # stored as dialogue. Measured on the Orin, 2026-11-27: "THIS TURN IS
+        # OVER ... with ONE exception: file_write" came back in the NEXT turn's
+        # history as if the user had written it, and the agent quoted it as
+        # something it had been told.
+        control_indices: set[int] = set()
+
+        def add_control(text: str) -> None:
+            messages.append({"role": "user", "content": text})
+            control_indices.add(len(messages) - 1)
+
         # One extra pass the limits themselves do not count: a reserved round is
         # opened AFTER the last allowed iteration has been spent, and without
         # this the opening would be refused by the loop guard — which is exactly
@@ -2412,7 +2425,7 @@ class AgentExecutor:
                     yield {"type": "clear_tokens"}
                     messages.append({"role": "assistant",
                                      "content": f"{prompts.UNPARSED_CALL_PREFIX} unparsed)\n{full_content}"})
-                    messages.append({"role": "user", "content": _MALFORMED_CALL_PROMPT})
+                    add_control(_MALFORMED_CALL_PROMPT)
                     continue
 
             # The endpoint rejected `tools` mid-call (auto probe -> text
@@ -2460,8 +2473,7 @@ class AgentExecutor:
                     if dedup_nudges < _MAX_MALFORMED_RETRIES:
                         dedup_nudges += 1
                         self._debug_log("  ALL CALLS DEDUPED -> nudging for an answer")
-                        messages.append({"role": "user",
-                                         "content": _REPEATED_CALLS_PROMPT})
+                        add_control(_REPEATED_CALLS_PROMPT)
                         continue
                 tool_calls = unique or None
 
@@ -2531,8 +2543,7 @@ class AgentExecutor:
                             pair_with=(delivery_tool
                                        if self.provider.supports_tools is not False
                                        else None))
-                        messages.append({"role": "user",
-                                         "content": self._delivery_prompt(delivery_tool)})
+                        add_control(self._delivery_prompt(delivery_tool))
                         system_content, tool_defs, openai_tools = self._prepare_turn(
                             self._delivery_defs(callable_defs, delivery_tool), attachments,
                             memory_context, transcribed=transcribed,
@@ -2564,9 +2575,8 @@ class AgentExecutor:
                                     "forcing the answer", self.agent.id, self.budget_hit)
                         self._append_refused(
                             messages, refused_calls, full_content, pair_with=None)
-                        messages.append({"role": "user", "content": (
-                            prompts.BUDGET_EXHAUSTED if budget_out
-                            else prompts.TURN_CUT)})
+                        add_control(prompts.BUDGET_EXHAUSTED if budget_out
+                                    else prompts.TURN_CUT)
                         system_content, tool_defs, openai_tools = self._prepare_turn(
                             [], attachments, memory_context,
                             transcribed=transcribed, foreign_context=foreign_context)
@@ -2821,8 +2831,12 @@ class AgentExecutor:
         # foreign ones too — they were only kept out of the prompt), then what
         # this turn produced. Persisting `messages` alone would drop the
         # foreign turns from the stored conversation for good.
+        # The turn-control prompts above are NOT stored: `conversation` is what
+        # the caller persists and what the next turn reads back as dialogue.
+        tail = [m for i, m in enumerate(messages[history_end:], history_end)
+                if i not in control_indices]
         clean_messages = []
-        for m in messages[:1] + history + messages[history_end:]:
+        for m in messages[:1] + history + tail:
             clean_messages.append(ChatMessage(
                 role=m.get("role", "assistant"),
                 content=self._flatten_content(m.get("content")),

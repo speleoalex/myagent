@@ -298,6 +298,28 @@ def case_iteration_cut_without_a_writer():
     check(done is not None and done["reply"].startswith("Ho letto"), "honest answer")
 
 
+def case_control_prompts_are_not_stored():
+    print("the reserved round's prompt is not stored as if the user had said it")
+    # Found on the Orin, 2026-11-27: the delivery prompt sat in
+    # session.conversation and came back in the NEXT turn's history, so the
+    # agent quoted "THIS TURN IS OVER ... with ONE exception: file_write" as
+    # something it had been told — in a fresh turn where nothing was over.
+    ex, prov, ran = _executor([
+        [_call("shell_exec", '{"command": "a"}')],
+        [_call("shell_exec", '{"command": "b"}')],
+        [_call("file_write", '{"path": "r.md", "content": "# R"}')],
+        [_text("Scritto r.md")],
+    ], unattended=False, tools=("shell_exec", "file_write"))
+    done = asyncio.run(_run(ex))
+    texts = [(m.get("content") or "") for m in done["conversation"]]
+    want = prompts.SAVE_ROUND.format(tool="file_write")
+    check(not any(t == want for t in texts),
+          "the turn-control prompt is not in the stored conversation")
+    check(any("do the report" in t for t in texts),
+          "the user's own message is still there")
+    check(any(t == "Scritto r.md" for t in texts), "and so is the answer")
+
+
 def case_without_notify_user_unchanged():
     print("unattended but notify_user not held: nothing to offer")
     ex, prov, ran = _executor([
@@ -443,6 +465,7 @@ if __name__ == "__main__":
                  case_both_limits_reached_together,
                  case_iteration_cut_opens_the_round,
                  case_iteration_cut_without_a_writer,
+                 case_control_prompts_are_not_stored,
                  case_without_notify_user_unchanged):
         case()
     if failures:

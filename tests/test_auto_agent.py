@@ -237,9 +237,11 @@ check("pick_agent strips reasoning before parsing",
 check("the last-agent hint only names a valid candidate",
       "AUTO_ROUTE_LAST_AGENT.format" in router_src)
 exec_src = (ROOT / "server" / "app" / "engine" / "executor.py").read_text(encoding="utf-8")
-check("the returned conversation is rebuilt from the WHOLE history + this turn",
-      "messages[:1] + history + messages[history_end:]" in exec_src
-      and "history_end = len(messages)" in exec_src)
+check("the returned conversation is rebuilt from the WHOLE history + this turn, "
+      "minus the prompts the loop injected to steer itself",
+      "messages[:1] + history + tail" in exec_src
+      and "history_end = len(messages)" in exec_src
+      and "i not in control_indices" in exec_src)
 
 
 # 5b. functional: the foreign transcript lands in the system prompt
