@@ -91,10 +91,24 @@ _WRITE_PDF = "write_pdf"
 # the PDF tool offered, declined it, and answered in prose.
 _DELIVERY_ORDER = ("file_write", "file_edit", "file_append", _WRITE_PDF)
 
-# How many calls are left when the countdown starts riding the last tool result
-# of a round. Two, because one is the delivery itself: the warning has to arrive
-# while it can still change the model's NEXT decision, not after it.
-_BUDGET_WARN_LEFT = 2
+# When the countdown starts riding the last tool result of a round.
+#
+# A fixed 2 was a dashboard lit with the engine off: the agent using it said the
+# only decision left at that point is which call to spend, and it is right — one
+# read plus one write leaves nothing to reorder. A QUARTER of the budget (never
+# below 2, never above 5) is where the model can still choose: with 20 calls it
+# is told at 5, which is two or three reads of room to stop and deliver.
+# Fired at that count and once more at 1, so a long turn meets it twice and a
+# short one never.
+_BUDGET_WARN_FRACTION = 0.25
+_BUDGET_WARN_MIN = 2
+_BUDGET_WARN_MAX = 5
+
+
+def _budget_warn_at(max_tool_calls: int) -> int:
+    """The count at which the countdown first appears for this budget."""
+    return max(_BUDGET_WARN_MIN,
+               min(_BUDGET_WARN_MAX, int(max_tool_calls * _BUDGET_WARN_FRACTION)))
 
 # Cap (chars) on the quoted transcript of history turns another agent answered
 # (see _split_history). Generous on purpose: the user's rule is that the agent
@@ -2215,9 +2229,9 @@ class AgentExecutor:
         delivery_round = False
         delivery_offered = False
         delivery_calls = 0
-        # Whether the countdown note has already ridden a tool result this turn
-        # (see the per-call block): once per remaining count is a warning, the
-        # same line twice is noise.
+        # Which countdown notes already rode a tool result this turn (see the
+        # per-call block). The count is emitted at two counts only — the quarter
+        # mark and 1 — so this set can hold two entries, never one per count.
         budget_warned: set[int] = set()
         # The extra no-tool round of a turn that ran out of budget with no
         # delivery tool to reserve (see the budget check). Kept apart from
@@ -2672,15 +2686,16 @@ class AgentExecutor:
                     result += prompts.REPEATED_TOOL_NOTE.format(
                         tool=func_name, n=tool_repeats[func_name])
                 # The countdown a turn cannot see. Rides the LAST result of the
-                # round once few calls are left — same shape as the repeat note,
-                # and for the same reason: native tool calling has no "decide"
-                # nudge to carry it. Finding out at zero is how a turn spends
-                # its whole budget exploring and reaches the delivery with
-                # nothing left (Orin, 2026-11-27: 20 calls of reading, not one
-                # line written). Once per turn, and only while it can still
-                # change the next decision.
+                # round — same shape as the repeat note, and for the same
+                # reason: native tool calling has no "decide" nudge to carry it.
+                # Finding out at zero is how a turn spends its whole budget
+                # exploring and reaches the delivery with nothing left (Orin,
+                # 2026-11-27: 20 calls of reading, not one line written).
+                # Two notes, not one per count: at the quarter mark, where the
+                # model can still choose what to drop, and at the last call.
                 left = max_tool_calls - total_tool_calls
-                if (left not in budget_warned and 0 < left <= _BUDGET_WARN_LEFT
+                if (left not in budget_warned
+                        and left in (_budget_warn_at(max_tool_calls), 1)
                         and not delivery_round and call_idx == len(tool_calls) - 1):
                     budget_warned.add(left)
                     deliver_with = self._delivery_tool(callable_defs)

@@ -298,6 +298,53 @@ def case_iteration_cut_without_a_writer():
     check(done is not None and done["reply"].startswith("Ho letto"), "honest answer")
 
 
+def case_every_injected_prompt_is_kept_out_of_the_history():
+    print("the same rule holds for the dedup nudge, not only the delivery round")
+    # The invariant is about the CLASS, not the one prompt that leaked: any text
+    # the loop injects to steer itself is a turn it is having with itself, and
+    # must never come back as something the user said.
+    ex, prov, ran = _executor([
+        [_call("shell_exec", '{"command": "a"}')],
+        [_call("shell_exec", '{"command": "a"}')],      # identical: deduped
+        [_text("fatto")],
+    ], unattended=False, tools=("shell_exec",), max_tool_calls=5)
+    done = asyncio.run(_run(ex))
+    texts = [(m.get("content") or "") for m in done["conversation"]]
+    check(not any(t == prompts.REPEATED_CALLS for t in texts),
+          "the dedup nudge is not stored as dialogue")
+    check(ran == ["shell_exec"], f"the repeat did not run: {ran}")
+
+
+def case_countdown_scales_with_the_budget():
+    print("the countdown arrives at a quarter of the budget, not at the last two")
+    # The agent that reported the original bug said a warning at 2 calls is "a
+    # dashboard lit with the engine off": one read plus one write leaves nothing
+    # to reorder. With 12 calls it must appear at 3, and once more at 1.
+    calls = lambda n, tag="x": [_call("shell_exec",
+                                      '{"command": "%s%d"}' % (tag, i), i)
+                                for i in range(n)]
+    ex, prov, ran = _executor([
+        calls(9, "a"),          # 9 of 12 spent -> 3 left: first note
+        calls(2, "b"),          # 11 of 12 spent -> 1 left: second note
+        [_text("fatto")],
+    ], unattended=False, tools=("shell_exec", "file_write"), max_tool_calls=12,
+        max_iterations=12)
+    asyncio.run(_run(ex))
+    # The last payload holds the whole turn, so counting there counts each
+    # note once (the earlier rounds show it again as history).
+    notes = []
+    for m in prov.rounds[-1]["messages"]:
+        c = m.get("content")
+        if m.get("role") == "tool" and isinstance(c, str) and "tool budget:" in c:
+            notes.append(c[c.index("tool budget:"):][:22])
+    check(len(notes) == 2, f"exactly two countdown notes: {notes}")
+    check(notes and notes[0].startswith("tool budget: 3 of 12"),
+          f"the first at the quarter mark: {notes[:1]}")
+    check(len(notes) > 1 and notes[1].startswith("tool budget: 1 of 12"),
+          f"the second at the last call: {notes[1:]}")
+    check(ran.count("shell_exec") == 11, f"and all eleven calls ran: {len(ran)}")
+
+
 def case_control_prompts_are_not_stored():
     print("the reserved round's prompt is not stored as if the user had said it")
     # Found on the Orin, 2026-11-27: the delivery prompt sat in
@@ -465,6 +512,8 @@ if __name__ == "__main__":
                  case_both_limits_reached_together,
                  case_iteration_cut_opens_the_round,
                  case_iteration_cut_without_a_writer,
+                 case_countdown_scales_with_the_budget,
+                 case_every_injected_prompt_is_kept_out_of_the_history,
                  case_control_prompts_are_not_stored,
                  case_without_notify_user_unchanged):
         case()
