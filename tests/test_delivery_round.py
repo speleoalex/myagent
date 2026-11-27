@@ -102,9 +102,10 @@ class FakeProvider:
 
 
 def _executor(script, *, unattended: bool, tools=("shell_exec", "notify_user"),
-              max_tool_calls: int = 1) -> tuple[AgentExecutor, FakeProvider, list]:
+              max_tool_calls: int = 1,
+              max_iterations: int = 12) -> tuple[AgentExecutor, FakeProvider, list]:
     agent = Agent(id="wake", name="w", tools=list(tools), memory_enabled=False,
-                  max_tool_calls=max_tool_calls, max_iterations=12)
+                  max_tool_calls=max_tool_calls, max_iterations=max_iterations)
     model = ModelConfig(id="m", name="m", provider="llamacpp",
                         base_url="http://127.0.0.1:9")  # never contacted
     stores = Stores(agents=JsonStore(Path(_TMP) / "agents"),
@@ -236,6 +237,27 @@ def case_attended_document_round():
     ], unattended=True, max_tool_calls=3)
     asyncio.run(_run(ex))
     check(ex.budget_hit == "", f"no limit hit: {ex.budget_hit!r}")
+
+
+def case_both_limits_reached_together():
+    print("the turn hits its last iteration AND the budget: the round still opens")
+    # The Orin, 2026-11-27: 20 tool calls and 10 iterations reached together,
+    # file_write refused, and no delivery round — because the round was gated
+    # on `iterations < max_iterations` at the exact moment it was false.
+    ex, prov, ran = _executor([
+        [_call("shell_exec", '{"command": "a"}')],                        # iter 1
+        [_call("file_write", '{"path": "r.md", "content": "# R"}')],      # iter 2, refused
+        [_call("file_write", '{"path": "r.md", "content": "# R"}')],      # the round
+        [_text("Scritto r.md")],
+    ], unattended=False, tools=("shell_exec", "file_write"),
+        max_tool_calls=1, max_iterations=2)
+    done = asyncio.run(_run(ex))
+    check(prov.rounds[2]["tools"] == ["file_write"],
+          f"the delivery round is opened past max_iterations: {prov.rounds[2]['tools']}")
+    check(ran == ["shell_exec", "file_write"],
+          f"and the file is written: {ran}")
+    check(done is not None and done["reply"] == "Scritto r.md", "closing line")
+    check(ex.budget_hit == "max_tool_calls", f"the cut is recorded: {ex.budget_hit!r}")
 
 
 def case_without_notify_user_unchanged():
@@ -380,6 +402,7 @@ if __name__ == "__main__":
                  case_attended_save_round, case_prefers_write_pdf_over_file_write,
                  case_refused_call_stays_in_the_conversation,
                  case_no_delivery_tool_explains_the_cut, case_budget_countdown,
+                 case_both_limits_reached_together,
                  case_without_notify_user_unchanged):
         case()
     if failures:

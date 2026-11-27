@@ -220,6 +220,18 @@ NOT_EXECUTED = (
     "again now — for this one tool the round is still open."
 )
 
+#: Attended turn cut by `max_iterations` rather than by the tool budget: the
+#: rounds are gone, the calls are not. Same job as BUDGET_EXHAUSTED — the reply
+#: must know why it is shorter than the work — with the one difference that
+#: matters to the model: it cannot fix this by spending differently.
+TURN_CUT = (
+    "THIS TURN IS OVER: it reached its iteration limit, so no tool will run "
+    "again. Answer NOW with what you have gathered so far, in your normal "
+    "prose — the user reads this reply. Do NOT promise to do the work later. If "
+    "part of the request could not be completed, say so and why in a single "
+    "sentence, then give the rest of your answer normally."
+)
+
 #: Shown as the reply when the loop ran out of iterations without answering.
 NO_FINAL_RESPONSE = "[Agent reached maximum iterations without a final response]"
 

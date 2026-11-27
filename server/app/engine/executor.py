@@ -517,10 +517,13 @@ class AgentExecutor:
         # wrong thing ("I'll do it next time") instead of naming what is
         # missing. ONE message and not two: a second user turn right after it
         # would dilute the first, and a 4B follows the last instruction it
-        # reads. The budget text goes first, the "answer now" rule last.
-        tail = (_FORCE_ANSWER_PROMPT
-                if getattr(self, "budget_hit", "") != "max_tool_calls"
-                else prompts.BUDGET_EXHAUSTED + "\n\n" + _FORCE_ANSWER_PROMPT)
+        # reads. The cut's own words go first — a turn stopped by the round
+        # limit cannot be fixed by spending differently, and the model should
+        # not be told otherwise — the "answer now" rule last.
+        cut = {"max_tool_calls": prompts.BUDGET_EXHAUSTED,
+               "max_iterations": prompts.TURN_CUT}.get(
+                   getattr(self, "budget_hit", ""))
+        tail = (cut + "\n\n" + _FORCE_ANSWER_PROMPT) if cut else _FORCE_ANSWER_PROMPT
         return clean + [{"role": "user", "content": tail}]
 
     def _synthesis_temp(self):
@@ -2221,13 +2224,27 @@ class AgentExecutor:
         # `delivery_offered` so the two rounds cannot be confused for one
         # another.
         honest_round_used = False
+        # One extra pass the limits themselves do not count: a reserved round is
+        # opened AFTER the last allowed iteration has been spent, and without
+        # this the opening would be refused by the loop guard — which is exactly
+        # what happened on the Orin, 2026-11-27: 20 tool calls and 10 iterations
+        # reached together, a turn holding file_write, and no delivery round,
+        # because `iterations < max_iterations` was false at the only moment it
+        # mattered. The turn ended with the work done and the file unwritten.
+        extra_round = False
         # Which limit cut this turn short, "" when none did. Public: the
         # scheduler records it with the run, because a wake that ran out of
         # budget looks finished — it answered — while part of the task was
         # never done (observed: a daily report cut at call 21 of 22).
         self.budget_hit = ""
 
-        while iterations < self.agent.max_iterations:
+        # `or extra_round`: the reserved rounds are the ONE thing allowed past
+        # max_iterations, because they are the difference between a turn that
+        # produced an answer and a turn that produced a promise. Reset at the
+        # top of every pass, so it can never buy more than the single round the
+        # latching flags already bound.
+        while iterations < self.agent.max_iterations or extra_round:
+            extra_round = False
             iterations += 1
 
             # Choose temperature: tool-calling vs final response
@@ -2484,7 +2501,7 @@ class AgentExecutor:
                     # is still available. The refused names go first in the
                     # choice: a turn reaching for file_write must not be offered
                     # write_pdf because a list says so.
-                    if not delivery_offered and iterations < self.agent.max_iterations:
+                    if not delivery_offered:
                         delivery_tool = self._delivery_tool(
                             callable_defs,
                             preferred=tuple(_tool_call_name(tc) for tc in refused_calls))
@@ -2512,9 +2529,9 @@ class AgentExecutor:
                             memory_context, transcribed=transcribed,
                             foreign_context=foreign_context)
                         messages[0] = {"role": "system", "content": system_content}
+                        extra_round = True
                         continue
-                    if (not honest_round_used and not delivery_offered
-                            and iterations < self.agent.max_iterations):
+                    if not honest_round_used and not delivery_offered:
                         # No writer to reserve: the turn cannot produce the
                         # artifact, but it can still be HONEST about it. The
                         # refused calls used to vanish in silence here and the
@@ -2545,6 +2562,7 @@ class AgentExecutor:
                             transcribed=transcribed, foreign_context=foreign_context)
                         messages[0] = {"role": "system", "content": system_content}
                         use_response_temp = True
+                        extra_round = True
                         continue
                     self._debug_log(f"  MAX TOOL CALLS reached ({max_tool_calls}), forcing answer")
                     log.warning("Agent '%s' hit max_tool_calls limit (%d)", self.agent.id, max_tool_calls)
