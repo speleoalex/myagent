@@ -94,11 +94,13 @@ async def memory_read_handler(node_id: str = "", executor=None, **kwargs) -> str
     return "\n".join(lines)
 
 
-async def memory_note_handler(content: str = "", keywords=None,
+async def memory_note_handler(content: str = "", keywords=None, topic: str = "",
                               executor=None, **kwargs) -> str:
-    """Store an explicit fact in long-term memory. It lands straight in the
-    '## Notes' index of memory.md — visible to every future session without
-    any tool call, and with higher staying power than automatic summaries."""
+    """Store an explicit fact in long-term memory. It lands in the '## Topics'
+    store of memory.md — visible to every future session without any tool call,
+    and one entry per SUBJECT: the same topic again replaces the previous fact
+    instead of queueing behind it, which is what keeps a changed fact from
+    looking current. Omit `topic` and the server derives one from the text."""
     memory, agent_id, err = _gate(executor)
     if err:
         return err
@@ -109,5 +111,6 @@ async def memory_note_handler(content: str = "", keywords=None,
     elif not isinstance(keywords, (list, tuple)):
         keywords = []
     async with memory.lock(agent_id):
-        chunk_id = memory.add_note(agent_id, content, list(keywords))
+        chunk_id = memory.add_note(agent_id, content, list(keywords),
+                                   topic=(topic or "").strip() or None)
     return f"Saved as {chunk_id}."

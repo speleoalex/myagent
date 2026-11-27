@@ -155,15 +155,23 @@ def case_memory_share():
 
     ex, _ = _executor(memory_md="## Profile\nshort")
     ex._turn_fit = FIT
-    summaries = [{"ts": f"2026-11-0{i}", "summary": f"S{i} " + "s" * 396} for i in range(1, 7)]
+    summaries = [{"ts": f"2026-11-0{i}", "summary": f"subject{i} " + "s" * 396}
+                 for i in range(1, 7)]
     block = ex._build_memory_section(summaries)
-    check("S6" in block and "S5" in block, "the newest summaries enter")
-    check("S1" not in block and "S3" not in block, "the oldest ones do not")
-    check(block.index("S5") < block.index("S6"), "... kept in date order")
+    # This chat's archived turns are an INDEX now: one subject per turn, not
+    # the prose. The prose is in the topic store when it matters, and two
+    # renderings of one fact drift apart.
+    check("[2026-11-06]" in block and "[2026-11-01]" in block,
+          "every archived turn is indexed")
+    check("s" * 396 not in block, "... and the prose is NOT repeated here")
+    check(block.index("2026-11-01") < block.index("2026-11-06"),
+          "... kept in date order")
+    check(tokens(block) <= budget + 40,
+          f"the index fits the memory share on its own: {tokens(block)} tokens")
 
     ex._turn_fit = 0
     block = ex._build_memory_section(summaries)
-    check("S1" in block, "fit not measured: no cap")
+    check("[2026-11-01]" in block, "fit not measured: no cap")
 
 
 def case_compaction_threshold():

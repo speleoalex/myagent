@@ -21,7 +21,7 @@ from app.engine.toolcall_parser import parse_tool_calls_from_text
 from app.tools import resources as resource_channel
 from app.tools.registry import ToolRegistry
 from app.storage.attachments import store_attachment
-from app.storage.memory import MemoryStore
+from app.storage.memory import MemoryStore, topic_slug
 from app.storage.sessions import DELEGATION_TOOL, now_iso as _now_iso
 from app.storage.store import JsonStore
 
@@ -1639,18 +1639,23 @@ class AgentExecutor:
             budget -= self._estimate_text_tokens(md)
         if md:
             parts.append(md)
+        # This chat's archived turns as an INDEX, not as prose: the summary is
+        # already in memory.md's topic store when it matters, and two prose
+        # renderings of one fact drift apart. A one-line subject per archived
+        # turn says "we talked about this", and memory_search brings the text.
         lines = []
         for c in reversed(memory_context or []):
             if not c.get("summary"):
                 continue
-            line = f"- [{(c.get('ts') or '')[:10]}] {c['summary']}"
+            line = f"- [{(c.get('ts') or '')[:10]}] {topic_slug(c['summary'])}"
             if budget is not None:
                 budget -= self._estimate_text_tokens(line)
                 if budget < 0:
                     break
             lines.insert(0, line)
         if lines:
-            parts.append("### Earlier in this conversation (summarized)\n" + "\n".join(lines))
+            parts.append("### Earlier in this conversation (index — "
+                         "memory_search for the text)\n" + "\n".join(lines))
         if not parts:
             return ""
         if self._granted_tools() & {"memory_search", "memory_read"}:
@@ -1919,12 +1924,6 @@ class AgentExecutor:
             result = " ".join((t.get("result") or "").split())
             if not result:
                 continue
-            budget = (self._TOOL_RESULTS_CHARS if pos == 0
-                      else self._TOOL_RESULTS_CHARS_OLDER)
-            if len(result) > budget:
-                result = (result[:budget].rstrip()
-                          + f"… [cut at {budget} of {len(result)} chars — call "
-                            f"{t.get('tool')} again for the rest]")
             args = t.get("arguments") or {}
             # The QUERY is what makes an entry recognisable ("did I already
             # look for the report?"), and it is short. The rest of the
@@ -1932,6 +1931,27 @@ class AgentExecutor:
             hint = args.get("query") or args.get("id") or args.get("path") or ""
             hint = " ".join(str(hint).split())[:80]
             label = f"{t.get('tool')}({hint})" if hint else str(t.get("tool"))
+            # A result the model can RE-FETCH cheaply is kept as a handle and
+            # not as an excerpt: "what the tools returned earlier" is the text
+            # that ages worst, and a path or an id is all it takes to get the
+            # current one. A search has no handle — re-running it can return
+            # something else — so its head stays.
+            handle = args.get("path") or args.get("id")
+            if handle and pos > 0:
+                lines.append(f"- [{t.get('id')}] {label} — content not repeated; "
+                             f"call it again for the current one")
+                continue
+            budget = (self._TOOL_RESULTS_CHARS if pos == 0
+                      else self._TOOL_RESULTS_CHARS_OLDER)
+            if len(result) > budget:
+                # "summary", not "cut": an agent read the old wording as its own
+                # output having arrived truncated, and built line references on
+                # half a result. This one says what it is — a shortened copy of
+                # something an earlier turn produced.
+                result = (result[:budget].rstrip()
+                          + f"… [summary: first {budget} of {len(result)} chars "
+                            f"from an earlier turn — call {t.get('tool')} again "
+                            f"for the full output]")
             lines.append(f"- [{t.get('id')}] {label}: {result}")
         if not lines:
             return ""

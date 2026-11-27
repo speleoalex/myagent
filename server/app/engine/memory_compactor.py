@@ -42,7 +42,7 @@ from app.engine.executor import AgentExecutor
 from app.engine.llm_provider import OUTPUT_TRUNCATED, LLMProvider
 from app.engine.reasoning import strip_reasoning
 from app.models import Agent, ModelConfig
-from app.storage.memory import MemoryStore
+from app.storage.memory import MemoryStore, topic_slug
 from app.storage.sessions import now_iso
 
 log = logging.getLogger(__name__)
@@ -508,7 +508,11 @@ async def _compact_one(agent: Agent, model_config: ModelConfig,
                 hash_=chunk_hash,
                 degraded=degraded,
             )
-        memory.add_to_index(agent.id, chunk_id, summary)  # idempotent
+        # Into the topic store, not the Recent log: the log could only append,
+        # so a fact that changed three times stood in the prompt three times.
+        # The subject here is derived (no second LLM call): a near-miss costs a
+        # line that ages out, which is the cheap failure.
+        memory.add_topic(agent.id, topic_slug(summary), summary)  # idempotent
 
     # Phase C — only now touch the session: re-read it fresh and make sure the
     # head we archived is still exactly its beginning (a concurrent turn, a

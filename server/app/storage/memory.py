@@ -59,11 +59,15 @@ from app.storage.sessions import now_iso
 log = logging.getLogger(__name__)
 
 # Section markers the code owns inside memory.md (exact stripped lines).
+TOPICS_HEADER = "## Topics"
 NOTES_HEADER = "## Notes"
 RECENT_HEADER = "## Recent"
 # Index caps: explicit notes outlive conversation summaries in the prompt.
 NOTES_CAP = 20
 INDEX_CAP = 10
+# One entry per SUBJECT, not per event, so the cap can be higher without the
+# prompt growing the way Notes did: an entry is superseded, not appended.
+TOPICS_CAP = 25
 # Defensive cap on what get_memory_md hands to the prompt builder.
 MD_MAX_CHARS = 4000
 # One index line: "- <id> — <summary>".
@@ -73,6 +77,31 @@ MD_MAX_CHARS = 4000
 # skim. Both must keep resolving — the old ids are already written into every
 # existing memory.md and into chunk filenames on disk, and nothing rewrites them.
 _INDEX_LINE = re.compile(r"^- ((?:\d{14}|\d{12})(?:-\d+)?) — (.*)$")
+# One topic line: "- <topic> — <summary> (verified: YYYY-MM-DD)". The date is
+# what the model needs and the timestamp never was: "when I was told" lives in
+# the chunk, "how much I trust it" has to travel with the sentence.
+_TOPIC_LINE = re.compile(r"^- (?P<topic>[^—]{1,60}?) — (?P<text>.+?)"
+                         r"(?:\s*\(verified: (?P<date>\d{4}-\d{2}-\d{2})\))?\s*$")
+_TOPIC_STOP = {"the", "and", "for", "with", "che", "con", "per", "del", "della",
+               "dei", "degli", "una", "uno", "gli", "sono", "come", "anche",
+               "questo", "questa", "loro", "suo", "sua", "dal", "dallo"}
+
+
+def topic_slug(text: str, fallback: str = "generale") -> str:
+    """Best-effort subject for a sentence: its first two content words, joined.
+
+    Deliberately NOT a taxonomy and deliberately model-free — this is the
+    fallback for a summary nobody labelled. A wrong subject costs one extra
+    line that ages out; a missing one costs the supersession that makes this
+    store worth having, so a rough guess is the better failure. The reliable
+    path is the caller naming the topic (memory_note's `topic` argument)."""
+    words = [w for w in re.findall(r"[0-9A-Za-zÀ-ÿ]{4,}", (text or "").lower())
+             if w not in _TOPIC_STOP]
+    if not words:
+        return fallback
+    # A subject is a LABEL, not the sentence: an unbroken 400-char token would
+    # otherwise become the entry's title (and the largest thing in the prompt).
+    return "/".join(w[:16] for w in words[:2])[:40]
 _VALID_CHUNK_ID = re.compile(r"^(?:\d{14}|\d{12})(-\d+)?$")
 
 
@@ -106,6 +135,11 @@ def _template(agent_id: str) -> str:
         "<!-- Durable facts about the user and standing instructions, edited by\n"
         "hand. This whole file is injected into the agent's prompt every turn:\n"
         "keep it short. HTML comments like this one are stripped on injection. -->\n\n"
+        f"{TOPICS_HEADER}\n\n"
+        "<!-- One entry per subject: \"- <argomento> — <sintesi> (verified: YYYY-MM-DD)\".\n"
+        "A new fact on the same subject REPLACES the entry; the old sentence stays\n"
+        "in its chunk and is still reachable with memory_search. \"verified\" is the\n"
+        "date somebody last confirmed it, which is what matters when reading it. -->\n\n"
         f"{NOTES_HEADER}\n\n"
         f"{RECENT_HEADER}\n"
     )
@@ -192,17 +226,72 @@ class MemoryStore:
             text = path.read_text(encoding="utf-8")
         except OSError:
             return ""
-        text = _HTML_COMMENT.sub("", text)
-        lines = text.splitlines()
-        if lines and lines[0].startswith("# "):
-            lines = lines[1:]
-        out = "\n".join(lines).strip()
+        out = self._prompt_view(_HTML_COMMENT.sub("", text))
         if len(out) > MD_MAX_CHARS:
             log.warning("memory.md of agent '%s' exceeds %d chars — truncated "
                         "in the prompt, trim the file", agent_id, MD_MAX_CHARS)
             out = out[:MD_MAX_CHARS].rstrip() + "\n[… memory.md truncated]"
         self._md_cache[agent_id] = (mtime, out)
         return out
+
+    @staticmethod
+    def _prompt_view(text: str) -> str:
+        """What the model reads out of memory.md: the Profile, and — once the
+        agent has one — the Topics store.
+
+        ``## Recent`` is NEVER injected. It was a line per archived turn, so a
+        fact that changed three times appeared three times and the model had to
+        guess which one still held; that block is what the agent using this
+        called "the place where a small model convinces itself of something
+        outdated". Its chunks stay on disk and ``memory_search`` still finds
+        them — the problem was never that the detail existed, it was that it
+        stood in front.
+
+        While an agent has no Topics yet its ``## Notes`` stand in, so an
+        upgrade drops nothing: the first topic written takes over, and from
+        then on the notes are archive."""
+        lines = text.splitlines()
+        if lines and lines[0].startswith("# "):
+            lines = lines[1:]
+        blocks: dict[str, list[str]] = {}
+        order: list[str] = []
+        current = ""
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("## "):
+                current = stripped
+                if current not in blocks:
+                    blocks[current] = []
+                    order.append(current)
+                continue
+            blocks.setdefault(current, []).append(line)
+        if not order:                       # free prose, no sections
+            return "\n".join(lines).strip()
+
+        topics = [l for l in blocks.get(TOPICS_HEADER, [])
+                  if _TOPIC_LINE.match(l.strip())]
+        notes = blocks.get(NOTES_HEADER, [])
+        out: list[str] = []
+        # The template puts the profile UNDER "## Profile"; hand-written files
+        # may keep it before the first header. Both go out as one block.
+        profile = blocks.get("## Profile") or blocks.get("", [])
+        while profile and not profile[0].strip():
+            profile = profile[1:]
+        while profile and not profile[-1].strip():
+            profile = profile[:-1]
+        if profile:
+            out += ["## Profile", ""] + profile + [""]
+        if topics:
+            out += [TOPICS_HEADER, ""] + topics + [""]
+        elif notes:
+            out += [NOTES_HEADER, ""] + notes + [""]
+        else:
+            # An agent whose memory is Recent-only must not lose it on upgrade:
+            # Recent is the LAST fallback, never a companion.
+            recent = blocks.get(RECENT_HEADER, [])
+            if recent:
+                out += [RECENT_HEADER, ""] + recent + [""]
+        return "\n".join(out).strip()
 
     def read_chunk(self, agent_id: str, chunk_id: str) -> dict | None:
         """{"id", "meta": {frontmatter}, "body": str} or None. The id regex
@@ -375,7 +464,83 @@ class MemoryStore:
         _write_text_atomic(path, "\n".join(out).rstrip() + "\n")
         self._md_cache.pop(agent_id, None)
 
-    def add_note(self, agent_id: str, text: str, keywords: list[str] | None = None) -> str:
+    def add_topic(self, agent_id: str, topic: str, summary: str,
+                  verified: str | None = None, ) -> None:
+        """One subject, one line: a new fact REPLACES the one on that subject.
+
+        The store's whole reason to exist. `## Recent` queued a line per
+        archived turn, so a fact that changed three times appeared three times
+        and the model picked one; here the line is overwritten in place, and
+        the superseded sentence survives in its chunk where `memory_search` can
+        reach it.
+
+        `topic` is expected to be stable for a subject (the caller's business:
+        `memory_note` takes it from the model, the compactor derives it). A
+        near-miss topic costs one line that ages out through the cap — the
+        failure that matters, losing a fact, cannot happen: nothing is deleted
+        from disk.
+
+        Caller must hold lock(agent_id)."""
+        topic = " ".join((topic or "").split())[:60] or "generale"
+        text = " ".join((summary or "").split())
+        if not text:
+            return
+        stamp = (verified or now_iso())[:10]
+        path = self._md_path(agent_id)
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except OSError:
+            raw = ""
+        if not raw.strip():
+            raw = _template(agent_id)
+        lines = raw.splitlines()
+        if not any(l.strip() == TOPICS_HEADER for l in lines):
+            # First topic: put the section above the legacy notes so the file
+            # keeps its order (Profile, Topics, Notes, Recent).
+            at = next((i for i, l in enumerate(lines)
+                       if l.strip() == NOTES_HEADER), len(lines))
+            lines[at:at] = [TOPICS_HEADER, ""] if at < len(lines) else ["", TOPICS_HEADER, ""]
+
+        entry = f"- {topic} — {text} (verified: {stamp})"
+        replacing = any(
+            (m := _TOPIC_LINE.match(l.strip())) and
+            m.group("topic").casefold() == topic.casefold()
+            for l in lines)
+        # Replacing does not grow the section, so only an ADD has to leave a
+        # slot for itself; the oldest entries live at the bottom.
+        limit = TOPICS_CAP if replacing else TOPICS_CAP - 1
+        out: list[str] = []
+        section = None
+        replaced = False
+        kept = 0
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("## "):
+                section = stripped
+                out.append(line)
+                continue
+            m = _TOPIC_LINE.match(stripped) if section == TOPICS_HEADER else None
+            if m:
+                if m.group("topic").casefold() == topic.casefold():
+                    out.append(entry)        # supersede, in place
+                    replaced = True
+                    kept += 1
+                    continue
+                kept += 1
+                if kept > limit:
+                    continue
+            out.append(line)
+        if not replaced:
+            at = next(i for i, l in enumerate(out) if l.strip() == TOPICS_HEADER) + 1
+            while at < len(out) and not out[at].strip():
+                at += 1
+            out[at:at] = [entry, ""]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _write_text_atomic(path, "\n".join(out).rstrip() + "\n")
+        self._md_cache.pop(agent_id, None)
+
+    def add_note(self, agent_id: str, text: str, keywords: list[str] | None = None,
+                 topic: str | None = None) -> str:
         """Store an explicit fact (memory_note): full text in the chunk, index
         line in ## Notes — immediately visible in the injected memory.md, no
         LLM involved. Caller must hold the lock."""
@@ -384,7 +549,10 @@ class MemoryStore:
             agent_id, body=body, kind="note", source="tool:memory_note",
             keywords=keywords, hash_=hashlib.sha1(body.encode()).hexdigest(),
         )
-        self.add_to_index(agent_id, chunk_id, body, kind="note")
+        # Into the topic store, not the note log: an explicit "remember this"
+        # is exactly the kind of fact that gets superseded later, and the log
+        # could not express that. The model names the subject when it can.
+        self.add_topic(agent_id, topic or topic_slug(body), body)
         return chunk_id
 
     # ------------------------------------------------------------------ utils

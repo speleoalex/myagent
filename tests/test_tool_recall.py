@@ -132,13 +132,19 @@ async def main():
           sec.index("[t3]") < sec.index("[t2]") < sec.index("[t1]"))
     check("the query is quoted so an entry is recognisable",
           "local_search(referto)" in sec)
-    check("an oversized result is cut", "… [cut at" in sec)
-    check("the cut points AT THE TOOL, not at a recall tool",
-          "call local_search again for the rest" in sec)
+    # "summary", not "cut": an agent read the old wording as its own output
+    # having arrived truncated, and built line references on half a result.
+    check("an oversized result is shortened and SAID so", "… [summary: first" in sec)
+    check("the shortening points AT THE TOOL, not at a recall tool",
+          "call local_search again for the full output" in sec)
     check("there is no recall_* companion to pay for",
           "recall_tool" not in sec)
     check("the newest entry gets the most room",
-          f"cut at {ex._TOOL_RESULTS_CHARS} of" in sec)
+          f"summary: first {ex._TOOL_RESULTS_CHARS} of" in sec)
+    # A result that can be RE-FETCHED cheaply is kept as a handle, not as an
+    # excerpt: what the tools returned earlier is the text that ages worst.
+    check("a re-fetchable result is a handle only",
+          "content not repeated" in sec and "call it again for the current one" in sec)
     check("the section tells the model these are its OWN facts",
           "facts YOU obtained" in sec)
     check("...and forbids answering from an earlier reply",
