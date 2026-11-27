@@ -107,6 +107,19 @@ class FakeSMTP:
         FakeSMTP.sent.append((settings, password, msg))
 
 
+class FakeSentStore:
+    """Captures what imap_append_sent would APPEND to the account's Sent.
+
+    A real one would open an IMAP connection to imap.myagent.test on every
+    reply; nothing in these tests may touch the network."""
+    stored: list = []
+
+    @staticmethod
+    def append(settings, password, msg):
+        FakeSentStore.stored.append(msg)
+        return "INBOX.Sent"
+
+
 def binding(**kw) -> Binding:
     base = dict(
         id="mailbot", type="mail", agent_id="a", name="Assistente",
@@ -219,6 +232,67 @@ def test_loop_guards():
     check(reply["Auto-Submitted"] == "auto-replied", "our replies carry Auto-Submitted: auto-replied")
     check(mail.is_automated(email.message_from_bytes(reply.as_bytes(), policy=default_policy),
                             set()) != "", "…so a peer with the same rule (us) drops them")
+
+
+def test_reply_subject():
+    print("Reply subject:")
+    check(not mail.is_reply_subject("Fwd: Ciao"), "a forward is not a reply")
+    check(not mail.is_reply_subject("Fw: Ciao"), "…nor Fw:")
+    check(mail.is_reply_subject("Re: Ciao"), "Re: is a reply")
+    check(mail.is_reply_subject("AW: Ciao"), "localized reply prefixes count as replies")
+    check(mail.clean_subject("Fwd: Ciao") == "Ciao", "the topic still loses every prefix")
+
+    conn = make()
+    conn._threads["mario@example.com"] = {"message_id": "<f1@example.com>",
+                                          "subject": "Fwd: Ciao",
+                                          "references": ["<f1@example.com>"]}
+    reply = conn._build_reply("mario@example.com", "ciao", [])
+    check(reply["Subject"] == "Re: Fwd: Ciao",
+          f"answering a FORWARD earns a Re: ({reply['Subject']!r}) — otherwise the "
+          f"answer carries the same subject as the mail it answers")
+    conn._threads["mario@example.com"]["subject"] = "Re: Ciao"
+    reply = conn._build_reply("mario@example.com", "ciao", [])
+    check(reply["Subject"] == "Re: Ciao", "answering a REPLY does not stack Re: Re:")
+
+
+async def test_sent_copy():
+    print("A copy of every reply lands in \\Sent:")
+    FakeSentStore.stored.clear()
+    FakeSMTP.sent.clear()
+    conn = make()
+    ok = await conn._compose_and_send("mario@example.com", "ciao", [])
+    check(ok, "the reply is sent")
+    check(len(FakeSentStore.stored) == 1, f"…and filed once in Sent ({len(FakeSentStore.stored)})")
+    sent_msg = FakeSMTP.sent[-1][2] if FakeSMTP.sent else None
+    check(FakeSentStore.stored[:1] == [sent_msg] and sent_msg is not None,
+          "the copy is the very message that went out, not a rebuild of it")
+
+    FakeSentStore.stored.clear()
+    pop = make(binding(settings={"username": "bot@myagent.test", "host": "pop.example.test",
+                                 "protocol": "pop3", "smtp_host": "smtp.myagent.test"}))
+    await pop._compose_and_send("mario@example.com", "ciao", [])
+    check(not FakeSentStore.stored,
+          "a POP3 account skips the copy — its host is not an IMAP to append through")
+
+    class Box:
+        def __init__(self, lines):
+            self.lines = lines
+
+        def list(self):
+            return "OK", self.lines
+
+    aruba = Box([b'(\\HasNoChildren) "." "INBOX"',
+                 b'(\\HasNoChildren \\Sent) "." "INBOX.Sent"'])
+    check(mail._sent_folder(aruba) == "INBOX.Sent", "the folder flagged \\Sent wins")
+    gmail = Box([b'(\\HasNoChildren) "." "[Gmail]/All Mail"',
+                 b'(\\HasNoChildren \\Sent) "." "[Gmail]/Sent Mail"'])
+    check(mail._sent_folder(gmail) == "[Gmail]/Sent Mail", "…whatever the server calls it")
+    outlook = Box([b'(\\HasNoChildren) "." "INBOX"',
+                   b'(\\HasNoChildren) "." "Sent Items"'])
+    check(mail._sent_folder(outlook) == "Sent Items",
+          "…else a conventional name the server actually has")
+    blind = Box([])
+    check(mail._sent_folder(blind) == "INBOX.Sent", "…else a guess the APPEND will report")
 
 
 def test_sender_verification():
@@ -844,9 +918,15 @@ async def test_markdown_body():
 
 
 async def main():
+    # Both transports are faked for the whole run: no test may open a socket,
+    # and _compose_and_send now reaches BOTH of them for every reply.
+    mail.smtp_send = FakeSMTP.send
+    mail.imap_append_sent = FakeSentStore.append
     await test_base_notify()
     test_parsing()
     test_loop_guards()
+    test_reply_subject()
+    await test_sent_copy()
     test_sender_verification()
     test_seen_store()
     await test_polling()

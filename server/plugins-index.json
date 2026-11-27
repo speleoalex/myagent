@@ -11,7 +11,7 @@
         "en": "Talk to your agents from Telegram, by e-mail or through a voice satellite.",
         "it": "Parla con i tuoi agenti da Telegram, via e-mail o da un satellite vocale."
       },
-      "version": "1.0.0",
+      "version": "1.0.1",
       "repo": "speleoalex/myagent",
       "ref": "main",
       "subdir": "connectors/plugin"

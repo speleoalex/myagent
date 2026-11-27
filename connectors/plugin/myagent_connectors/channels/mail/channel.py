@@ -36,6 +36,11 @@ How a conversation maps onto the shared pipeline:
 * **A message is answered once**, across restarts: a persisted store of
   Message-IDs (or POP3 UIDLs) per binding. IMAP also flags what it read as
   ``\\Seen``; POP3 has no flags, so the store is the only memory it has.
+* **What it sent is kept, and the journal says so.** A copy of every reply is
+  APPENDed to the account's ``\\Sent`` folder, because submitting a message
+  for delivery leaves no trace in the mailbox the agent answers from — an
+  empty Sent folder and a mute journal make "did it write back?" unanswerable
+  even to the operator who owns the box.
 * **The first run never answers the backlog.** A mailbox handed to the agent
   usually has unread mail in it, and replying to all of it at once — to people
   who did not write to a bot — is the kind of mistake that cannot be undone.
@@ -172,6 +177,16 @@ _QUOTE_MARKERS = [
 ]
 _RE_SUBJECT = re.compile(r"^\s*((re|r|aw|sv|antw|ref|fwd?|fw|wg|tr|i|vs)\s*:\s*)+",
                          re.IGNORECASE)
+# The prefixes that mark a REPLY, as opposed to a forward (Fwd:/Fw:/Wg:). The
+# two questions are different: stripping every prefix gives the topic of a
+# mail (``clean_subject``), but only a reply already carries the "this is an
+# answer" marker — replying to a FORWARDED mail must still ADD a "Re:", or the
+# answer goes out under the very same subject as the forward it answers and
+# the reader cannot tell the two apart (observed 2026-11-27 on a mailbox used
+# by mail only: replies were found in the spam folder, unrecognised, while the
+# operator kept looking for them).
+_RE_REPLY = re.compile(r"^\s*((re|r|aw|sv|antw|ref|tr|i|vs)\s*:\s*)+",
+                       re.IGNORECASE)
 
 # What makes an outgoing body markup rather than prose: see looks_like_html().
 _RE_QUOTED = re.compile(r'"(?:[^"\\]|\\.)*"')
@@ -358,7 +373,11 @@ def clean_subject(subject: str) -> str:
 
 
 def is_reply_subject(subject: str) -> bool:
-    return bool(_RE_SUBJECT.match(subject or ""))
+    """Whether the subject already says "this is an answer" (Re:, Aw:, Sv:).
+
+    A forward does not: ``Fwd: Ciao`` is a new topic carrying someone else's
+    mail, so answering it earns a ``Re:`` in front of it."""
+    return bool(_RE_REPLY.match(subject or ""))
 
 
 def message_body(msg: email.message.Message) -> str:
@@ -753,6 +772,94 @@ def imap_list_unseen(s: dict, password: str) -> tuple[list[str], int]:
     except OSError as e:
         raise _unreachable(host, port, e)
     return uids, total
+
+
+# Where accounts keep what they sent, most specific first. Consulted only
+# after LIST has been asked for the folder flagged \Sent, which is the one
+# answer the server itself gives; these cover the servers that flag nothing.
+_SENT_FOLDERS = ("INBOX.Sent", "Sent", "[Gmail]/Sent Mail", "Sent Items",
+                 "Sent Messages", "Posta inviata", "INBOX.Sent Items")
+
+
+def _sent_folder(box: imaplib.IMAP4) -> str:
+    """The folder this account files sent mail in.
+
+    ``\\Sent`` (RFC 6154) is the only name that is not a guess — where a
+    mailbox keeps its sent mail is the server's choice, not a convention:
+    Aruba's is ``INBOX.Sent``, Gmail's ``[Gmail]/Sent Mail``, Outlook's
+    ``Sent Items``. The LIST reply is parsed for the flag first, then for the
+    conventional names the server actually has, and only then does the first
+    conventional name go in blind (an APPEND to a missing folder reports it)."""
+    known: list[str] = []
+    try:
+        typ, data = box.list()
+    except imaplib.IMAP4.error:
+        typ, data = "NO", []
+    for line in (data or []) if typ == "OK" else []:
+        raw = line.decode(errors="replace") if isinstance(line, bytes) else str(line)
+        m = re.search(r'"((?:[^"\\]|\\.)*)"\s*$', raw) or re.search(r"(\S+)\s*$", raw)
+        if not m:
+            continue
+        name = m.group(1).replace('\\"', '"')
+        known.append(name)
+        if re.search(r"\\Sent\b", raw, re.IGNORECASE):
+            return name
+    lowered = {k.lower(): k for k in known}
+    for candidate in _SENT_FOLDERS:
+        if candidate.lower() in lowered:
+            return lowered[candidate.lower()]
+    return _SENT_FOLDERS[0]
+
+
+def imap_append_sent(s: dict, password: str, msg: EmailMessage) -> str:
+    """File a copy of an outgoing message in the account's \\Sent folder.
+
+    Submitting a message for DELIVERY says nothing about KEEPING it: Aruba,
+    like most providers, stores nothing of what a client sends through SMTP,
+    so the mailbox the agent answers from ended up with an empty Sent folder
+    and no record at all of its own replies — the first place anybody looks
+    to answer "did it write back?", and the only way to see the exact bytes
+    that left. Returns the folder used.
+
+    The message goes out with CRLF line endings and flagged \\Seen: a copy of
+    something already read is not news, and an unread Sent folder would make
+    the operator think the account had mail waiting."""
+    host, port = s["host"], s["port"]
+    if not host:
+        raise RuntimeError("no IMAP host configured")
+    try:
+        if s["ssl"]:
+            box = imaplib.IMAP4_SSL(host, port, timeout=TIMEOUT)
+        else:
+            box = imaplib.IMAP4(host, port, timeout=TIMEOUT)
+            if "STARTTLS" in box.capabilities:
+                box.starttls()
+    except imaplib.IMAP4.error as e:
+        raise RuntimeError(f"IMAP {host}:{port}: {e}")
+    except OSError as e:
+        raise _unreachable(host, port, e)
+    try:
+        try:
+            box.login(s["username"], password)
+        except imaplib.IMAP4.error as e:
+            raise RuntimeError(f"IMAP login refused for {s['username']}: "
+                               f"{str(e).strip() or 'authentication failed'}")
+        folder = _sent_folder(box)
+        raw = msg.as_bytes(policy=msg.policy.clone(linesep="\r\n"))
+        typ, data = box.append(_imap_quote(folder), r"(\Seen)",
+                               imaplib.Time2Internaldate(time.time()), raw)
+        if typ != "OK":
+            detail = b", ".join(d for d in (data or []) if isinstance(d, bytes))
+            raise RuntimeError(f"IMAP APPEND to {folder!r} refused: "
+                               f"{detail.decode(errors='replace') or typ}")
+        return folder
+    except OSError as e:
+        raise _unreachable(host, port, e)
+    finally:
+        try:
+            box.logout()
+        except Exception:
+            pass
 
 
 def smtp_send(s: dict, password: str, msg: EmailMessage) -> None:
@@ -1174,13 +1281,39 @@ class MailConnector(BaseConnector):
                         self.binding.id, chat_id)
             return False
         msg = self._build_reply(chat_id, text, files, subject=subject)
+        # Logged BEFORE the attempt as well as after: with only the failure
+        # line, a silent journal could mean "never got here" and "went out
+        # fine" at the same time, and telling the two apart took hours of
+        # probing a live mailbox (2026-11-27). One line each way is cheap.
+        log.info("[%s] sending to %s: %r (%d bytes)", self.binding.id, chat_id,
+                 str(msg["Subject"]), len(msg.as_bytes()))
         try:
             await asyncio.to_thread(smtp_send, self.settings, self.binding.token, msg)
-            return True
         except Exception as e:
             log.warning("[%s] send to %s failed: %s", self.binding.id, chat_id,
                         self._redact(str(e)))
             return False
+        log.info("[%s] sent to %s: %r", self.binding.id, chat_id, str(msg["Subject"]))
+        await self._store_copy(chat_id, msg)
+        return True
+
+    async def _store_copy(self, chat_id: str, msg: EmailMessage) -> None:
+        """File what just went out in the account's \\Sent folder.
+
+        Best effort and after the fact: the mail is already delivered, and an
+        unreachable Sent folder must not turn it into an error. Skipped on a
+        POP3 account, which has no IMAP to append through (the POP3 host is
+        all the settings know)."""
+        if self.settings["protocol"] == "pop3":
+            return
+        try:
+            folder = await asyncio.to_thread(imap_append_sent, self.settings,
+                                             self.binding.token, msg)
+            log.info("[%s] copy of the reply to %s stored in %s",
+                     self.binding.id, chat_id, folder)
+        except Exception as e:
+            log.warning("[%s] could not store a copy of the reply to %s: %s",
+                        self.binding.id, chat_id, self._redact(str(e)))
 
 
 def _domain_of(addr: str) -> str | None:
