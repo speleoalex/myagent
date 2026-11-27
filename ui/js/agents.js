@@ -1445,6 +1445,40 @@ const AgentsPage = {
         // f-model — they are listed in `deps` and wireAll attaches to them itself.
         RangeField.wireAll(specs, rfCtx);
 
+        // The two budgets are ONE decision, and the form never leaves them
+        // incoherent: a round usually carries one tool call, so more calls than
+        // rounds means part of the budget can never be spent — the turn stops
+        // at the smaller number and half the tool budget is decoration. The
+        // API refuses that pair (routers/agents._check_budgets); this keeps the
+        // form from ever offering it, by RAISING the rounds to match.
+        //
+        // Raising, not blocking: the tool budget is the number that says how
+        // much work a turn may do, so a user who wants a cheaper turn lowers
+        // that one and the rounds follow. Typing a lower round count with a
+        // higher tool budget is the only edit that gets undone, and the
+        // sentence under the field says why.
+        const keepBudgetsCoherent = () => {
+            const rounds = RangeField.read('f-maxiter');
+            const calls = RangeField.read('f-maxtools');
+            if (rounds === null || calls === null || rounds >= calls) return;
+            // No tools, no tool calls: the rounds ARE the budget.
+            if (!document.querySelectorAll('.tool-check:checked').length) return;
+            const num = document.getElementById('f-maxiter');
+            num.value = String(calls);
+            num.dispatchEvent(new Event('input', { bubbles: true }));
+        };
+        ['f-maxiter', 'f-maxtools'].forEach((id) => {
+            const el = document.getElementById(id);
+            if (el) el.addEventListener('change', keepBudgetsCoherent);
+        });
+        // Checking the last tool turns the rule on; unchecking it turns it off.
+        const formEl = document.getElementById('agent-form');
+        if (formEl) formEl.addEventListener('change', keepBudgetsCoherent);
+        // And once on open: an agent stored incoherent by an older version must
+        // not even be DISPLAYED that way, or the form asks the user to reason
+        // about a pair the API will refuse the moment they touch it.
+        keepBudgetsCoherent();
+
         const delegateEl = document.getElementById('f-delegate');
         const callableAllEl = document.getElementById('f-callable-all');
         const liveEl = document.getElementById('f-live');
