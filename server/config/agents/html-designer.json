@@ -11,7 +11,7 @@
     "file_edit",
     "show_file"
   ],
-  "max_iterations": 6,
+  "max_iterations": 8,
   "max_tool_calls": 8,
   "temperature": 0.2,
   "response_temperature": 0.4,

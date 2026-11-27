@@ -234,6 +234,7 @@ I18n.translations.en = {
     'agents.f.maxiter.b.low': '{n} rounds: enough to call a tool and answer using its result. Fast and cheap, right for a single-purpose agent.',
     'agents.f.maxiter.b.mid': '{n} rounds: room to chain a few tools and correct course. The usual choice (default 10).',
     'agents.f.maxiter.b.high': '{n} rounds: for long research chains. A model that gets stuck burns all {n} before giving up with "reached maximum iterations", so keep the wake timeout in mind.',
+    'agents.f.maxiter.b.shadowed': 'Careful: with {m} tool calls on offer the turn still stops at about {n} actions, so part of that budget can never be spent. Raise the iterations to at least {m}, or lower the tool budget.',
     'agents.f.maxtools.help': 'Hard budget of tool executions for the whole turn. When it runs out the agent simply stops calling tools and answers with what it already has — it is not an error. A call with malformed arguments still costs one. Delegating with call_agent costs 1 here, and the sub-agent then spends its own budget (up to 5 levels deep).',
     'agents.f.maxtools.b.one': '1 call: one look at the world, then the answer. Very predictable, but a failed or malformed call uses it up too.',
     'agents.f.maxtools.b.low': '{n} calls: covers read → act → check. The default (5) fits most agents.',

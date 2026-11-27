@@ -7,7 +7,7 @@
   "tools": [
     "http_request"
   ],
-  "max_iterations": 4,
+  "max_iterations": 5,
   "max_tool_calls": 5,
   "temperature": 0.1,
   "response_temperature": 0.4,

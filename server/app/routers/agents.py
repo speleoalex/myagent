@@ -243,6 +243,44 @@ def _check_timezone(agent: Agent) -> None:
     agent.timezone = tz
 
 
+def _check_budgets(agent: Agent, previous: dict | None = None) -> None:
+    """Refuse a tool budget the round budget can never spend.
+
+    The two limits measure different things — rounds are model calls, tool calls
+    are actions — but a round usually carries ONE call, so N iterations reach
+    about N actions. With `max_iterations` below `max_tool_calls` the turn stops
+    at the smaller number and part of the tool budget is unreachable, silently.
+    Measured on a production install, 2026-11-27: an agent at 10 / 20 spent ten
+    rounds on reading, ended with the file it had composed unwritten, and could
+    not tell which limit had stopped it.
+
+    Not a model validator, for the reason _check_timezone is not one: an agent
+    file already on disk with those numbers must keep loading. But a NEW one is
+    refused, and so is an EDIT OF THE BUDGETS — `previous` is the stored agent,
+    and an untouched pair passes, so opening an old agent and changing its
+    prompt never fails on numbers the user did not touch.
+
+    No tools means no tool calls: there the iteration budget IS the budget
+    (a conversation agent), and the rule does not apply."""
+    if not agent.tools:
+        return
+    if agent.max_tool_calls <= agent.max_iterations:
+        return
+    if previous is not None:
+        same_rounds = previous.get("max_iterations") == agent.max_iterations
+        same_calls = previous.get("max_tool_calls") == agent.max_tool_calls
+        if same_rounds and same_calls:
+            return
+    raise HTTPException(
+        400,
+        f"max_tool_calls ({agent.max_tool_calls}) is larger than max_iterations "
+        f"({agent.max_iterations}). A round usually carries one tool call, so "
+        f"this turn would stop after about {agent.max_iterations} actions and "
+        f"part of the tool budget could never be spent — it would end with work "
+        f"still to do. Raise max_iterations to at least {agent.max_tool_calls}, "
+        f"or lower max_tool_calls if a tighter limit is what you want.")
+
+
 @router.post("", status_code=201)
 async def create_agent(agent: Agent, request: Request):
     store = _store(request)
@@ -252,6 +290,7 @@ async def create_agent(agent: Agent, request: Request):
         raise HTTPException(400, f"'{RESERVED_AGENT_ID}' is reserved for automatic agent selection")
     require_absent(store, agent.id, "Agent")
     _check_timezone(agent)
+    _check_budgets(agent)
     store.save(agent.id, agent.model_dump())
     return agent.model_dump()
 
@@ -260,8 +299,10 @@ async def create_agent(agent: Agent, request: Request):
 async def update_agent(agent_id: str, agent: Agent, request: Request):
     store = _store(request)
     require_exists(store, agent_id, "Agent")
+    previous = store.get(agent_id)
     agent.id = agent_id
     _check_timezone(agent)
+    _check_budgets(agent, previous)
     store.save(agent_id, agent.model_dump())
     return agent.model_dump()
 

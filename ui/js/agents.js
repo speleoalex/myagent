@@ -466,10 +466,27 @@ const AgentsPage = {
                 label: i18n('agents.maxIterations'),
                 help: i18n(K + 'maxiter.help'),
                 fmt: (v) => F.int(v),
-                describe: (v) => v <= 1 ? { text: i18n(K + 'maxiter.b.one'), warn: true }
-                    : v <= 3 ? i18n(K + 'maxiter.b.low', { n: F.int(v) })
-                    : v <= 10 ? i18n(K + 'maxiter.b.mid', { n: F.int(v) })
-                    : i18n(K + 'maxiter.b.high', { n: F.int(v) }),
+                // Both limits and the tool list, because the sentence below is
+                // about their RELATION: a round usually carries one tool call,
+                // so N rounds reach about N actions. `agent-form` rather than
+                // the tool checkboxes one by one — a change event bubbles, and
+                // the sentence must not go stale when the last tool is removed.
+                deps: ['f-maxtools', 'agent-form'],
+                describe: (v, c) => {
+                    const base = v <= 1 ? { text: i18n(K + 'maxiter.b.one'), warn: true }
+                        : v <= 3 ? i18n(K + 'maxiter.b.low', { n: F.int(v) })
+                        : v <= 10 ? i18n(K + 'maxiter.b.mid', { n: F.int(v) })
+                        : { text: i18n(K + 'maxiter.b.high', { n: F.int(v) }) };
+                    const text = typeof base === 'string' ? base : base.text;
+                    const warn = typeof base === 'string' ? false : !!base.warn;
+                    const m = c.maxTools ?? 0;
+                    // No tools: the iteration budget IS the budget (a
+                    // conversation agent), and there is nothing to shadow.
+                    if (!c.toolCount || !m || v >= m) return { text, warn };
+                    return { text: text + ' ' + i18n(K + 'maxiter.b.shadowed',
+                                                     { n: F.int(v), m: F.int(m) }),
+                             warn: true };
+                },
             },
             'f-maxtools': {
                 id: 'f-maxtools', int: true, dflt: 5, min: 1, max: 50,
@@ -1107,6 +1124,13 @@ const AgentsPage = {
         const rfCtx = () => ({
             temp: RangeField.read('f-temp') ?? 0.7,
             maxIter: RangeField.read('f-maxiter') ?? 10,
+            // The other half of the pair the iteration sentence is about, plus
+            // whether there is a tool budget at all to be shadowed. Derived
+            // grants (memory, call_agent) are added on save and are not picked
+            // here: an agent whose only tools are derived has no user-chosen
+            // budget to reconcile.
+            maxTools: RangeField.read('f-maxtools') ?? 5,
+            toolCount: document.querySelectorAll('.tool-check:checked').length,
             maxWakes: RangeField.read('f-auto-maxwakes') ?? 12,
             maxErrors: RangeField.read('f-auto-maxerrors') ?? 5,
             memoryOn: document.getElementById('f-memory')?.checked ?? false,

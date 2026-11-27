@@ -234,6 +234,7 @@ I18n.translations.it = {
     'agents.f.maxiter.b.low': '{n} giri: bastano per chiamare uno strumento e rispondere usando il risultato. Veloce ed economico, giusto per un agente monoscopo.',
     'agents.f.maxiter.b.mid': '{n} giri: spazio per concatenare qualche strumento e correggersi. La scelta abituale (default 10).',
     'agents.f.maxiter.b.high': '{n} giri: per catene di ricerca lunghe. Un modello che si impunta li consuma tutti prima di arrendersi con «reached maximum iterations», quindi tieni presente il timeout di risveglio.',
+    'agents.f.maxiter.b.shadowed': 'Attenzione: con {m} chiamate disponibili il turno si ferma comunque a circa {n} azioni, quindi parte di quel budget resta inutilizzabile. Alza le iterazioni almeno a {m}, oppure abbassa il budget dei tool.',
     'agents.f.maxtools.help': 'Budget massimo di esecuzioni di strumenti per tutto il turno. Quando finisce l\'agente smette semplicemente di chiamare strumenti e risponde con quello che ha già — non è un errore. Anche una chiamata con argomenti malformati ne consuma una. Delegare con call_agent costa 1 qui, e il sub-agente poi spende il proprio budget (fino a 5 livelli di profondità).',
     'agents.f.maxtools.b.one': '1 chiamata: una sola occhiata al mondo, poi la risposta. Molto prevedibile, ma anche una chiamata fallita o malformata la consuma.',
     'agents.f.maxtools.b.low': '{n} chiamate: coprono leggi → agisci → verifica. Il default (5) va bene per la maggior parte degli agenti.',
