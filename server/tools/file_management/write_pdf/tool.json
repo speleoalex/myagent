@@ -1,6 +1,7 @@
 {
   "name": "Write PDF",
   "description": "Create a PDF document from Markdown and deliver it to the user: in a chat it appears as a download, on email or Telegram it goes out as an attachment of your reply. Use it whenever the user asks for a PDF, a report or a printable document. Write the whole document in 'content' as Markdown (headings, lists, tables, links). Images: ![caption](file.png) with a workspace file (a screenshot from web_screenshot, a chart from make_chart) or an http(s) address of a picture.",
+  "delivery": true,
   "parameters": {
     "type": "object",
     "properties": {

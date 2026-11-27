@@ -61,10 +61,26 @@ changes, and setting `enabled: false` hides a tool from the agents.
 | `max_output` | `10000` | output characters beyond which the result is truncated |
 | `enabled` | `true` | disabled tools are hidden from agents |
 | `internal` | `false` | `true` = handled by a Python handler in-process, no `run` script (only `call_agent` today) |
+| `delivery` | `false` | `true` = this tool produces a turn's artifact, so it is the one tool a turn out of budget may still call (see below) |
 | `config` | none | settings the user fills in on the Tools page (servers, accounts, passwords); see below |
 
 The folder name is the tool id — it's what agents list in their `tools` array
 and the function name the model calls.
+
+### Delivery tools (`delivery`)
+
+A turn has a hard `max_tool_calls` budget. When it runs out, the executor opens
+ONE reserved round in which the only callable tool is the one that produces the
+turn's artifact, so a turn that spent everything gathering can still hand over
+what it has. That tool is declared here, not hardcoded: `notify_user`,
+`write_pdf`, `file_write`, `file_edit` and `file_append` ship with
+`"delivery": true`. An unattended turn offers `notify_user` (its reply is only
+logged, so nothing else reaches anyone). An attended turn offers the tool the
+model was just refused when that tool is declared — the refused call is the
+strongest signal — and otherwise the first declared one in the order
+`file_write`, `file_edit`, `file_append`, `write_pdf`. Marking a tool `delivery`
+never widens what an agent may call: it only decides which of the tools it
+already holds survives the budget.
 
 ### Settings and credentials (`config`)
 

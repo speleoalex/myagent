@@ -311,6 +311,8 @@ I18n.translations.en = {
     'tools.parametersHint': '(JSON Schema)',
     'tools.timeout': 'Timeout (seconds)',
     'tools.maxOutput': 'Max Output (chars)',
+    'tools.delivery': 'Delivery tool',
+    'tools.deliveryHint': 'Produces the turn\'s result (a file, a PDF, a message). When a turn runs out of tool calls, this is the one tool it may still use.',
     'tools.notFound': 'Tool not found',
     'tools.saved': 'Tool saved',
     'tools.deleted': 'Tool deleted',

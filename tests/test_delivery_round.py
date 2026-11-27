@@ -250,9 +250,136 @@ def case_without_notify_user_unchanged():
     check(done is not None and done["reply"] == "risposta forzata", "forced answer as before")
 
 
+def case_attended_save_round():
+    print("attended, file_write held (declared delivery): the budget buys a save round")
+    ex, prov, ran = _executor([
+        [_call("shell_exec", '{"command": "a"}')],
+        [_call("shell_exec", '{"command": "b"}')],          # over budget
+        [_call("file_write", '{"path": "todo.md", "content": "# TODO"}')],
+        [_text("Scritto todo.md.")],
+    ], unattended=False, tools=("shell_exec", "file_write"))
+    done = asyncio.run(_run(ex))
+    check(ran == ["shell_exec", "file_write"],
+          f"the file is written past the budget: {ran}")
+    want = prompts.SAVE_ROUND.format(tool="file_write")
+    rounds = [r for r in prov.rounds if r["messages"][-1].get("content") == want]
+    check(len(rounds) == 1 and rounds[0]["tools"] == ["file_write"],
+          f"the save round sees file_write alone: {rounds and rounds[0]['tools']}")
+    check(done is not None and done["reply"] == "Scritto todo.md.",
+          "the model's own closing line is the reply")
+
+
+def case_prefers_write_pdf_over_file_write():
+    print("attended, both declared: the REFUSED call picks the round's tool")
+    ex, prov, ran = _executor([
+        [_call("shell_exec", '{"command": "a"}')],           # budget is 1
+        [_call("write_pdf", '{"path": "r.pdf", "content": "# R"}')],  # refused
+        [_call("write_pdf", '{"path": "r.pdf", "content": "# R"}')],  # delivery
+        [_text("Fatto")],
+    ], unattended=False, tools=("shell_exec", "file_write", "write_pdf"))
+    done = asyncio.run(_run(ex))
+    check(prov.rounds[2]["tools"] == ["write_pdf"],
+          f"the tool it was reaching for is the one offered: {prov.rounds[2]['tools']}")
+    check(ran == ["shell_exec", "write_pdf"] and done["reply"] == "Fatto",
+          f"and the same file is then written: {ran}")
+
+    print("attended, both declared, the refused call is a plain reader")
+    ex, prov, ran = _executor([
+        [_call("shell_exec", '{"command": "a"}')],
+        [_call("shell_exec", '{"command": "b"}')],
+        [_text("Fatto")],
+    ], unattended=False, tools=("shell_exec", "file_write", "write_pdf"))
+    asyncio.run(_run(ex))
+    check(prov.rounds[2]["tools"] == ["file_write"],
+          f"with no writer refused, the default order leads with file_write: "
+          f"{prov.rounds[2]['tools']}")
+    seen = prov.rounds[2]["messages"]
+    check(not any(m.get("role") == "tool" and m.get("content") == prompts.NOT_EXECUTED
+                  for m in seen),
+          "a refused call to a tool OUTSIDE the round is not replayed: an "
+          "assistant turn citing absent tools is what some runtimes reject")
+
+
+def case_no_delivery_tool_explains_the_cut():
+    print("attended, no delivery tool: the refusal is explained, not swallowed")
+    ex, prov, ran = _executor([
+        [_call("shell_exec", '{"command": "a"}')],
+        [_call("shell_exec", '{"command": "b"}')],
+        [_text("Ho letto i documenti; non ho potuto scrivere il file.")],
+    ], unattended=False, tools=("shell_exec",))
+    done = asyncio.run(_run(ex))
+    check(ran == ["shell_exec"], f"nothing else runs: {ran}")
+    rounds = [r for r in prov.rounds
+              if r["messages"][-1].get("content") == prompts.BUDGET_EXHAUSTED]
+    check(len(rounds) == 1, "the model is told the budget is gone, exactly once")
+    check(rounds and rounds[0]["tools"] == [],
+          f"that round carries no tool schemas: {rounds and rounds[0]['tools']}")
+    check(done is not None and done["reply"].startswith("Ho letto"),
+          "and the honest answer is the reply")
+
+
+def case_budget_countdown():
+    print("the countdown rides the tool result before the budget runs out")
+    ex, prov, ran = _executor([
+        [_call("shell_exec", '{"command": "a"}')],   # 2 of 3 left -> warn
+        [_text("fatto")],
+    ], unattended=False, tools=("shell_exec", "file_write"), max_tool_calls=3)
+    asyncio.run(_run(ex))
+    results = [m["content"] for m in prov.rounds[1]["messages"]
+               if m.get("role") == "tool"]
+    check(results and "tool budget: 2 of 3" in results[-1],
+          f"the model sees how many calls are left: {results[-1][-120:] if results else None}")
+    check(results and "Keep one for delivering" not in results[-1]
+          and "At zero only file_write still runs" in results[-1],
+          "with a delivery tool held, it NAMES it instead of saying 'keep one'")
+
+    ex, prov, ran = _executor([
+        [_call("shell_exec", '{"command": "a"}')],
+        [_text("fatto")],
+    ], unattended=False, tools=("shell_exec",), max_tool_calls=3)
+    asyncio.run(_run(ex))
+    results = [m["content"] for m in prov.rounds[1]["messages"]
+               if m.get("role") == "tool"]
+    check(results and "At zero only" not in results[-1]
+          and "further calls are refused" in results[-1],
+          "without one, no tool is named and the cut is stated plainly")
+
+
+def case_refused_call_stays_in_the_conversation():
+    print("the refused call is kept, paired with the result it never got")
+    big = "# TODO\n" + ("- una riga di todo molto lunga\n" * 400)   # > 6000 chars
+    args = ('{"path": "todo.md", "content": "%s"}'
+            % big.replace("\n", "\\n"))
+    ex, prov, ran = _executor([
+        [_call("shell_exec", '{"command": "a"}')],                 # budget is 1
+        [_call("file_write", args)],                               # refused
+        [_call("file_write", args)],                               # replayed
+        [_text("Scritto todo.md")],
+    ], unattended=False, tools=("shell_exec", "file_write"))
+    done = asyncio.run(_run(ex))
+    seen = prov.rounds[2]["messages"]
+    assistant = [m for m in seen if m.get("role") == "assistant" and m.get("tool_calls")]
+    results = [m for m in seen if m.get("role") == "tool"]
+    check(bool(assistant), "the assistant turn carrying the call is still there")
+    check(results and results[-1]["content"] == prompts.NOT_EXECUTED,
+          f"and its result says it was not run: {results[-1]['content'][:60] if results else None}")
+    check(assistant and len(assistant[-1]["tool_calls"][0]["function"]["arguments"]) > 6000,
+          "the whole document survives — no size threshold")
+    check(ran == ["shell_exec", "file_write"],
+          f"so the same call, sent again, writes the file: {ran}")
+    check(done is not None and done["reply"] == "Scritto todo.md", "closing line")
+
+
+def case_no_delivery_tool_explains_the_cut_dup():
+    pass
+
+
 if __name__ == "__main__":
     for case in (case_unattended_delivers, case_offer_is_made_once, case_delivery_cap,
                  case_attended_unchanged, case_attended_document_round,
+                 case_attended_save_round, case_prefers_write_pdf_over_file_write,
+                 case_refused_call_stays_in_the_conversation,
+                 case_no_delivery_tool_explains_the_cut, case_budget_countdown,
                  case_without_notify_user_unchanged):
         case()
     if failures:

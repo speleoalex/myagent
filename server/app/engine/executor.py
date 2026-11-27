@@ -76,6 +76,26 @@ _DELIVERY_CALLS_MAX = 3
 # model that just answers ends the turn as before.
 _WRITE_PDF = "write_pdf"
 
+# The reserved round is a CONCEPT, not a pair of ids: any tool can declare
+# itself the one that produces the turn's artifact with `"delivery": true` in
+# its tool.json, and this order only breaks ties between the ones an agent
+# holds. Reported on the Orin, 2026-11-27 by the agent doing the daily work
+# there (deepseek-v4.1-flash, not a small model): a turn spent its tool budget
+# reading records and could not `file_write` the `todo.md` it already had the
+# content for — the round existed, but only for notify_user and write_pdf.
+#
+# The plain writer comes first because the refused call outranks this list
+# anyway (see _delivery_tool): an agent asked for a PDF calls write_pdf, and the
+# call being refused is a better signal than any ordering. Measured end to end
+# against Qwen3-VL-4B: with write_pdf leading, a turn asked for `notes.md` got
+# the PDF tool offered, declined it, and answered in prose.
+_DELIVERY_ORDER = ("file_write", "file_edit", "file_append", _WRITE_PDF)
+
+# How many calls are left when the countdown starts riding the last tool result
+# of a round. Two, because one is the delivery itself: the warning has to arrive
+# while it can still change the model's NEXT decision, not after it.
+_BUDGET_WARN_LEFT = 2
+
 # Cap (chars) on the quoted transcript of history turns another agent answered
 # (see _split_history). Generous on purpose: the user's rule is that the agent
 # sees the whole conversation, and this is the channel those turns travel on.
@@ -492,7 +512,16 @@ class AgentExecutor:
                               if m.get("role") == "user" else "")
                     m = {**m, "content": prefix + restored}
             clean.append(m)
-        return clean + [{"role": "user", "content": _FORCE_ANSWER_PROMPT}]
+        # No tools at all, and the turn may well have been CUT rather than
+        # finished: without saying so, the forced answer apologises for the
+        # wrong thing ("I'll do it next time") instead of naming what is
+        # missing. ONE message and not two: a second user turn right after it
+        # would dilute the first, and a 4B follows the last instruction it
+        # reads. The budget text goes first, the "answer now" rule last.
+        tail = (_FORCE_ANSWER_PROMPT
+                if getattr(self, "budget_hit", "") != "max_tool_calls"
+                else prompts.BUDGET_EXHAUSTED + "\n\n" + _FORCE_ANSWER_PROMPT)
+        return clean + [{"role": "user", "content": tail}]
 
     def _synthesis_temp(self):
         return (self.agent.response_temperature
@@ -1008,8 +1037,17 @@ class AgentExecutor:
             prop = {"type": "string"}
             props["category"] = prop
         prop["enum"] = [e["key"] for e in remaining]
+        # Each line leads with the tools it would switch on, and the group's
+        # prose follows labelled as PURPOSE — not as a second member list. A
+        # group's own description ("read, write, edit… files") tells a small
+        # model nothing about WHERE write_pdf lives, and guessing a category
+        # wrong costs a whole round — reported on the Orin, 2026-11-27. Ids
+        # first, because the prose reads like a second, slightly different
+        # enumeration; "for:" says which one is the list. The cost is about
+        # fifty tokens across the whole catalogue.
         lines = [
-            f"{e['key']}: {e['description']}" if e["description"] else e["key"]
+            f"{e['key']} — tools: {', '.join(e['tool_ids'])}"
+            + (f". For: {e['description']}" if e["description"] else "")
             for e in remaining
         ]
         prop["description"] = ("The category to switch on. Pick by what you "
@@ -1055,11 +1093,100 @@ class AgentExecutor:
             return False
         return (tool_call.get("function") or {}).get("name") == _ACTIVATE_TOOLS
 
-    def _delivery_tool(self, tool_defs: list[dict]) -> str | None:
-        """The one tool the reserved round offers, if this agent holds it:
-        notify_user when nobody reads the reply, write_pdf when somebody does."""
-        wanted = NOTIFY_USER if self.unattended else _WRITE_PDF
-        return wanted if any(d["id"] == wanted for d in tool_defs) else None
+    def _delivery_tool(self, tool_defs: list[dict],
+                       preferred: tuple[str, ...] = ()) -> str | None:
+        """The one tool the reserved round offers, if this agent holds it.
+
+        Which tool is a property of the TOOL, not of the executor: anything
+        whose tool.json says ``"delivery": true`` can be offered. ``preferred``
+        is the strongest signal there is and comes first — the calls the budget
+        just refused. A turn that was reaching for ``file_write`` gets
+        ``file_write``, not whichever writer happens to head ``_DELIVERY_ORDER``.
+        ``_DELIVERY_ORDER`` only breaks the remaining ties.
+
+        An unattended turn is the one case still named here, because what it
+        needs is not an artifact but a RECIPIENT — a wake's reply is only
+        logged, and only notify_user leaves the machine.
+
+        notify_user is excluded from the attended candidates on purpose: the
+        reply already reaches the user, so an attended turn that can no longer
+        work should say so in the reply, not open a second channel."""
+        held = {d["id"]: d for d in tool_defs}
+        if self.unattended:
+            meta = held.get(NOTIFY_USER)
+            if meta is None:
+                return None
+            if not meta.get("delivery"):
+                # A wake's reply is only logged, so notify_user is the agent's
+                # one way out. Losing it must not happen in silence just
+                # because a tool.json lost a flag.
+                log.warning("Agent '%s' holds %s but its tool.json has no "
+                            "\"delivery\": true — unattended turns have nothing "
+                            "to deliver with", self.agent.id, NOTIFY_USER)
+                return None
+            return NOTIFY_USER
+        declared = [tid for tid, d in held.items()
+                    if d.get("delivery") and tid != NOTIFY_USER]
+        for tid in preferred:
+            if tid in declared:
+                return tid
+        for tid in _DELIVERY_ORDER:
+            if tid in declared:
+                return tid
+        # Sorted, not dict order: which tool wins here must be a rule a reader
+        # can predict, not an artifact of how the agent's grant was written.
+        return sorted(declared)[0] if declared else None
+
+    @staticmethod
+    def _delivery_prompt(tool_id: str) -> str:
+        """The words the reserved round uses for THIS tool.
+
+        Three texts and not one template: what a model must be told differs by
+        what it is delivering (one message per recipient, a Markdown document,
+        a file on disk), and a 4B follows a concrete instruction far better
+        than a generic one."""
+        if tool_id == NOTIFY_USER:
+            return prompts.DELIVERY_ROUND
+        if tool_id == _WRITE_PDF:
+            return prompts.DOCUMENT_ROUND
+        return prompts.SAVE_ROUND.format(tool=tool_id)
+
+    def _append_refused(self, messages: list[dict], refused_calls: list[dict],
+                        full_content: str, *, pair_with: str | None) -> None:
+        """Put the model's refused calls back into the conversation, paired with
+        the result they never got.
+
+        Dropping them (what this code did until 2026-11-27) loses the arguments
+        the model composed one iteration ago: measured on Qwen3-VL-4B, with the
+        reserved round offered but the arguments gone, it answers in prose
+        instead of writing the file it had written two seconds earlier.
+
+        Only the calls to ``pair_with`` are kept — the tool the round actually
+        offers. An assistant turn citing a tool that is absent from the request
+        is history-plus-request disagreement some OpenAI-compatible runtimes
+        handle badly, and the reserved round sends ONE schema on purpose: the
+        two rules would fight. ``pair_with`` is None in the round that sends no
+        schema at all (there is nothing left to re-send) and in the text
+        protocol, whose parsed calls carry no id — there the assistant content
+        already holds the call's JSON, so appending it alone loses nothing."""
+        calls = [tc for tc in refused_calls
+                 if pair_with and _tool_call_name(tc) == pair_with]
+        ids = [tc.get("id") for tc in calls]
+        if calls and all(ids) and len(set(ids)) == len(ids):
+            messages.append({"role": "assistant", "content": full_content or None,
+                             "tool_calls": calls})
+            for tc in calls:
+                messages.append({"role": "tool", "tool_call_id": tc["id"],
+                                 "content": prompts.NOT_EXECUTED})
+        elif full_content.strip():
+            if calls:
+                # Falling back is correct (an endpoint that returns calls
+                # without ids must not get synthetic ones we invented) but
+                # silent falling back is not: this is the exact point where a
+                # small model loses the arguments it composed, and the only
+                # trace it leaves is the turn answering in prose.
+                self._debug_log("  NO REPLAY: refused call has no unique id")
+            messages.append({"role": "assistant", "content": full_content})
 
     @staticmethod
     def _delivery_defs(tool_defs: list[dict], tool_id: str | None) -> list[dict]:
@@ -2085,6 +2212,15 @@ class AgentExecutor:
         delivery_round = False
         delivery_offered = False
         delivery_calls = 0
+        # Whether the countdown note has already ridden a tool result this turn
+        # (see the per-call block): once per remaining count is a warning, the
+        # same line twice is noise.
+        budget_warned: set[int] = set()
+        # The extra no-tool round of a turn that ran out of budget with no
+        # delivery tool to reserve (see the budget check). Kept apart from
+        # `delivery_offered` so the two rounds cannot be confused for one
+        # another.
+        honest_round_used = False
         # Which limit cut this turn short, "" when none did. Public: the
         # scheduler records it with the run, because a wake that ran out of
         # budget looks finished — it answered — while part of the task was
@@ -2318,47 +2454,97 @@ class AgentExecutor:
             # flag off _is_gate_call is always False, so this drops to the
             # historical "forget every call".
             if tool_calls and total_tool_calls >= max_tool_calls:
-                free = []
-                for tc in tool_calls:
+                # Indices, not dicts: two identical calls (same name, same
+                # arguments, no id — exactly what a looping small model emits)
+                # are EQUAL, so `tc not in free` would hide the refused twin and
+                # leave the replay below with nothing to hand back.
+                free_idx: set[int] = set()
+                for idx, tc in enumerate(tool_calls):
                     if self._is_gate_call(tc):
-                        free.append(tc)
+                        free_idx.add(idx)
                     elif (delivery_round and _tool_call_name(tc) == delivery_tool
                             and delivery_calls < _DELIVERY_CALLS_MAX):
                         delivery_calls += 1
                         self._debug_log(f"  DELIVERY: {delivery_tool} let past the budget "
                                         f"({delivery_calls}/{_DELIVERY_CALLS_MAX})")
-                        free.append(tc)
-                if len(free) < len(tool_calls):
+                        free_idx.add(idx)
+                free = [tc for i, tc in enumerate(tool_calls) if i in free_idx]
+                if len(free_idx) < len(tool_calls):
                     self.budget_hit = "max_tool_calls"
-                    # The agent holds the delivery tool of this kind of turn
+                    refused_calls = [tc for i, tc in enumerate(tool_calls)
+                                     if i not in free_idx]
+                    refused = ", ".join(_tool_call_name(tc) for tc in refused_calls)
+                    # The agent holds a tool that PRODUCES the turn's artifact
                     # (notify_user unattended, where nobody would read a forced
-                    # answer; write_pdf attended, where the answer cannot be the
-                    # document that was asked for): do not force the answer yet.
-                    # Drop the refused calls, tell the model the budget is gone
-                    # and that ONE tool is left, and send it that schema alone.
-                    # Once per turn, and only while a round is still available.
+                    # answer; a declared writer attended, where the answer
+                    # cannot be the file that was asked for): do not force the
+                    # answer yet. Drop the refused calls, tell the model the
+                    # budget is gone and that ONE tool is left, and send it
+                    # that schema alone. Once per turn, and only while a round
+                    # is still available. The refused names go first in the
+                    # choice: a turn reaching for file_write must not be offered
+                    # write_pdf because a list says so.
                     if not delivery_offered and iterations < self.agent.max_iterations:
-                        delivery_tool = self._delivery_tool(callable_defs)
+                        delivery_tool = self._delivery_tool(
+                            callable_defs,
+                            preferred=tuple(_tool_call_name(tc) for tc in refused_calls))
                     if delivery_tool and not delivery_offered:
                         delivery_offered = delivery_round = True
-                        refused = ", ".join(_tool_call_name(tc) for tc in tool_calls
-                                            if tc not in free)
                         self._debug_log(f"  MAX TOOL CALLS reached ({max_tool_calls}): "
                                         f"refused {refused}; reserving a "
                                         f"{delivery_tool} round")
                         log.warning("Agent '%s' hit max_tool_calls limit (%d); "
                                     "offering a %s round", self.agent.id, max_tool_calls,
                                     delivery_tool)
-                        if full_content.strip():
-                            messages.append({"role": "assistant", "content": full_content})
-                        messages.append({"role": "user", "content": (
-                            prompts.DELIVERY_ROUND if delivery_tool == NOTIFY_USER
-                            else prompts.DOCUMENT_ROUND)})
+                        # Keep the refused calls in the conversation, paired
+                        # with the result they never got (see _append_refused):
+                        # that is what stops a small model from answering in
+                        # prose about the file it had already composed.
+                        self._append_refused(
+                            messages, refused_calls, full_content,
+                            pair_with=(delivery_tool
+                                       if self.provider.supports_tools is not False
+                                       else None))
+                        messages.append({"role": "user",
+                                         "content": self._delivery_prompt(delivery_tool)})
                         system_content, tool_defs, openai_tools = self._prepare_turn(
                             self._delivery_defs(callable_defs, delivery_tool), attachments,
                             memory_context, transcribed=transcribed,
                             foreign_context=foreign_context)
                         messages[0] = {"role": "system", "content": system_content}
+                        continue
+                    if (not honest_round_used and not delivery_offered
+                            and iterations < self.agent.max_iterations):
+                        # No writer to reserve: the turn cannot produce the
+                        # artifact, but it can still be HONEST about it. The
+                        # refused calls used to vanish in silence here and the
+                        # model answered without ever learning why — which is
+                        # how a forced reply ends up promising, for "next time",
+                        # the work that will never happen. One extra no-tool
+                        # round, cheapest of the reserved rounds: no schemas.
+                        #
+                        # `not delivery_offered` is load-bearing: inside a
+                        # delivery round the calls the cap still lets through
+                        # must RUN (not be discarded for an honest answer), and
+                        # the model already knows what is left.
+                        # Its own latch and not `delivery_offered`: this is not
+                        # a delivery round, and nothing downstream may read it
+                        # as one.
+                        honest_round_used = True
+                        self._debug_log(f"  MAX TOOL CALLS reached ({max_tool_calls}): "
+                                        f"refused {refused}; no delivery tool, "
+                                        f"forcing an honest no-tool answer")
+                        log.warning("Agent '%s' hit max_tool_calls limit (%d); "
+                                    "no delivery tool held, forcing the answer",
+                                    self.agent.id, max_tool_calls)
+                        self._append_refused(
+                            messages, refused_calls, full_content, pair_with=None)
+                        messages.append({"role": "user", "content": prompts.BUDGET_EXHAUSTED})
+                        system_content, tool_defs, openai_tools = self._prepare_turn(
+                            [], attachments, memory_context,
+                            transcribed=transcribed, foreign_context=foreign_context)
+                        messages[0] = {"role": "system", "content": system_content}
+                        use_response_temp = True
                         continue
                     self._debug_log(f"  MAX TOOL CALLS reached ({max_tool_calls}), forcing answer")
                     log.warning("Agent '%s' hit max_tool_calls limit (%d)", self.agent.id, max_tool_calls)
@@ -2375,7 +2561,7 @@ class AgentExecutor:
 
             # Execute tool calls and stream results
             call_result_parts = []
-            for tc in tool_calls:
+            for call_idx, tc in enumerate(tool_calls):
                 func_name = tc["function"]["name"]
                 raw_args = tc["function"].get("arguments", "{}")
                 call_id = tc.get("id", "")
@@ -2447,6 +2633,25 @@ class AgentExecutor:
                     repeat_nudged.add(func_name)
                     result += prompts.REPEATED_TOOL_NOTE.format(
                         tool=func_name, n=tool_repeats[func_name])
+                # The countdown a turn cannot see. Rides the LAST result of the
+                # round once few calls are left — same shape as the repeat note,
+                # and for the same reason: native tool calling has no "decide"
+                # nudge to carry it. Finding out at zero is how a turn spends
+                # its whole budget exploring and reaches the delivery with
+                # nothing left (Orin, 2026-11-27: 20 calls of reading, not one
+                # line written). Once per turn, and only while it can still
+                # change the next decision.
+                left = max_tool_calls - total_tool_calls
+                if (left not in budget_warned and 0 < left <= _BUDGET_WARN_LEFT
+                        and not delivery_round and call_idx == len(tool_calls) - 1):
+                    budget_warned.add(left)
+                    deliver_with = self._delivery_tool(callable_defs)
+                    result += prompts.BUDGET_WARNING.format(
+                        left=left, total=max_tool_calls) + (
+                        prompts.BUDGET_WARNING_RESERVE.format(tool=deliver_with)
+                        if deliver_with
+                        else prompts.BUDGET_WARNING_NO_RESERVE)
+                    self._debug_log(f"  BUDGET WARNING: {left} of {max_tool_calls} left")
                 # Rich trace step (full result + nested sub-agent trace). Built
                 # here so the call_agent sub-trace queued by call_agent_handler
                 # is consumed in the same order it was produced. The SSE/

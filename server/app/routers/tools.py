@@ -51,6 +51,10 @@ class ToolCreateRequest(BaseModel):
     script: str = "#!/bin/bash\necho 'Hello from tool'\n"
     timeout: int = 30
     max_output: int = 10000
+    # A delivery tool produces the turn's artifact, so it is the one tool a
+    # turn out of budget may still call (see docs/TOOLS.md). Declared here so
+    # the flag is visible and settable from the UI, not only by hand.
+    delivery: bool = False
     # Optional group folder: the tool is created in tools/<category>/<id> and
     # becomes grantable via the <category>/* wildcard.
     category: str | None = None
@@ -64,6 +68,7 @@ class ToolUpdateRequest(BaseModel):
     timeout: int | None = None
     max_output: int | None = None
     enabled: bool | None = None
+    delivery: bool | None = None
 
 
 @router.get("")
@@ -170,6 +175,8 @@ async def create_tool(req: ToolCreateRequest, request: Request):
         "timeout": req.timeout,
         "max_output": req.max_output,
     }
+    if req.delivery:
+        meta["delivery"] = True
     write_json(tool_dir / "tool.json", meta)  # atomic, like every other store
     _write_run(tool_dir, req.script)
     _registry(request).mark_dirty()
@@ -218,6 +225,11 @@ async def update_tool(tool_id: str, req: ToolUpdateRequest, request: Request):
         meta["max_output"] = req.max_output
     if req.enabled is not None:
         meta["enabled"] = req.enabled
+    if req.delivery is not None:
+        # Only an attended turn is affected by the flag's presence, and a
+        # `false` written explicitly is what lets a user take delivery away
+        # from a tool it was copied from.
+        meta["delivery"] = req.delivery
 
     write_json(tool_json_path, meta)  # atomic
 

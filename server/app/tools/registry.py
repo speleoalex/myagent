@@ -253,8 +253,17 @@ class ToolRegistry:
     def mark_dirty(self) -> None:
         """Make the next query rescan immediately. Every write path (the tools
         router, ensure_override) calls this so its own follow-up reads never
-        see a stale catalog."""
+        see a stale catalog.
+
+        The ``group.json`` mtimes are cleared too, and not out of symmetry: a
+        write that lands within the filesystem's mtime granularity of the read
+        it follows is indistinguishable by mtime alone, so a group.json
+        rewritten twice in a row (a test fixture, an editor saving on top of
+        itself) could keep describing the version before it. The tool cache
+        carries the same risk and is bounded the same way — a handful of small
+        files re-parsed once per explicit write."""
         self._last_scan = 0.0
+        self._group_mtimes.clear()
 
     def _scan(self, force: bool = False) -> None:
         """Rescan both layers.  Only re-reads tool.json files whose mtime (or

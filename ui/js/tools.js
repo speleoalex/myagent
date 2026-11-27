@@ -362,6 +362,13 @@ const ToolsPage = {
                                 <input type="number" class="form-control" id="f-maxout" value="${tool.max_output ?? 10000}" min="100" max="100000">
                             </div>
                         </div>
+                        <div class="form-check mb-3">
+                            <input class="form-check-input" type="checkbox" id="f-delivery" ${tool.delivery ? 'checked' : ''}>
+                            <label class="form-check-label" for="f-delivery">
+                                ${i18n('tools.delivery')}
+                                <small class="text-secondary d-block">${i18n('tools.deliveryHint')}</small>
+                            </label>
+                        </div>
                         <div class="d-flex gap-2">
                             <button type="submit" class="btn btn-primary">${isEdit ? i18n('common.save') : i18n('common.create')}</button>
                             <a href="#/tools" class="btn btn-secondary">${i18n('common.cancel')}</a>
@@ -404,6 +411,7 @@ const ToolsPage = {
                 script: document.getElementById('f-script').value,
                 timeout: parseInt(document.getElementById('f-timeout').value) || 30,
                 max_output: parseInt(document.getElementById('f-maxout').value) || 10000,
+                delivery: document.getElementById('f-delivery').checked,
             };
             // The group is a folder location, fixed at creation (PUT edits in place).
             if (!isEdit) data.category = document.getElementById('f-category').value.trim() || null;

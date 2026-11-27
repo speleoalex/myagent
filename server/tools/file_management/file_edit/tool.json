@@ -1,6 +1,7 @@
 {
   "name": "Edit File",
   "description": "Replace one exact piece of text inside a file that already exists, leaving the rest untouched. Use this instead of file_write whenever you change PART of a file — file_write would make you rewrite the whole thing, and would delete what you never read. 'old_string' must be copied from the file character for character, indentation included (e.g. from file_read), and must appear EXACTLY once: if it appears zero times or several times NOTHING is written and the result tells you what the file really contains. Pass replace_all=true to change every occurrence on purpose; pass an empty new_string to delete the text. The file must exist — create a new one with file_write.",
+  "delivery": true,
   "parameters": {
     "type": "object",
     "properties": {

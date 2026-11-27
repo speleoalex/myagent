@@ -115,6 +115,11 @@ def test_first_payload_is_the_catalogue_alone():
     # A described group states what it is FOR; a flat tool is its own name.
     assert "read, write, edit" in prop["description"], prop["description"]
     assert "shell_exec" in prop["description"]
+    # …and each line names the tools it would switch on. A group's own
+    # description cannot tell a small model where write_pdf lives, and guessing
+    # the category wrong costs a whole round.
+    assert "— tools: file_append, file_edit" in prop["description"], prop["description"]
+    assert "write_pdf" in prop["description"], prop["description"]
     print(f"ok: first payload is the gate alone, {ratio:.0%} of the full schemas")
 
 

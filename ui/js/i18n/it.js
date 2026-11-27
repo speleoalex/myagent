@@ -311,6 +311,8 @@ I18n.translations.it = {
     'tools.parametersHint': '(JSON Schema)',
     'tools.timeout': 'Timeout (secondi)',
     'tools.maxOutput': 'Output Massimo (caratteri)',
+    'tools.delivery': 'Tool di consegna',
+    'tools.deliveryHint': 'Produce il risultato del turno (un file, un PDF, un messaggio). Quando un turno esaurisce le chiamate, è l\'unico tool che può ancora usare.',
     'tools.notFound': 'Strumento non trovato',
     'tools.saved': 'Strumento salvato',
     'tools.deleted': 'Strumento eliminato',

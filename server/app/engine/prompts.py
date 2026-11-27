@@ -142,6 +142,84 @@ DOCUMENT_ROUND = (
     "write your answer. Do not call anything else."
 )
 
+#: Attended turn of an agent holding a write tool that is NOT write_pdf, out of
+#: budget. Same reserved round as DOCUMENT_ROUND, different artifact: the file
+#: the user asked for. Observed on the Orin, 2026-11-27 (agent
+#: `assistente-alessandro`, deepseek-v4.1-flash): a turn spent its 20 calls
+#: reading medical records, had the whole `todo.md` in its head, and could not
+#: write it — the round existed, but only for two hardcoded tools.
+#:
+#: "If the target path is already known" and not "if the work belongs in a
+#: file": with the budget at zero the model cannot go looking for the path, and
+#: a turn that guesses one writes the file where nobody will find it. The model
+#: that reported the bug said it had no criterion for "belongs in a file" and
+#: stalled on it when asked to review this wording.
+SAVE_ROUND = (
+    "TOOL BUDGET EXHAUSTED: that call was not run and no other tool will run in "
+    "this turn, with ONE exception: {tool}. Answer NOW with what you have "
+    "gathered so far. If the target path is already known from earlier in this "
+    "chat, write the file NOW with {tool}, stating in it what is missing rather "
+    "than inventing it. Otherwise answer in chat. Use {tool} at most once — do "
+    "not call anything else."
+)
+
+#: The countdown a turn never sees by itself: how many calls are left. Emitted
+#: on the last tool result of a round once few remain, because finding out at
+#: zero is how a turn spends its whole budget exploring and arrives at the
+#: delivery with nothing left. The reserve clause NAMES the tool: the agent that
+#: reported the bug (deepseek-v4.1-flash on the Orin, 2026-11-27) said that
+#: reading "keep one for the delivery" without knowing which tool it is makes it
+#: spend a call asking itself. The older wording also said "keep one" and "at
+#: zero it still runs", which cancel each other out.
+BUDGET_WARNING = "\n\n[tool budget: {left} of {total} tool calls left in this turn."
+BUDGET_WARNING_RESERVE = (
+    " At zero only {tool} still runs, to deliver. Spend these on what the "
+    "answer still needs.]"
+)
+BUDGET_WARNING_NO_RESERVE = (
+    " At zero the turn is cut and further calls are refused. Spend them on "
+    "what the answer still needs.]"
+)
+
+#: Attended turn that runs out of budget and holds NO delivery tool, so there is
+#: no reserved round to offer. Until this existed the refused calls were dropped
+#: in silence and the model was forced to answer without knowing why — and an
+#: answer that does not know the turn is over promises the work for "next time",
+#: which the user reads as done. One extra no-tool round buys an honest reply.
+#:
+#: "in a single sentence, then give the rest of your answer normally" and not
+#: "say so in one line": the agent reported that a small model reads the second
+#: as "the whole answer is one line" and throws away the work it already did
+#: (Orin, 2026-11-27 — the reporter runs deepseek-v4.1-flash, the target is the
+#: 4B, so the wording is aimed at the weaker reader).
+BUDGET_EXHAUSTED = (
+    "TOOL BUDGET EXHAUSTED: those calls were not run and no tool will run in "
+    "this turn. Answer NOW with what you have gathered so far, in your normal "
+    "prose — the user reads this reply. Do NOT promise to do the work later and "
+    "do NOT describe the call you were about to make. If part of the request "
+    "could not be completed, say so and why (the tool budget ran out) in a "
+    "single sentence, then give the rest of your answer normally."
+)
+
+#: The result a call refused by the budget is paired with, when the refused
+#: call is kept in the conversation instead of dropped. The refused turn used to
+#: be removed outright, and with it the arguments the model had just composed —
+#: measured on Qwen3-VL-4B: offered the reserved round but missing its own
+#: arguments, it answers in prose instead of writing the file it had already
+#: written. The pairing is the protocol's own shape (an assistant turn with
+#: tool_calls needs its results) and keeps a long document whole.
+#:
+#: Three things this text must NOT do: open with ERROR (a small model reads it
+#: as "something failed, apologise", which is the opposite of what the reserved
+#: round wants), say the budget "ran out" flatly (inside that round this one
+#: tool is still callable, so it would be false where it is read), or leave the
+#: model without an action. Hence the closing sentence naming the exception.
+NOT_EXECUTED = (
+    "NOT RUN: the turn's tool budget was already spent when you asked for this, "
+    "so nothing was written or sent. If your answer still needs it, call it "
+    "again now — for this one tool the round is still open."
+)
+
 #: Shown as the reply when the loop ran out of iterations without answering.
 NO_FINAL_RESPONSE = "[Agent reached maximum iterations without a final response]"
 

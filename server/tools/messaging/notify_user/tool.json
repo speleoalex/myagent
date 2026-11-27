@@ -2,6 +2,7 @@
   "name": "Notify User",
   "description": "Send a message to somebody in the address book: a person on their messaging channel (Telegram, email), or a device that reads it aloud. Use it to tell someone something proactively: when you run unattended your reply text reaches nobody, this does. The subject goes in 'subject' and the files in 'attachments', never inside 'text'.",
   "internal": true,
+  "delivery": true,
   "parameters": {
     "type": "object",
     "properties": {
