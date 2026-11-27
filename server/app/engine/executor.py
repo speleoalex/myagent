@@ -2470,7 +2470,16 @@ class AgentExecutor:
             # spend an agent's whole budget on switching tools on. With the
             # flag off _is_gate_call is always False, so this drops to the
             # historical "forget every call".
-            if tool_calls and total_tool_calls >= max_tool_calls:
+            #
+            # The last allowed iteration is checked here too, and for the same
+            # reason: it is the point where the turn stops being able to work,
+            # so it is the point where it must stop being able to work SILENTLY.
+            # The Orin, 2026-11-27, second run: 15 calls of 20 and 10 iterations
+            # of 10, a turn holding file_write, and a report file never written
+            # because the two limits were checked in different places.
+            budget_out = total_tool_calls >= max_tool_calls
+            iterations_out = iterations >= self.agent.max_iterations
+            if tool_calls and (budget_out or iterations_out):
                 # Indices, not dicts: two identical calls (same name, same
                 # arguments, no id — exactly what a looping small model emits)
                 # are EQUAL, so `tc not in free` would hide the refused twin and
@@ -2487,7 +2496,8 @@ class AgentExecutor:
                         free_idx.add(idx)
                 free = [tc for i, tc in enumerate(tool_calls) if i in free_idx]
                 if len(free_idx) < len(tool_calls):
-                    self.budget_hit = "max_tool_calls"
+                    self.budget_hit = ("max_tool_calls" if budget_out
+                                       else "max_iterations")
                     refused_calls = [tc for i, tc in enumerate(tool_calls)
                                      if i not in free_idx]
                     refused = ", ".join(_tool_call_name(tc) for tc in refused_calls)
@@ -2507,12 +2517,11 @@ class AgentExecutor:
                             preferred=tuple(_tool_call_name(tc) for tc in refused_calls))
                     if delivery_tool and not delivery_offered:
                         delivery_offered = delivery_round = True
-                        self._debug_log(f"  MAX TOOL CALLS reached ({max_tool_calls}): "
-                                        f"refused {refused}; reserving a "
-                                        f"{delivery_tool} round")
-                        log.warning("Agent '%s' hit max_tool_calls limit (%d); "
-                                    "offering a %s round", self.agent.id, max_tool_calls,
-                                    delivery_tool)
+                        self._debug_log(
+                            f"  {self.budget_hit} reached: refused {refused}; "
+                            f"reserving a {delivery_tool} round")
+                        log.warning("Agent '%s' hit %s; offering a %s round",
+                                    self.agent.id, self.budget_hit, delivery_tool)
                         # Keep the refused calls in the conversation, paired
                         # with the result they never got (see _append_refused):
                         # that is what stops a small model from answering in
@@ -2548,15 +2557,16 @@ class AgentExecutor:
                         # a delivery round, and nothing downstream may read it
                         # as one.
                         honest_round_used = True
-                        self._debug_log(f"  MAX TOOL CALLS reached ({max_tool_calls}): "
-                                        f"refused {refused}; no delivery tool, "
-                                        f"forcing an honest no-tool answer")
-                        log.warning("Agent '%s' hit max_tool_calls limit (%d); "
-                                    "no delivery tool held, forcing the answer",
-                                    self.agent.id, max_tool_calls)
+                        self._debug_log(f"  {self.budget_hit} reached: refused "
+                                        f"{refused}; no delivery tool, forcing an "
+                                        f"honest no-tool answer")
+                        log.warning("Agent '%s' hit %s; no delivery tool held, "
+                                    "forcing the answer", self.agent.id, self.budget_hit)
                         self._append_refused(
                             messages, refused_calls, full_content, pair_with=None)
-                        messages.append({"role": "user", "content": prompts.BUDGET_EXHAUSTED})
+                        messages.append({"role": "user", "content": (
+                            prompts.BUDGET_EXHAUSTED if budget_out
+                            else prompts.TURN_CUT)})
                         system_content, tool_defs, openai_tools = self._prepare_turn(
                             [], attachments, memory_context,
                             transcribed=transcribed, foreign_context=foreign_context)

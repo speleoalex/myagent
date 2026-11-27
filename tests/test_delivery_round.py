@@ -260,6 +260,44 @@ def case_both_limits_reached_together():
     check(ex.budget_hit == "max_tool_calls", f"the cut is recorded: {ex.budget_hit!r}")
 
 
+def case_iteration_cut_opens_the_round():
+    print("the turn reaches its last iteration with calls left: the round opens")
+    # The Orin, 2026-11-27, second run: 15 calls of 20 and 10 iterations of 10.
+    # The budget branch never fired, so no round was offered and the file the
+    # model had composed was never written.
+    ex, prov, ran = _executor([
+        [_call("shell_exec", '{"command": "a"}')],                        # iter 1
+        [_call("shell_exec", '{"command": "b"}')],                        # iter 2 = last
+        [_call("file_write", '{"path": "r.md", "content": "# R"}')],      # the round
+        [_text("Scritto r.md")],
+    ], unattended=False, tools=("shell_exec", "file_write"),
+        max_tool_calls=10, max_iterations=2)
+    done = asyncio.run(_run(ex))
+    check(prov.rounds[2]["tools"] == ["file_write"],
+          f"the delivery round is opened on the iteration cut: {prov.rounds[2]['tools']}")
+    check(ran == ["shell_exec", "file_write"],
+          f"and the file is written: {ran}")
+    check(done is not None and done["reply"] == "Scritto r.md", "closing line")
+    check(ex.budget_hit == "max_iterations",
+          f"the cut is recorded as the ITERATION one: {ex.budget_hit!r}")
+
+
+def case_iteration_cut_without_a_writer():
+    print("iteration cut, no delivery tool: the honest round uses the right words")
+    ex, prov, ran = _executor([
+        [_call("shell_exec", '{"command": "a"}')],
+        [_call("shell_exec", '{"command": "b"}')],
+        [_text("Ho letto il codice; il turno è finito.")],
+    ], unattended=False, tools=("shell_exec",),
+        max_tool_calls=10, max_iterations=2)
+    done = asyncio.run(_run(ex))
+    rounds = [r for r in prov.rounds
+              if r["messages"][-1].get("content") == prompts.TURN_CUT]
+    check(len(rounds) == 1, "the model is told the ROUNDS are gone")
+    check(rounds and rounds[0]["tools"] == [], "with no schemas")
+    check(done is not None and done["reply"].startswith("Ho letto"), "honest answer")
+
+
 def case_without_notify_user_unchanged():
     print("unattended but notify_user not held: nothing to offer")
     ex, prov, ran = _executor([
@@ -403,6 +441,8 @@ if __name__ == "__main__":
                  case_refused_call_stays_in_the_conversation,
                  case_no_delivery_tool_explains_the_cut, case_budget_countdown,
                  case_both_limits_reached_together,
+                 case_iteration_cut_opens_the_round,
+                 case_iteration_cut_without_a_writer,
                  case_without_notify_user_unchanged):
         case()
     if failures:

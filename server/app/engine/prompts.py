@@ -120,9 +120,15 @@ MALFORMED_CALL = (
 #: this buys one more round with notify_user as the only tool. The two
 #: instructions that matter: deliver what there IS (a partial report beats
 #: none), and say what is missing rather than pretend.
+#:
+#: The opening is deliberately NEUTRAL — "this turn is over", not "the budget is
+#: exhausted" — because the same round is opened by two different cuts (calls
+#: spent, or the last iteration reached) and the instruction is identical for
+#: both. Naming the wrong one is not harmless: an agent told "budget" reported
+#: that to its user while the actual limit was the iteration cap.
 DELIVERY_ROUND = (
-    "TOOL BUDGET EXHAUSTED: that call was not run and no other tool will run in "
-    "this turn, with ONE exception: notify_user. Nobody reads this reply, so "
+    "THIS TURN IS OVER: that call was not run and no other tool will run in it, "
+    "with ONE exception: notify_user. Nobody reads this reply, so "
     "deliver NOW, with notify_user, what you have gathered so far — the findings "
     "or the partial report, plus one line naming what could not be completed and "
     "why (the tool budget ran out). One call per recipient. Do not call anything "
@@ -134,8 +140,8 @@ DELIVERY_ROUND = (
 #: for. A model that was not asked for one just answers, and the turn ends
 #: exactly as a forced answer would.
 DOCUMENT_ROUND = (
-    "TOOL BUDGET EXHAUSTED: that call was not run and no other tool will run in "
-    "this turn, with ONE exception: write_pdf. Answer NOW with what you have "
+    "THIS TURN IS OVER: that call was not run and no other tool will run in it, "
+    "with ONE exception: write_pdf. Answer NOW with what you have "
     "gathered so far. If the user asked for a PDF, a report or a document, do "
     "not answer in prose: call write_pdf with the whole document in Markdown, "
     "stating in it what is missing rather than inventing it. Otherwise just "
@@ -155,8 +161,8 @@ DOCUMENT_ROUND = (
 #: that reported the bug said it had no criterion for "belongs in a file" and
 #: stalled on it when asked to review this wording.
 SAVE_ROUND = (
-    "TOOL BUDGET EXHAUSTED: that call was not run and no other tool will run in "
-    "this turn, with ONE exception: {tool}. Answer NOW with what you have "
+    "THIS TURN IS OVER: that call was not run and no other tool will run in it, "
+    "with ONE exception: {tool}. Answer NOW with what you have "
     "gathered so far. If the target path is already known from earlier in this "
     "chat, write the file NOW with {tool}, stating in it what is missing rather "
     "than inventing it. Otherwise answer in chat. Use {tool} at most once — do "
