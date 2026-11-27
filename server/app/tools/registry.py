@@ -261,9 +261,12 @@ class ToolRegistry:
         rewritten twice in a row (a test fixture, an editor saving on top of
         itself) could keep describing the version before it. The tool cache
         carries the same risk and is bounded the same way — a handful of small
-        files re-parsed once per explicit write."""
+        files re-parsed once per explicit write. Only write paths call this
+        (the tools router, ensure_override, the agent package installer), so
+        the re-parse never rides a read."""
         self._last_scan = 0.0
         self._group_mtimes.clear()
+        self._mtimes.clear()
 
     def _scan(self, force: bool = False) -> None:
         """Rescan both layers.  Only re-reads tool.json files whose mtime (or
