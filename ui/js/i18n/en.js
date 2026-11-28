@@ -731,6 +731,8 @@ I18n.translations.en = {
     'chat.toolCountMany': '{n} tools',
     'chat.modelDefault': 'Default model',
     'chat.modelEffective': 'Answering: {model}',
+    'chat.modelPinned': 'This agent answers with {model}: its own model wins over this pick, which applies to agents left on Default.',
+    'chat.modelPinnedTitle': 'This agent pins its own model — the pick here cannot change it.',
     'chat.modelEffectiveAuto': 'Default: {model} (the automatically chosen agent may use another)',
     'chat.modelTitle': 'Model for this chat only — agents pinned to a specific model keep it',
     'chat.agentAuto': 'Auto (pick per message)',

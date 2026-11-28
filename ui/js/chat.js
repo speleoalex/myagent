@@ -605,8 +605,26 @@ const ChatPage = {
      * message, so the server's answer is only the default, and says so. */
     _showEffectiveModel(caps) {
         const el = document.getElementById('model-effective');
-        if (!el) return;
+        const sel = document.getElementById('model-select');
         const name = caps && caps.model_name;
+        // An agent that pins its own model wins over this pick (the rule lives
+        // in resolve_model_for_agent, and the server has already applied it when
+        // it answers this endpoint). So a selector that still looks editable is
+        // a control that cannot work: observed on the Orin, 2026-11-28 — "ho
+        // scelto qwen3-vl-4b ma rispondeva deepseek", with the pick silently
+        // ignored because that agent was pinned.
+        const pinned = !!(this.modelOverride && name && caps.model_id
+                          && caps.model_id !== this.modelOverride);
+        if (sel) {
+            sel.disabled = pinned;
+            sel.title = pinned ? i18n('chat.modelPinnedTitle') : '';
+        }
+        if (!el) return;
+        el.classList.toggle('text-warning-emphasis', pinned);
+        if (pinned) {
+            el.textContent = i18n('chat.modelPinned', { model: name });
+            return;
+        }
         el.textContent = !name ? ''
             : i18n(this.currentAgentId === 'auto' ? 'chat.modelEffectiveAuto' : 'chat.modelEffective',
                    { model: name });

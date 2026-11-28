@@ -731,6 +731,8 @@ I18n.translations.it = {
     'chat.toolCountMany': '{n} strumenti',
     'chat.modelDefault': 'Modello predefinito',
     'chat.modelEffective': 'Risponde: {model}',
+    'chat.modelPinned': 'Questo agente risponde con {model}: il suo modello vince su questa scelta, che vale per gli agenti lasciati su Default.',
+    'chat.modelPinnedTitle': 'Questo agente fissa il suo modello — questa scelta non può cambiarlo.',
     'chat.modelEffectiveAuto': 'Predefinito: {model} (l\'agente scelto in automatico può usarne un altro)',
     'chat.modelTitle': 'Modello solo per questa chat — gli agenti con un modello fissato lo mantengono',
     'chat.agentAuto': 'Auto (sceglie l\'agente)',
